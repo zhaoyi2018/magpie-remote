@@ -1,6 +1,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { rows: [], selected: null, online: false, tab: "forwards", busy: new Map(), errors: new Map(), cancelled: new Set() };
+  const state = { rows: [], selected: null, online: false, tab: "connection", busy: new Map(), errors: new Map(), cancelled: new Set() };
+  let listCollapsed = false;
   const base = new URL("./", location.href);
   const token = base.pathname.split("/")[1];
   let refreshing = false;
@@ -31,6 +32,33 @@
   function active(session) { return ["connected", "connecting"].includes(session.state); }
   function endpoint(host, port) { return `${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`; }
   const labels = { connecting: "正在连接", connected: "已连接", disconnected: "未连接", failed: "连接失败", listening: "运行中", starting: "启动中", stopping: "停止中", stopped: "未启动" };
+  function viewState(row) {
+    const busy = state.busy.get(row.connection.id);
+    return busy?.name === "connect" && row.session.state !== "connected" ? "connecting" : row.session.state;
+  }
+  function needsSessionSecret(connection) {
+    return !connection.identityFile && !connection.agent && !connection.passwordEnv;
+  }
+  function preferredTab(row) {
+    if (!row) return "connection";
+    return needsSessionSecret(row.connection) && !active({ state: viewState(row) }) ? "credentials" : "connection";
+  }
+  function isNarrow() { return matchMedia("(max-width: 760px)").matches; }
+  function applyLayout() {
+    const collapsed = isNarrow() && listCollapsed && Boolean(selected());
+    $("app-layout").classList.toggle("list-collapsed", collapsed);
+    $("narrow-bar").hidden = !(isNarrow() && selected());
+    $("toggle-list").setAttribute("aria-expanded", String(!collapsed));
+    $("toggle-list").textContent = collapsed ? "服务器列表" : "收起列表";
+    const current = selected();
+    $("narrow-current").textContent = current ? current.connection.name : "";
+  }
+  function syncCredentialStatus() {
+    const parts = [];
+    if ($("login-password").value) parts.push("已填写密码");
+    if ($("login-passphrase").value) parts.push("已填写私钥口令");
+    $("credential-status").textContent = parts.length ? `${parts.join(" · ")}，连接时使用，不会保存` : "";
+  }
 
   async function request(path, options = {}, timeout = 50000) {
     const controller = new AbortController();
@@ -54,23 +82,34 @@
       body: JSON.stringify({ method, args, ...(credentials && { credentials }) }),
     })).result;
   }
+  function setService(online) {
+    $("service-state").textContent = online ? "管理服务在线" : "管理服务离线";
+    $("service-state").classList.toggle("is-online", online);
+    $("service-state").classList.toggle("is-offline", !online);
+  }
   async function refresh() {
     if (refreshing) return;
     refreshing = true;
+    const previous = state.selected;
     try {
       const snapshot = await request("api/snapshot", {}, 5000);
       state.rows = snapshot.connections;
       state.online = true;
       if (!selected()) state.selected = state.rows[0]?.connection.id ?? null;
       $("last-updated").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN")}`;
-      $("service-state").textContent = "● 管理服务在线";
+      setService(true);
       $("service-error").hidden = true;
     } catch {
       state.online = false;
       $("service-error").hidden = false;
-      $("service-state").textContent = "管理服务离线";
+      setService(false);
       $("last-updated").textContent = "当前显示最后读取的状态";
-    } finally { refreshing = false; render(); }
+    } finally {
+      refreshing = false;
+      const picked = selected();
+      if (picked && picked.connection.id !== previous) setTab(preferredTab(picked));
+      render();
+    }
   }
 
   async function run(id, name, operation, message) {
@@ -94,45 +133,58 @@
     const query = $("search").value.trim().toLowerCase();
     $("connection-count").textContent = state.rows.length;
     $("connection-list").replaceChildren();
-    for (const row of state.rows.filter(({ connection }) => `${connection.name} ${connection.host} ${connection.username}`.toLowerCase().includes(query))) {
-      const { connection, session } = row;
+    for (const row of state.rows.filter(({ connection }) => `${connection.name} ${connection.username}@${endpoint(connection.host, connection.port)}`.toLowerCase().includes(query))) {
+      const { connection } = row;
+      const sessionState = viewState(row);
+      const address = `${connection.username}@${endpoint(connection.host, connection.port)}`;
       const card = button("", () => {
         state.selected = connection.id;
         $("login-password").value = "";
         $("login-passphrase").value = "";
-        setTab("forwards");
+        if (isNarrow()) listCollapsed = true;
+        setTab(preferredTab(row));
         render();
       }, "connection-card");
       card.setAttribute("aria-current", String(connection.id === state.selected));
-      card.setAttribute("aria-label", `${connection.name}，${labels[session.state] ?? session.state}`);
+      card.setAttribute("aria-label", `${connection.name}，${address}，${labels[sessionState] ?? sessionState}`);
       const title = element("div", "card-title");
-      const dot = element("span", `state-dot ${session.state}`);
-      dot.title = labels[session.state] ?? session.state;
-      title.append(element("span", "", connection.name), dot);
-      card.append(title, element("div", "card-address mono", `${connection.username}@${connection.host}`));
+      const badge = element("span", `badge ${sessionState === "failed" ? "failed error" : sessionState}`, labels[sessionState] ?? sessionState);
+      title.append(element("span", "card-name", connection.name), badge);
+      const addressNode = element("div", "card-address mono", address);
+      addressNode.title = address;
+      card.append(title, addressNode);
       $("connection-list").append(card);
     }
     if (!$("connection-list").children.length) $("connection-list").append(element("p", "no-matches", query ? "没有匹配的服务器" : "尚未添加服务器"));
     const connected = state.rows.filter((row) => row.session.state === "connected").length;
     const forwards = state.rows.reduce((sum, row) => sum + row.session.forwards.filter((rule) => rule.state === "listening").length, 0);
     $("summary").textContent = connected ? `${connected} 台已连接 · ${forwards} 条转发运行中` : "尚未连接服务器";
+    $("summary").closest(".sidebar-foot").classList.toggle("is-live", connected > 0);
     const row = selected();
     $("empty-state").hidden = Boolean(row);
     $("connection-detail").hidden = !row;
+    applyLayout();
     if (!row) return;
     const { connection, session } = row;
     const busy = state.busy.get(connection.id);
-    const sessionState = busy?.name === "connect" && session.state !== "connected" ? "connecting" : session.state;
+    const sessionState = viewState(row);
     $("detail-name").textContent = connection.name;
     $("detail-address").textContent = `${connection.username}@${endpoint(connection.host, connection.port)}`;
-    $("detail-state").className = `badge ${sessionState}`;
+    $("detail-state").className = `badge ${sessionState === "failed" ? "failed error" : sessionState}`;
     $("detail-state").textContent = labels[sessionState] ?? sessionState;
     $("connect").textContent = sessionState === "connecting" ? "正在连接…" : "连接服务器";
     $("connect").disabled = !state.online || active({ state: sessionState }) || Boolean(busy);
     $("disconnect").disabled = !state.online || !active({ state: sessionState });
     $("disconnect").textContent = sessionState === "connecting" ? "取消连接" : "断开连接";
-    $("credentials").hidden = active({ state: sessionState });
-    if (!connection.identityFile && !connection.agent && !connection.passwordEnv && !active({ state: sessionState })) $("credentials").open = true;
+    const sessionActive = active({ state: sessionState });
+    $("login-password").disabled = sessionActive;
+    $("login-passphrase").disabled = sessionActive;
+    $("credentials-hint").textContent = sessionActive
+      ? "当前会话进行中。凭据只在下次连接时提交，不会保存。"
+      : needsSessionSecret(connection)
+        ? "此连接未保存密码。连接前可在这里填写本次登录密码，内容不会写入配置。"
+        : "可选。密码或私钥口令只用于此次连接，不会写入配置。";
+    syncCredentialStatus();
     $("connection-time").textContent = session.state === "connected" && session.connectedAt ? `连接于 ${new Date(session.connectedAt).toLocaleTimeString("zh-CN")}` : "";
     const error = state.errors.get(connection.id) ?? (session.state === "failed" ? session.lastError : "");
     $("operation-error").textContent = error ?? "";
@@ -202,7 +254,7 @@
 
   function setTab(tab) {
     state.tab = tab;
-    for (const name of ["forwards", "settings"]) {
+    for (const name of ["connection", "credentials", "forwards"]) {
       $("tab-" + name).setAttribute("aria-selected", String(tab === name));
       $("panel-" + name).hidden = tab !== name;
     }
@@ -256,9 +308,9 @@
       await call("save_connection", { connection });
       state.selected = connection.id;
       $("connection-editor").close();
-      setTab("forwards");
       toast("连接配置已保存");
       await refresh();
+      setTab(preferredTab(selected()));
     } catch (error) {
       $("profile-error").textContent = error.message;
       $("profile-error").hidden = false;
@@ -323,8 +375,19 @@
   $("rule-direction").addEventListener("change", rulePreview);
   $("search").addEventListener("input", render);
   $("refresh").addEventListener("click", refresh);
+  $("tab-connection").addEventListener("click", () => setTab("connection"));
+  $("tab-credentials").addEventListener("click", () => setTab("credentials"));
   $("tab-forwards").addEventListener("click", () => setTab("forwards"));
-  $("tab-settings").addEventListener("click", () => setTab("settings"));
+  for (const id of ["login-password", "login-passphrase"]) $(id).addEventListener("input", syncCredentialStatus);
+  $("toggle-list").addEventListener("click", () => {
+    if (!selected()) return;
+    listCollapsed = !$("app-layout").classList.contains("list-collapsed");
+    applyLayout();
+  });
+  matchMedia("(max-width: 760px)").addEventListener("change", () => {
+    if (!isNarrow()) listCollapsed = false;
+    applyLayout();
+  });
   $("connect").addEventListener("click", () => {
     const row = selected();
     if (!row) return;

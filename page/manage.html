@@ -3,52 +3,148 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SSH 连接管理</title>
+  <title>SSH 连接</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="app.css">
   <script src="theme.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand"><img src="icon.svg" width="32" height="32" alt=""><div><strong>远程连接</strong><span>SSH CONNECTIONS</span></div></div>
-    <div class="top-actions"><span id="service-state" class="service-state">正在同步</span><button class="button subtle" id="refresh" type="button">刷新</button></div>
-  </header>
-  <div id="service-error" class="service-error" role="alert" hidden><span>管理服务已断开，请重新打开页面。</span><button id="reopen" class="button" type="button">重新打开</button></div>
-  <div class="app-layout">
-    <aside class="sidebar">
-      <div class="sidebar-heading"><h1>我的服务器 <span id="connection-count">0</span></h1><button id="new-connection" class="icon-button" type="button" aria-label="新增连接" title="新增连接">＋</button></div>
-      <label class="search"><span class="sr-only">搜索服务器</span><input id="search" type="search" placeholder="搜索名称或地址" autocomplete="off"></label>
-      <div id="connection-list" class="connection-list" aria-label="服务器列表"></div>
-      <div class="sidebar-foot"><span class="green-dot"></span><span id="summary">尚未连接服务器</span></div>
-    </aside>
-    <main class="workspace">
-      <section id="empty-state" class="empty-state">
-        <div class="empty-icon">↔</div><h2>把远程服务，连到眼前</h2>
-        <p>添加 SSH 服务器，连接后即可配置本地与远程端口转发。</p>
-        <button id="empty-add" class="button primary" type="button">＋ 添加第一台服务器</button>
-        <div class="empty-directions"><div><b>c2s · 本地转发</b><span>在本地访问服务器上的服务</span></div><div><b>s2c · 远程转发</b><span>让服务器访问你的本地服务</span></div></div>
-      </section>
-      <section id="connection-detail" hidden>
-        <div class="detail-heading"><div><div class="eyebrow">SSH CONNECTION</div><h2 id="detail-name"></h2><p id="detail-address" class="mono muted"></p></div><span id="detail-state" class="badge"></span></div>
-        <div class="connection-controls"><button id="connect" class="button primary" type="button">连接服务器</button><button id="disconnect" class="button" type="button" disabled>断开连接</button><span id="connection-time" class="muted"></span></div>
-        <details id="credentials" class="credentials"><summary>本次登录凭据 <span>仅用于此次连接，不保存</span></summary><div class="two-columns"><label>登录密码<input id="login-password" type="password" autocomplete="off" placeholder="使用密码登录时填写"></label><label>私钥口令<input id="login-passphrase" type="password" autocomplete="off" placeholder="加密私钥需要时填写"></label></div></details>
-        <div id="operation-error" class="operation-error" role="alert" hidden></div>
-        <div class="detail-tabs" role="tablist" aria-label="连接详情"><button id="tab-forwards" type="button" role="tab" aria-selected="true" aria-controls="panel-forwards">端口转发 <span id="forward-count">0</span></button><button id="tab-settings" type="button" role="tab" aria-selected="false" aria-controls="panel-settings">连接配置</button></div>
-        <section id="panel-forwards" role="tabpanel" aria-labelledby="tab-forwards">
-          <div class="section-heading"><div><h3>端口转发规则</h3><p>保存规则后，可在 SSH 连接成功时启动，也会随下次连接自动启动。</p></div><button id="new-forward" class="button" type="button">＋ 添加转发</button></div>
-          <div class="table-wrap"><table><thead><tr><th>名称 / 方向</th><th>监听地址</th><th></th><th>目标地址</th><th>状态</th><th class="actions-heading">操作</th></tr></thead><tbody id="forward-list"></tbody></table></div>
-          <div id="forward-empty" class="forward-empty"><span>⇄</span><h4>还没有端口转发</h4><p>把服务器上的服务带到本地，或把本地服务分享给服务器。</p><button id="empty-forward" class="button" type="button">添加转发规则</button></div>
-          <div class="direction-guide"><div><span class="direction-tag">c2s / -L</span><p><b>客户端监听 → 服务器目标</b><br>例如，在本地打开远程 Web 服务。</p></div><div><span class="direction-tag blue">s2c / -R</span><p><b>服务器监听 → 客户端目标</b><br>例如，让远端应用连接本地 Magpie。</p></div></div>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="icon.svg" width="28" height="28" alt="">
+        <div>
+          <strong>SSH 连接</strong>
+          <span>Magpie</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span id="service-state" class="service-state">正在同步</span>
+        <button class="button subtle" id="refresh" type="button">刷新</button>
+      </div>
+    </header>
+    <div id="service-error" class="service-error" role="alert" hidden>
+      <span>管理服务已断开，请重新打开页面。</span>
+      <button id="reopen" class="button" type="button">重新打开</button>
+    </div>
+    <div class="app-layout" id="app-layout">
+      <aside class="sidebar" id="server-pane">
+        <div class="sidebar-heading">
+          <h1>服务器 <span id="connection-count">0</span></h1>
+          <button id="new-connection" class="button small primary" type="button">新建</button>
+        </div>
+        <label class="search">
+          <span class="sr-only">搜索服务器</span>
+          <input id="search" type="search" placeholder="搜索名称或地址" autocomplete="off">
+        </label>
+        <div id="connection-list" class="connection-list" aria-label="服务器列表"></div>
+        <div class="sidebar-foot"><span id="summary">尚未连接服务器</span></div>
+      </aside>
+      <main class="workspace">
+        <div class="narrow-bar" id="narrow-bar">
+          <button id="toggle-list" class="button small" type="button" aria-controls="server-pane" aria-expanded="true">收起列表</button>
+          <span id="narrow-current" class="narrow-current"></span>
+        </div>
+        <section id="empty-state" class="empty-state">
+          <div class="empty-icon" aria-hidden="true">↔</div>
+          <h2>选择或添加一台服务器</h2>
+          <p>保存 SSH 连接后，即可登录并配置本地与远程端口转发。密码和私钥口令只用于本次会话。</p>
+          <button id="empty-add" class="button primary" type="button">新建连接</button>
+          <div class="empty-directions">
+            <div><b>c2s · 本地转发</b><span>在本地访问服务器上的服务</span></div>
+            <div><b>s2c · 远程转发</b><span>让服务器访问你的本地服务</span></div>
+          </div>
         </section>
-        <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
-          <div class="section-heading"><div><h3>连接配置</h3><p>修改服务器和认证信息前，请先断开连接。</p></div><button id="edit-connection" class="button" type="button">编辑配置</button></div>
-          <dl id="settings-list" class="settings-list"></dl>
-          <div class="danger-zone"><div><h4>删除此连接</h4><p>删除保存的服务器与转发预设。</p></div><button id="delete-connection" class="button danger" type="button">删除连接</button></div>
+        <section id="connection-detail" class="detail" hidden>
+          <header class="detail-heading">
+            <div class="detail-identity">
+              <h2 id="detail-name"></h2>
+              <p id="detail-address" class="mono muted"></p>
+            </div>
+            <span id="detail-state" class="badge"></span>
+          </header>
+          <div class="connection-controls">
+            <button id="connect" class="button primary" type="button">连接服务器</button>
+            <button id="disconnect" class="button" type="button" disabled>断开连接</button>
+            <span id="connection-time" class="muted"></span>
+          </div>
+          <p id="credential-status" class="credential-status"></p>
+          <div id="operation-error" class="operation-error" role="alert" hidden></div>
+          <div class="detail-tabs" role="tablist" aria-label="连接详情">
+            <button id="tab-connection" type="button" role="tab" aria-selected="true" aria-controls="panel-connection">连接</button>
+            <button id="tab-credentials" type="button" role="tab" aria-selected="false" aria-controls="panel-credentials">凭据</button>
+            <button id="tab-forwards" type="button" role="tab" aria-selected="false" aria-controls="panel-forwards">转发 <span id="forward-count">0</span></button>
+          </div>
+          <section id="panel-connection" role="tabpanel" aria-labelledby="tab-connection">
+            <div class="section-heading">
+              <div>
+                <h3>连接配置</h3>
+                <p>已保存的服务器和认证方式。修改或删除前请先断开连接。</p>
+              </div>
+              <button id="edit-connection" class="button" type="button">编辑配置</button>
+            </div>
+            <dl id="settings-list" class="settings-list"></dl>
+            <div class="danger-zone">
+              <div>
+                <h4>删除此连接</h4>
+                <p>删除保存的服务器与转发预设。</p>
+              </div>
+              <button id="delete-connection" class="button danger" type="button">删除连接</button>
+            </div>
+          </section>
+          <section id="panel-credentials" role="tabpanel" aria-labelledby="tab-credentials" hidden>
+            <div class="section-heading">
+              <div>
+                <h3>本次登录凭据</h3>
+                <p id="credentials-hint">仅用于此次连接，不会写入配置。</p>
+              </div>
+            </div>
+            <div id="credentials" class="credential-card">
+              <div class="two-columns">
+                <label>登录密码<input id="login-password" type="password" autocomplete="off" placeholder="使用密码登录时填写"></label>
+                <label>私钥口令<input id="login-passphrase" type="password" autocomplete="off" placeholder="加密私钥需要时填写"></label>
+              </div>
+            </div>
+          </section>
+          <section id="panel-forwards" role="tabpanel" aria-labelledby="tab-forwards" hidden>
+            <div class="section-heading">
+              <div>
+                <h3>端口转发规则</h3>
+                <p>保存规则后，可在 SSH 连接成功时启动，也会随下次连接自动启动。</p>
+              </div>
+              <button id="new-forward" class="button" type="button">添加转发</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>名称 / 方向</th>
+                    <th>监听地址</th>
+                    <th></th>
+                    <th>目标地址</th>
+                    <th>状态</th>
+                    <th class="actions-heading">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="forward-list"></tbody>
+              </table>
+            </div>
+            <div id="forward-empty" class="forward-empty">
+              <span aria-hidden="true">⇄</span>
+              <h4>还没有端口转发</h4>
+              <p>把服务器上的服务带到本地，或把本地服务分享给服务器。</p>
+              <button id="empty-forward" class="button" type="button">添加转发规则</button>
+            </div>
+            <div class="direction-guide">
+              <div><span class="direction-tag">c2s / -L</span><p><b>客户端监听 → 服务器目标</b><br>例如，在本地打开远程 Web 服务。</p></div>
+              <div><span class="direction-tag blue">s2c / -R</span><p><b>服务器监听 → 客户端目标</b><br>例如，让远端应用连接本地 Magpie。</p></div>
+            </div>
+          </section>
         </section>
-      </section>
-      <footer class="workspace-foot"><span id="last-updated">正在读取连接配置</span><span>migpie-remote · 0.2.0</span></footer>
-    </main>
+        <footer class="workspace-foot"><span id="last-updated">正在读取连接配置</span><span>migpie-remote · 0.2.0</span></footer>
+      </main>
+    </div>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
@@ -65,7 +161,8 @@
       <div id="environment-fields" hidden><label>密码环境变量名<input id="profile-password-env" placeholder="例如：DEV_SERVER_SSH_PASSWORD"><small>由 Magpie 插件宿主的启动环境提供。</small></label></div>
       <details class="advanced"><summary>主机校验与高级设置</summary><label>主机公钥指纹（可选）<input id="profile-fingerprint" placeholder="SHA256:…"><small>默认使用 known_hosts；首次连接前请核对服务器公钥。</small></label><label>known_hosts 路径（可选）<input id="profile-known-hosts" placeholder="默认 ~/.ssh/known_hosts"></label><label>连接标识<input id="profile-id" pattern="[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}" maxlength="64" placeholder="留空自动生成"></label></details>
       <p id="profile-error" class="field-error" role="alert" hidden></p>
-    </div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button id="save-connection" class="button primary" type="button">保存连接</button></div>
+    </div>
+    <div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button id="save-connection" class="button primary" type="button">保存连接</button></div>
   </dialog>
 
   <dialog id="forward-editor" aria-labelledby="forward-editor-title">
@@ -77,9 +174,14 @@
       <div class="two-columns"><label><span id="bind-host-label">本地监听地址</span><input id="rule-bind-host" value="127.0.0.1" required></label><label>监听端口<input id="rule-bind-port" type="number" min="0" max="65535" placeholder="例如：18080" required><small>填 0 可自动分配可用端口。</small></label></div>
       <div class="two-columns"><label><span id="target-host-label">服务器目标地址</span><input id="rule-target-host" value="127.0.0.1" required></label><label>目标端口<input id="rule-target-port" type="number" min="1" max="65535" placeholder="例如：8080" required></label></div>
       <p id="rule-error" class="field-error" role="alert" hidden></p>
-    </div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button id="save-forward" class="button primary" type="button">保存转发</button></div>
+    </div>
+    <div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button id="save-forward" class="button primary" type="button">保存转发</button></div>
   </dialog>
 
-  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-actions"><button id="confirm-cancel" class="button" type="button">取消</button><button id="confirm-accept" class="button danger" type="button">确认删除</button></div></dialog>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-description"></p>
+    <div class="dialog-actions"><button id="confirm-cancel" class="button" type="button">取消</button><button id="confirm-accept" class="button danger" type="button">确认删除</button></div>
+  </dialog>
 </body>
 </html>
