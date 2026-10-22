@@ -7,7 +7,7 @@ import { icon, renderIcons, setIcon } from "./icons.js";
   const base = new URL("./", location.href);
   const token = base.pathname.split("/")[1];
   let refreshing;
-  let listCollapsed = false;
+  let listCollapsed = isNarrow();
   let editingForwardConnection = null;
   let editingForwardId = null;
   let editingForwardSaved = false;
@@ -558,7 +558,7 @@ import { icon, renderIcons, setIcon } from "./icons.js";
   }
   $("log-filter").addEventListener("change", () => { if (selected()) renderLogs(selected()); });
   $("toggle-list").addEventListener("click", () => { listCollapsed = !$("app-layout").classList.contains("list-collapsed"); applyLayout(); });
-  matchMedia("(max-width: 760px)").addEventListener("change", () => { if (!isNarrow()) listCollapsed = false; applyLayout(); });
+  matchMedia("(max-width: 760px)").addEventListener("change", () => { listCollapsed = isNarrow(); applyLayout(); });
   $("connect").addEventListener("click", () => beginConnect());
   $("credentials-connect").addEventListener("click", () => beginConnect(selected(), true));
   bindForm("credential-form", (event) => {

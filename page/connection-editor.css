@@ -7,7 +7,7 @@
 .connection-editor .dialog-heading p { margin-top: 6px; font-size: 14px; }
 .connection-editor .dialog-heading .icon-button { margin: -4px -10px 0 0; }
 .connection-editor form { display: flex; flex-direction: column; min-height: 0; }
-.connection-editor .dialog-content { padding: 24px 28px 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.connection-editor .dialog-content { padding: 24px 28px 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .connection-section { padding-bottom: 24px; margin-bottom: 24px; border-bottom: 1px solid var(--line); }
 .connection-section h3 { margin: 0 0 18px; font-size: 16px; font-weight: 700; }
 .connection-editor .profile-row { display: grid; grid-template-columns: 116px minmax(0, 1fr); align-items: center; gap: 14px; margin: 0 0 18px; font-size: 14px; font-weight: 400; color: var(--muted); }
