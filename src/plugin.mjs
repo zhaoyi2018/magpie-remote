@@ -43,6 +43,7 @@ const profileSchema = {
     authMethod: { type: "string", enum: ["agent", "key", "environment"], description: "Preferred authentication method; other configured credentials remain available as fallbacks" },
     autoStartForwards: { type: "boolean", default: true, description: "Start saved forward presets after successful authentication" },
     autoConnect: { type: "boolean", default: false, description: "Try connecting once when the plugin host starts; no session credentials are persisted" },
+    forwardFailurePolicy: { type: "string", enum: ["rollback", "continue"], default: "rollback", description: "Whether a rejected preset rolls back the connection or allows other presets to continue; uncertain remote allocations always close SSH" },
     identityFile: { ...stringSchema, description: "Absolute path or ~/ path to an SSH private key; never its contents" },
     agent: { ...stringSchema, description: "SSH agent socket or Windows named pipe" },
     passwordEnv: { ...stringSchema, description: "Environment variable name containing the password" },
@@ -127,7 +128,7 @@ export function createTools(store, sessions) {
       },
     },
     connect: {
-      description: "Authenticate a saved SSH connection, verify its host key, then start its saved c2s/s2c forwards unless autoStartForwards is false. A failed saved forward rolls back the connection. No remote shell is executed.",
+      description: "Authenticate a saved SSH connection, verify its host key, then start its saved c2s/s2c forwards unless autoStartForwards is false. A failed preset rolls back by default; forwardFailurePolicy=continue preserves the connection for recoverable failures. No remote shell is executed.",
       args: args({ connectionId: idSchema }),
       execute({ connectionId }, ctx = {}) {
         identifier(connectionId);

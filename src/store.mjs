@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { identifier, validateProfile } from "./config.mjs";
+import { OperationError } from "./errors.mjs";
 
 export class ProfileStore {
   #pending = Promise.resolve();
@@ -16,14 +17,17 @@ export class ProfileStore {
       data = JSON.parse(await readFile(this.file, "utf8"));
     } catch (error) {
       if (error.code === "ENOENT") return [];
-      throw new Error("无法读取连接配置文件，请检查文件权限和 JSON 格式", { cause: error });
+      throw new OperationError(error instanceof SyntaxError ? "CONFIG_INVALID" : "CONFIG_UNREADABLE",
+        `无法读取连接配置文件 ${this.file}，请检查文件权限和 JSON 格式`, { cause: error });
     }
-    if (data.version !== 1 || !Array.isArray(data.connections)) {
-      throw new Error("连接配置文件的版本或结构无效");
+    if (!data || data.version !== 1 || !Array.isArray(data.connections)) {
+      throw new OperationError("CONFIG_INVALID", "连接配置文件的版本或结构无效，请修复后重试");
     }
-    const profiles = data.connections.map(validateProfile);
+    let profiles;
+    try { profiles = data.connections.map(validateProfile); }
+    catch (error) { throw new OperationError("CONFIG_INVALID", "连接配置文件中的配置无效：" + error.message, { cause: error }); }
     if (new Set(profiles.map((profile) => profile.id)).size !== profiles.length) {
-      throw new Error("连接配置文件包含重复 id");
+      throw new OperationError("CONFIG_INVALID", "连接配置文件包含重复 id，请修复后重试");
     }
     return profiles;
   }

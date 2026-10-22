@@ -7,6 +7,7 @@ import { dirname } from "node:path";
 const assets = new Map([
   ["", ["manage.html", "text/html; charset=utf-8"]],
   ["app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
   ["icons.js", ["icons.js", "text/javascript; charset=utf-8"]],
   ["app.css", ["app.css", "text/css; charset=utf-8"]],
   ["connection-editor.js", ["connection-editor.js", "text/javascript; charset=utf-8"]],
@@ -59,7 +60,10 @@ export async function startManagementServer({ tools, port = 0 }) {
   let origin;
   const server = createServer((request, response) => {
     void handle(request, response).catch((error) => {
-      if (!response.headersSent && !response.destroyed) json(response, error.status ?? 400, { error: error.message });
+      if (!response.headersSent && !response.destroyed) json(response, error.status ?? 400, {
+        error: error.message, code: error.code ?? "OPERATION_FAILED",
+        ...(error.code === "CREDENTIALS_REQUIRED" && { credentialFields: error.credentialFields }),
+      });
       else response.destroy();
     });
   });
@@ -69,7 +73,7 @@ export async function startManagementServer({ tools, port = 0 }) {
     response.setHeader("X-Content-Type-Options", "nosniff");
     if (request.headers.host !== new URL(origin).host) return json(response, 403, { error: "不接受该主机名" });
     const path = new URL(request.url, origin).pathname;
-    if (!path.startsWith(prefix)) return json(response, 404, { error: "管理服务地址已过期" });
+    if (!path.startsWith(prefix)) return json(response, 404, { error: "管理服务地址已过期", code: "MANAGEMENT_EXPIRED" });
     const relative = path.slice(prefix.length);
     const requestOrigin = request.headers.origin;
     if (requestOrigin && requestOrigin !== "null" && requestOrigin !== origin) {
@@ -87,7 +91,7 @@ export async function startManagementServer({ tools, port = 0 }) {
       return response.end();
     }
     if (relative.startsWith("api/")) {
-      if (!secureEqual(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: "管理页面认证已过期，请重新打开页面" });
+      if (!secureEqual(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: "管理页面认证已过期，请重新打开页面", code: "MANAGEMENT_EXPIRED" });
       if (request.method === "GET" && relative === "api/snapshot") {
         return json(response, 200, { connections: await tools.connections.execute({}) });
       }

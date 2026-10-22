@@ -35,6 +35,7 @@
 | `port` | 1–65535；默认 22 |
 | `authMethod` | 可选 `agent`、`key`、`environment`；优先尝试的认证来源，保留其他已配置来源作为回退 |
 | `autoStartForwards` | 可选布尔值，默认 true；认证成功后自动启动预设转发 |
+| `forwardFailurePolicy` | 可选 `rollback`（默认）或 `continue`；预设发生可恢复错误时，全部回滚或保留连接并继续其余预设；远程分配状态不明时仍关闭 SSH |
 | `autoConnect` | 可选布尔值，默认 false；插件宿主启动或重载时尝试连接一次 |
 | `identityFile`, `knownHostsFile` | 可选绝对路径，或以 `~/` 开头 |
 | `agent` | 可选 socket 路径、Windows 命名管道或受 ssh2 支持的 agent 标识 |
@@ -68,12 +69,14 @@
 
 ## 状态与错误
 
-会话状态是 `connecting`、`connected`、`disconnected` 或 `failed`。转发状态是 `starting`、`listening`、`stopping` 或 `failed`。`status` 包含地址、用户名、已观察到的公钥指纹、连接时间、当前转发及最近错误；另有 lastConnectedAt 和 logs（time、level、message）。每个连接保留最近 200 条内存日志，重连后延续，宿主重启后清空，不返回密码、口令或私钥内容。
+会话状态是 `connecting`、`connected`、`disconnected` 或 `failed`。转发状态是 `starting`、`listening`、`stopping` 或 `failed`。`status` 包含地址、用户名、已观察到的公钥指纹、连接时间、当前转发及最近错误；另有 lastConnectedAt 和 logs（time、level、message）。已创建会话的 `forwardErrors` 数组以 `{id, message}` 记录当前会话中启动失败的规则，重试成功后移除对应项；页面将它与预设合并显示，失败项不计入运行中的转发。每个连接保留最近 200 条内存日志，重连后延续，宿主重启后清空，不返回密码、口令或私钥内容。
 
 当 SSH 公钥尚未通过信任校验时，可能已经取得其指纹；只有 `state: connected` 才表示该会话已通过校验和认证。
 
 取消连接会终止正在连接的会话。取消或超时发生在远程转发分配期间时，会关闭 SSH 会话以释放可能已经建立的远程监听。已完成的 `connect` 调用之后，旧调用的取消信号不会断开长期会话。
 
 错误以工具异常返回，由 Magpie 转换为 MCP 错误。配置文件损坏时会报错，保存操作不会覆盖损坏文件。工具使用 JSON Schema 声明参数，并在插件内部再次校验配置、标识符及端口。
+
+管理 HTTP API 的错误体为 `{error, code}`；缺少可用凭据时还返回 `credentialFields`（`password` / `passphrase`），页面据此提示本次输入。常见代码包括 `CREDENTIALS_REQUIRED`、`KEY_INVALID`、`KEY_UNAVAILABLE`、`HOST_KEY_REJECTED`、`SSH_AUTH_FAILED`、`SSH_TIMEOUT`、`SSH_CONNECTION_FAILED`、`FORWARD_REJECTED`、`FORWARD_TIMEOUT`、`CONFIG_INVALID`、`CONFIG_UNREADABLE` 和 `MANAGEMENT_EXPIRED`。这些代码用于区分凭据、配置及管理服务恢复，不保证宿主转换后的 MCP 错误保留相同结构。
 
 接口定义来源：[plugin.mjs](../src/plugin.mjs)；运行校验来源：[config.mjs](../src/config.mjs)。返回[文档导航](README.md)。

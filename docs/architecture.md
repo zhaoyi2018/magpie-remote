@@ -16,13 +16,14 @@ flowchart TD
   Tools --> Import[src/ssh-config.mjs / SSH 配置预览]
   Import --> Source[用户与系统 SSH 配置 / 只读]
   Tools --> Sessions[src/sessions.mjs / 会话与转发]
+  Sessions --> Authentication[src/authentication.mjs / 认证来源与凭据缺口]
   Sessions --> Trust[src/host-keys.mjs / 主机公钥]
   Sessions --> SSH[ssh2 Client]
   SSH --> Server[SSH 服务器]
   Store --> File[connections.json]
 ```
 
-插件只导出一个 OpenCode v1 对象，辅助函数放在 `src/`。`createPlugin` 默认启动只监听回环地址的管理服务，并在 `page/.runtime/` 发布启动地址；不会自动建立 SSH 连接。每个连接拥有自己的 SSH 客户端、转发映射和 TCP 资源集合。
+插件只导出一个 OpenCode v1 对象，辅助函数放在 `src/`。`createPlugin` 默认启动只监听回环地址的管理服务，并在 `page/.runtime/` 发布启动地址；仅对 `autoConnect` 为 true 的配置尝试连接一次。每个连接拥有自己的 SSH 客户端、转发映射和 TCP 资源集合。
 
 ## 连接与预设转发
 
@@ -46,13 +47,17 @@ sequenceDiagram
   end
   alt 全部成功
     M-->>A: 会话与转发快照
-  else 任意预设失败
+  else 默认策略下任意预设失败
     M->>M: 关闭会话并释放全部资源
     M-->>A: 工具错误
   end
 ```
 
 工具入口按连接 id 串行处理修改、连接与转发操作，独立连接可以并行。断开操作会立即取消同一连接等待中的连接请求。配置写入另有进程内串行队列；临时文件写完后重命名替换，避免留下半个 JSON。
+
+`forwardFailurePolicy: "continue"` 可选择在可恢复的预设错误后继续启动后续规则，失败原因放入独立的 `forwardErrors` 快照，不伪装成正在运行的转发。服务器明确回复请求失败时，仅移除失败规则；远程分配超时、取消或传输失败仍终止会话，避免遗留状态未知的监听。默认策略保持全部回滚。
+
+认证准备独立检查 agent、私钥和密码来源；备用来源不可用不会阻断其他可用来源。私钥先解析以区分未加密、缺口令与无效文件，只有需要补充凭据时返回 `CREDENTIALS_REQUIRED`。管理服务将结构化错误传给页面，页面分别处理配置修复、地址过期、网络不可达与请求超时；本次输入的凭据不进入持久化配置或快照。
 
 ## SSH 配置导入
 
@@ -93,7 +98,7 @@ stateDiagram-v2
   connecting --> connected: SSH ready
   connecting --> failed: 校验失败或认证失败或超时
   connecting --> disconnected: 显式断开
-  connected --> failed: 传输错误或远程转发失败
+  connected --> failed: 传输错误或远程分配状态不明
   connected --> disconnected: 显式断开或远端关闭
   failed --> connecting: 再次连接
   failed --> disconnected: 显式断开

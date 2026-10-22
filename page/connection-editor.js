@@ -40,6 +40,7 @@
     $("profile-id").readOnly = Boolean(connection);
     $("profile-auth").value = connection?.authMethod ?? (!connection ? "agent" : connection.identityFile ? "key" : connection.agent ? "agent" : "environment");
     $("profile-auto-forwards").checked = connection?.autoStartForwards !== false;
+    $("profile-continue-forwards").checked = connection?.forwardFailurePolicy === "continue";
     $("profile-auto-connect").checked = connection?.autoConnect === true;
     $("profile-error").hidden = true;
     $("profile-auth-advanced").open = true;
@@ -69,6 +70,7 @@
       const connection = { id: $("profile-id").value.trim() || uniqueId("server"), name: $("profile-name").value.trim(), host: $("profile-host").value.trim(), port: Number($("profile-port").value), username: $("profile-username").value.trim(), forwards: getRows().find((row) => row.connection.id === editingConnection)?.connection.forwards ?? [] };
       connection.authMethod = $("profile-auth").value;
       connection.autoStartForwards = $("profile-auto-forwards").checked;
+      if ($("profile-continue-forwards").checked) connection.forwardFailurePolicy = "continue";
       connection.autoConnect = $("profile-auto-connect").checked;
       if (!editingConnection && getRows().some((row) => row.connection.id === connection.id)) throw new Error("连接标识已存在，请使用其他标识");
       const mode = $("profile-auth").value;

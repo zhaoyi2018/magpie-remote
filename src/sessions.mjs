@@ -1,8 +1,9 @@
 import ssh2 from "ssh2";
 import { createServer, connect as connectTCP } from "node:net";
-import { readFile } from "node:fs/promises";
-import { expandPath, validateForward, validateProfile } from "./config.mjs";
+import { validateForward, validateProfile } from "./config.mjs";
 import { fingerprint, hostVerifier } from "./host-keys.mjs";
+import { prepareAuthentication, credentialRequest } from "./authentication.mjs";
+import { OperationError } from "./errors.mjs";
 
 const { Client } = ssh2;
 
@@ -40,7 +41,7 @@ export class SessionManager {
     if (previous?.state === "connected") return this.#view(previous);
     if (previous?.state === "connecting") return previous.pending;
     const session = {
-      id: profile.id, state: "connecting", client: new Client(), forwards: new Map(),
+      id: profile.id, state: "connecting", client: new Client(), forwards: new Map(), forwardErrors: new Map(),
       host: profile.host, port: profile.port, username: profile.username,
       logs: previous?.logs ?? [],
       lastConnectedAt: previous?.connectedAt ?? previous?.lastConnectedAt,
@@ -65,29 +66,15 @@ export class SessionManager {
           return !session.hostRejected;
         },
       };
-      if (profile.identityFile) config.privateKey = await readFile(expandPath(profile.identityFile));
-      for (const [field, variable] of [["password", profile.passwordEnv], ["passphrase", profile.passphraseEnv]]) {
-        if (credentials[field]) { config[field] = credentials[field]; continue; }
-        if (!variable) continue;
-        if (!this.env[variable]) throw new Error(`环境变量 ${variable} 未设置`);
-        config[field] = this.env[variable];
-      }
-      config.agent = profile.agent ?? this.env.SSH_AUTH_SOCK
-        ?? (profile.authMethod === "agent" && process.platform === "win32" ? "\\\\.\\pipe\\openssh-ssh-agent" : undefined);
-      if (profile.authMethod) {
-        const methods = profile.authMethod === "agent" ? ["agent", "publickey", "password"]
-          : profile.authMethod === "key" ? ["publickey", "password", "agent"] : ["password", "publickey", "agent"];
-        config.authHandler = ["none", ...methods.filter((method) => method === "agent" ? config.agent : method === "publickey" ? config.privateKey : config.password)];
-      }
-      if (!config.agent && !config.privateKey && !config.password) {
-        throw new Error("请配置 identityFile、agent 或 passwordEnv 以进行 SSH 认证");
-      }
+      const authentication = await prepareAuthentication(profile, this.env, credentials);
+      Object.assign(config, authentication.config);
+      for (const issue of authentication.issues) this.#log(session, "warn", issue.message + "；将尝试其他可用认证方式");
       aborted(signal);
       if (session.state !== "connecting") throw new Error("连接已停止");
       session.client.on("tcp connection", (info, accept, reject) => this.#incoming(session, info, accept, reject));
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
-          this.#fail(session, new Error("SSH 连接超时"));
+          this.#fail(session, new OperationError("SSH_TIMEOUT", "SSH 连接超时，请检查服务器地址和网络"));
         }, this.connectTimeoutMs);
         const finish = (error) => {
           clearTimeout(timeout);
@@ -109,8 +96,10 @@ export class SessionManager {
           // ssh2 emits agent errors before trying the next configured method.
           if (error.level === "agent" && session.state === "connecting" && (config.privateKey || config.password)) return;
           const reason = session.hostRejected
-            ? new Error("SSH 主机公钥未被信任或已变化；请核对 hostFingerprint / known_hosts")
-            : error;
+            ? new OperationError("HOST_KEY_REJECTED", "SSH 主机公钥未被信任或已变化；请核对 hostFingerprint / known_hosts")
+            : ["client-authentication", "agent"].includes(error.level)
+              ? credentialRequest(authentication.issues) ?? new OperationError("SSH_AUTH_FAILED", "SSH 认证失败，请检查用户名和凭据：" + error.message, { cause: error })
+              : new OperationError("SSH_CONNECTION_FAILED", "SSH 连接失败：" + error.message, { cause: error });
           finish(reason);
           this.#fail(session, reason);
         });
@@ -125,7 +114,14 @@ export class SessionManager {
         session.client.connect(config);
       });
       if (profile.autoStartForwards !== false) {
-        for (const forward of profile.forwards) await this.addForward(profile.id, forward, { signal });
+        for (const forward of profile.forwards) {
+          try { await this.addForward(profile.id, forward, { signal }); }
+          catch (error) {
+            if (profile.forwardFailurePolicy !== "continue" || session.state !== "connected" || signal?.aborted) throw error;
+            session.forwardErrors.set(forward.id, { id: forward.id, message: error.message });
+            this.#log(session, "warn", "预设「" + (forward.name ?? forward.id) + "」未启动，保留 SSH 连接并继续启动其他预设");
+          }
+        }
       }
       aborted(signal);
       if (session.state !== "connected") throw new Error(session.lastError ?? "SSH 连接已关闭");
@@ -149,6 +145,7 @@ export class SessionManager {
       item.direction === spec.direction && item.bindHost === spec.bindHost && item.bindPort === spec.bindPort
     ))) throw new Error("该监听地址和端口已被另一条转发使用");
     const forward = { ...spec, state: "starting", resources: new Set() };
+    let remoteRejected = false;
     session.forwards.set(forward.id, forward);
     const cancel = () => this.#fail(session, new Error("转发创建已取消，SSH 连接已关闭"));
     signal?.addEventListener("abort", cancel, { once: true });
@@ -168,7 +165,12 @@ export class SessionManager {
           });
         } else {
           session.client.forwardIn(forward.bindHost, forward.bindPort, (error, port) => {
-            if (error) reject(error);
+            if (error) {
+              // ssh2 1.17 uses this exact response for SSH REQUEST_FAILURE.
+              // Transport failures (including a lost reply) remain fatal.
+              remoteRejected = error.message === `Unable to bind to ${forward.bindHost}:${forward.bindPort}`;
+              reject(remoteRejected ? new OperationError("FORWARD_REJECTED", "服务器拒绝此转发，请检查远端端口占用和 SSH 转发权限", { cause: error }) : error);
+            }
             else {
               forward.bindPort = port ?? forward.bindPort;
               resolve();
@@ -179,14 +181,16 @@ export class SessionManager {
       aborted(signal);
       if (session.state !== "connected") throw new Error("SSH 连接已关闭");
       forward.state = "listening";
+      session.forwardErrors.delete(forward.id);
       this.#log(session, "info", "转发「" + (forward.name ?? forward.id) + "」已启动（" + forward.direction + "）：" + forward.bindHost + ":" + forward.bindPort + " → " + forward.targetHost + ":" + forward.targetPort);
       return this.#forwardView(forward);
     } catch (error) {
       this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」启动失败：" + error.message);
       session.forwards.delete(forward.id);
+      session.forwardErrors.set(forward.id, { id: forward.id, message: error.message });
       await this.#releaseLocal(forward);
       // A remote allocation whose reply was lost must not outlive its session.
-      if (forward.direction === "s2c") this.#fail(session, error);
+      if (forward.direction === "s2c" && !remoteRejected) this.#fail(session, error);
       throw error;
     } finally {
       forward.rejectSetup = undefined;
@@ -237,9 +241,10 @@ export class SessionManager {
     let timer;
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => {
-        const error = new Error("转发操作超时，SSH 连接已关闭以释放监听");
-        this.#fail(session, error);
+        const error = new OperationError("FORWARD_TIMEOUT", "转发操作超时，SSH 连接已关闭以释放监听");
+        // Preserve the timeout as the caller's error before cleanup rejects setup.
         reject(error);
+        this.#fail(session, error);
       }, this.forwardTimeoutMs);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
@@ -356,6 +361,7 @@ export class SessionManager {
     return {
       id, host, port, username, state, connectedAt, lastConnectedAt, hostFingerprint,
       logs: session.logs.map((entry) => ({ ...entry })),
+      forwardErrors: [...session.forwardErrors.values()].map((entry) => ({ ...entry })),
       ...(lastError && { lastError }),
       forwards: [...session.forwards.values()].map((forward) => this.#forwardView(forward)),
     };

@@ -12,6 +12,8 @@ npm test
 
 `check` 检查 JavaScript 语法、入口导出和本地 Markdown 文件链接。测试临时启动仅监听本机随机端口的 SSH/TCP 服务，验证密码和私钥认证、真实双向数据流及异常清理。测试不会连接配置中的真实服务器。
 
+测试专用的固定 Ed25519 密钥保存在 `tests/fixtures.mjs`，包含未加密和加密样本，不能用于实际服务器。固定样本避免 ssh2 随机生成某些前导零公钥时出现的偶发解析失败；测试同时核对私钥解析结果与声明的公钥。这些样本与其他测试文件均不随 npm 包发布。
+
 如需使用与宿主一致的 Bun：
 
 ```powershell
@@ -53,6 +55,8 @@ node scripts/host-smoke.mjs 'C:/path/to/bun.exe' 'C:/path/to/host-current.js'
 ```
 
 脚本给子进程配置独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入当前项目。随后通过宿主 RPC 保存测试配置、SSH 认证、创建两个方向的转发、实际传输数据、停止转发、断开并删除配置。测试结束后关闭该子进程并清理其临时目录。该脚本只用于开发验证，内部宿主协议变化时需要复核。
+
+宿主会向脚本所在项目的 `page/.runtime/` 发布启动地址。如果日常 Magpie 正在加载这个源码目录，应在不包含 `.runtime` 的隔离源码副本中执行宿主验证，避免覆盖日常页面的启动地址。纯页面验证也可给 `startUIHarness` 传入 `getEndpoint` 回调，直接使用隔离管理服务的地址。
 
 若通过完整 Magpie CLI 做隔离测试，也需为子进程设置独立的 HOME、USERPROFILE、XDG_CONFIG_HOME、XDG_CACHE_HOME 和未占用的 MAGPIE_ADDR，避免读写日常配置。Windows 自动化使用 PowerShell 7 的 `pwsh -NoProfile`。
 

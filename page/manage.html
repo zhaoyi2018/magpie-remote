@@ -21,7 +21,7 @@
         <button class="button primary" id="new-connection" type="button"><span data-icon="plus"></span>新建连接</button>
       </div>
     </header>
-    <div id="service-error" class="service-error" role="alert" hidden><span>管理服务已断开，当前显示最后读取的状态。</span><button id="reopen" class="button" type="button">重新打开</button></div>
+    <div id="service-error" class="service-error" role="alert" hidden><span id="service-error-message">管理服务已断开，当前显示最后读取的状态。</span><button id="reopen" class="button" type="button">重新打开</button></div>
     <section class="overview" aria-label="连接概览">
       <div class="overview-stats" role="status" aria-live="polite">
         <span class="stat"><span id="summary-dot" class="status-dot"></span><span><b id="connected-count">0</b> 个连接已建立</span></span>
@@ -107,6 +107,7 @@
       <section class="connection-section connection-behavior" aria-labelledby="profile-behavior-title">
         <h3 id="profile-behavior-title">连接行为</h3>
         <label class="check-label"><input id="profile-auto-forwards" type="checkbox" checked>连接成功后自动启动预设转发</label>
+        <label class="check-label"><input id="profile-continue-forwards" type="checkbox">个别预设启动失败时保留连接，继续启动其他预设</label>
         <label class="check-label"><input id="profile-auto-connect" type="checkbox">应用启动时尝试重新连接</label>
         <p class="profile-storage-note">仅保存配置与转发预设；当前 SSH 会话不写入磁盘。</p>
       </section>
@@ -126,7 +127,7 @@
 
   <dialog id="credential-dialog" aria-labelledby="credential-title">
     <div class="dialog-heading"><div><h2 id="credential-title">连接服务器</h2><p id="credential-address"></p></div><button class="icon-button close-dialog" type="button" aria-label="关闭"><span data-icon="close"></span></button></div>
-    <form id="credential-form"><div class="dialog-content"><p class="field-note">凭据仅用于本次登录，不写入配置。重新连接后，已保存的转发会自动启动。</p><label>登录密码<input id="login-password" type="password" autocomplete="off" placeholder="使用密码登录时填写"></label><label>私钥口令（可选）<input id="login-passphrase" type="password" autocomplete="off" placeholder="加密私钥需要时填写"></label></div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button class="button primary" type="submit">连接</button></div></form>
+    <form id="credential-form"><div class="dialog-content"><p id="credential-hint" class="field-note" role="status"></p><p class="field-note">凭据仅用于本次登录，不写入配置。重新连接后，已保存的转发会自动启动。</p><label>登录密码<input id="login-password" type="password" autocomplete="off" placeholder="使用密码登录时填写"></label><label>私钥口令<input id="login-passphrase" type="password" autocomplete="off" placeholder="加密私钥需要时填写"></label></div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button class="button primary" type="submit">连接</button></div></form>
   </dialog>
 
   <dialog id="forward-editor" class="forward-editor" aria-labelledby="forward-editor-title">

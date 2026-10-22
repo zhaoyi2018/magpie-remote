@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 // A development-only parent frame with Magpie's documented allow-scripts
 // sandbox and launch-page policy. The SSH backend still runs in the real host.
-export async function startUIHarness() {
+export async function startUIHarness({ getEndpoint } = {}) {
   const prefix = "/_magpie/plugin/ui-test/";
   const root = new URL("../page/", import.meta.url);
   let origin;
@@ -31,6 +31,10 @@ export async function startUIHarness() {
     }
     const types = { "index.html": "text/html; charset=utf-8", "launch.js": "text/javascript", "launch.css": "text/css", "theme.js": "text/javascript", "icon.png": "image/png", "icon-dark.png": "image/png", "icon.svg": "image/svg+xml", ".runtime/endpoint.js": "text/javascript" };
     if (!Object.hasOwn(types, file)) { response.writeHead(404); return response.end(); }
+    if (file === ".runtime/endpoint.js" && getEndpoint) {
+      response.setHeader("Content-Type", types[file]);
+      return response.end(`window.__migpieRemoteEndpoint = ${JSON.stringify({ url: getEndpoint() })};`);
+    }
     const data = await readFile(new URL(file, root));
     response.setHeader("Content-Type", types[file]);
     response.end(data);

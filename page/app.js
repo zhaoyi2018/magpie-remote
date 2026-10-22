@@ -1,4 +1,5 @@
 import { icon, renderIcons, setIcon } from "./icons.js";
+import { launcherURL, managementFailure, readResponse } from "./recovery.js";
 
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -17,6 +18,7 @@ import { icon, renderIcons, setIcon } from "./icons.js";
   let toastTimer;
   let listSignature, forwardSignature, settingsSignature, logSignature;
   let importPreview = null, previewPath = "", previewSequence = 0, importing = false;
+  let serviceFailure = null;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -88,11 +90,10 @@ import { icon, renderIcons, setIcon } from "./icons.js";
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const response = await fetch(new URL(path, base), { ...options, credentials: "omit", signal: controller.signal, headers: { Authorization: "Bearer " + token, ...options.headers } });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "请求失败 (" + response.status + ")");
-      return data;
+      return await readResponse(response);
     } catch (error) {
-      if (error.name === "AbortError") throw new Error("请求超时，请检查连接状态后重试");
+      if (error.name === "AbortError") throw Object.assign(new Error("请求超时，请检查连接状态后重试"), { code: "REQUEST_TIMEOUT" });
+      if (error instanceof TypeError) throw Object.assign(new Error("无法连接管理服务"), { code: "SERVICE_UNREACHABLE" });
       throw error;
     } finally { clearTimeout(timer); }
   }
@@ -107,15 +108,18 @@ import { icon, renderIcons, setIcon } from "./icons.js";
     refreshing = (async () => {
       try {
         const snapshot = await request("api/snapshot", {}, 5000);
-        state.rows = snapshot.connections; state.online = true;
+        state.rows = snapshot.connections; state.online = true; serviceFailure = null;
         reconcileSelection();
         $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
         $("service-error").hidden = true;
-      } catch {
+      } catch (error) {
         state.online = false; $("service-error").hidden = false;
+        serviceFailure = managementFailure(error);
+        $("service-error-message").textContent = serviceFailure.message;
+        $("reopen").textContent = serviceFailure.action === "retry" ? "重试读取" : "重新打开";
         $("last-updated").textContent = "当前显示最后读取的状态";
       }
-      $("service-state").textContent = state.online ? "管理服务在线" : "管理服务离线";
+      $("service-state").textContent = state.online ? "管理服务在线" : serviceFailure.label;
       $("service-state").className = "service-state " + (state.online ? "is-online" : "is-offline");
       render();
     })();
@@ -123,11 +127,13 @@ import { icon, renderIcons, setIcon } from "./icons.js";
   }
   async function run(id, name, operation, message) {
     const owner = Symbol();
+    let failure;
     state.busy.set(id, { owner, name }); state.errors.delete(id); render();
     try {
       await operation();
       if (message) toast(message);
     } catch (error) {
+      failure = error;
       if (!(name === "connect" && state.cancelled.has(id))) {
         state.errors.set(id, error.message);
         if (state.selected !== id) toast(error.message);
@@ -136,6 +142,7 @@ import { icon, renderIcons, setIcon } from "./icons.js";
       if (state.busy.get(id)?.owner === owner) state.busy.delete(id);
       await refresh(true);
     }
+    return failure;
   }
   function render() {
     if ($("forward-editor").open) syncForwardAction();
@@ -208,10 +215,14 @@ import { icon, renderIcons, setIcon } from "./icons.js";
     if (!rows.length) $("connection-list").append(element("p", "no-matches", state.rows.length ? "没有匹配的连接" : "尚未添加连接"));
   }
   function renderForwards({ connection, session }, busy) {
-    const signature = JSON.stringify([connection.id, connection.forwards, session.forwards, session.state, busy, state.online]);
+    const signature = JSON.stringify([connection.id, connection.forwards, session.forwards, session.forwardErrors, session.state, busy, state.online]);
     if (signature === forwardSignature) return;
     forwardSignature = signature;
     const rules = new Map(connection.forwards.map((rule) => [rule.id, { ...rule, saved: true, state: "stopped" }]));
+    for (const error of session.forwardErrors ?? []) {
+      const rule = rules.get(error.id);
+      if (rule) { rule.state = "failed"; rule.lastError = error.message; }
+    }
     for (const live of session.forwards) rules.set(live.id, { ...rules.get(live.id), ...live });
     $("forward-list").replaceChildren();
     $("forward-count").textContent = "(" + rules.size + ")";
@@ -224,7 +235,7 @@ import { icon, renderIcons, setIcon } from "./icons.js";
       const direction = element("td", "direction-tag", rule.direction + " · " + (rule.direction === "c2s" ? "-L" : "-R"));
       direction.title = rule.direction === "c2s" ? "本地监听 → 服务器目标" : "服务器监听 → 本地目标";
       const status = element("td");
-      status.append(element("span", "badge " + rule.state, labels[rule.state] ?? rule.state));
+      status.append(element("span", "badge " + rule.state, rule.state === "failed" ? "启动失败" : labels[rule.state] ?? rule.state));
       if (rule.lastError) status.append(element("div", "row-error", rule.lastError));
       const actions = element("td"), actionsBox = element("div", "rule-actions");
       const running = session.forwards.some((item) => item.id === rule.id);
@@ -252,7 +263,7 @@ import { icon, renderIcons, setIcon } from "./icons.js";
     const signature = JSON.stringify([connection, session.hostFingerprint]);
     if (settingsSignature === signature) return;
     settingsSignature = signature;
-    const values = [["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username], ["认证方式", auth(connection)], ["自动启动预设", connection.autoStartForwards === false ? "已关闭" : "已开启"], ["启动时连接", connection.autoConnect ? "已开启" : "已关闭"], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent], ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv], ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"], ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"]];
+    const values = [["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username], ["认证方式", auth(connection)], ["自动启动预设", connection.autoStartForwards === false ? "已关闭" : "已开启"], ["预设失败处理", connection.forwardFailurePolicy === "continue" ? "保留连接，继续其他预设" : "回滚本次连接"], ["启动时连接", connection.autoConnect ? "已开启" : "已关闭"], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent], ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv], ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"], ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"]];
     values.push(["连接后启动转发", connection.autoStartForwards !== false ? "已开启" : "已关闭"], ["应用启动时重连", connection.autoConnect ? "已开启" : "已关闭"]);
     $("settings-list").replaceChildren();
     for (const [label, value] of values) {
@@ -336,25 +347,37 @@ import { icon, renderIcons, setIcon } from "./icons.js";
   function openConnection(connection) { connectionEditor.open(connection); }
   function beginConnect(row = selected(), withCredentials = false) {
     if (!row || !state.online || state.busy.has(row.connection.id) || row.session.state === "connecting") return;
-    const connection = row.connection;
-    if (withCredentials || (connection.authMethod !== "agent" && ((!connection.identityFile && !connection.agent && !connection.passwordEnv) || (connection.identityFile && !connection.passphraseEnv)))) {
-      credentialConnection = connection.id;
-      $("credential-title").textContent = row.session.state === "connected" ? "重新连接服务器" : "连接服务器";
-      $("credential-address").textContent = connection.name + " · " + address(connection);
-      $("login-password").value = $("login-passphrase").value = "";
-      $("credential-dialog").showModal();
-      $(connection.identityFile ? "login-passphrase" : "login-password").focus();
-      return;
+    if (withCredentials) { showCredentials(row); return; }
+    void connectTo(row.connection.id);
+  }
+  function showCredentials(row, error) {
+    const { connection } = row;
+    const fields = error?.credentialFields ?? (connection.identityFile ? ["password", "passphrase"] : ["password"]);
+    credentialConnection = connection.id;
+    $("credential-title").textContent = row.session.state === "connected" ? "重新连接服务器" : "连接服务器";
+    $("credential-address").textContent = connection.name + " · " + address(connection);
+    $("credential-hint").textContent = error?.message ?? "填写本次需要的登录凭据。";
+    for (const field of ["password", "passphrase"]) {
+      const input = $("login-" + field);
+      input.value = "";
+      input.closest("label").hidden = !fields.includes(field);
+      input.required = fields.length === 1 && fields.includes(field);
     }
-    void connectTo(connection.id);
+    $("credential-dialog").showModal();
+    $("login-" + (fields.includes("passphrase") && connection.identityFile ? "passphrase" : "password")).focus();
   }
   async function connectTo(id, credentials) {
     state.cancelled.delete(id);
-    await run(id, "connect", async () => {
+    const error = await run(id, "connect", async () => {
       if (state.rows.find((row) => row.connection.id === id)?.session.state === "connected") await call("disconnect", { connectionId: id });
       if (state.cancelled.has(id)) return;
       await call("connect", { connectionId: id }, credentials);
     }, "");
+    if (error?.code === "CREDENTIALS_REQUIRED" && !state.cancelled.has(id) && state.online
+      && state.selected === id && !document.querySelector("dialog[open]")) {
+      const row = state.rows.find((item) => item.connection.id === id);
+      if (row) showCredentials(row, error);
+    }
     if (!state.cancelled.has(id) && state.rows.find((row) => row.connection.id === id)?.session.state === "connected") toast("SSH 连接成功");
   }
   async function deleteConnection(row = selected()) {
@@ -563,12 +586,18 @@ import { icon, renderIcons, setIcon } from "./icons.js";
   $("credentials-connect").addEventListener("click", () => beginConnect(selected(), true));
   bindForm("credential-form", (event) => {
     event.preventDefault();
+    if (!$("credential-form").reportValidity()) return;
     const id = credentialConnection;
     const credentials = { password: $("login-password").value, passphrase: $("login-passphrase").value };
     $("credential-dialog").close();
     if (id && state.online && state.rows.some((row) => row.connection.id === id)) void connectTo(id, credentials);
   });
-  $("credential-dialog").addEventListener("close", () => { $("login-password").value = $("login-passphrase").value = ""; credentialConnection = null; });
+  $("credential-dialog").addEventListener("close", () => {
+    // A previous close event may arrive after a fast failure reopens the dialog.
+    if ($("credential-dialog").open) return;
+    $("login-password").value = $("login-passphrase").value = "";
+    credentialConnection = null;
+  });
   $("disconnect").addEventListener("click", () => {
     const id = state.selected; if (!id) return;
     state.cancelled.add(id);
@@ -586,10 +615,9 @@ import { icon, renderIcons, setIcon } from "./icons.js";
   addEventListener("resize", () => hideMenu());
   addEventListener("scroll", () => hideMenu(), true);
   $("reopen").addEventListener("click", () => {
-    try {
-      const url = new URL(new URLSearchParams(location.hash.slice(1)).get("launcher"));
-      if (url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && url.pathname.startsWith("/_magpie/plugin/")) { location.replace(url.href); return; }
-    } catch { /* Standalone previews have no launcher. */ }
+    if (serviceFailure?.action === "retry") { void refresh(true); return; }
+    const url = launcherURL(location.hash);
+    if (url) { location.replace(url); return; }
     location.reload();
   });
   render(); void refresh();

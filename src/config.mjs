@@ -66,7 +66,7 @@ export function validateForward(value) {
 export function validateProfile(value) {
   object(value, "连接配置");
   const optional = ["identityFile", "agent", "passwordEnv", "passphraseEnv", "knownHostsFile", "hostFingerprint"];
-  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", ...optional], "连接配置");
+  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", "forwardFailurePolicy", ...optional], "连接配置");
   if (value.forwards !== undefined && !Array.isArray(value.forwards)) throw new Error("forwards 必须是数组");
   const profile = {
     id: identifier(value.id, "连接 id"),
@@ -88,6 +88,10 @@ export function validateProfile(value) {
       if (typeof value[key] !== "boolean") throw new Error(`${key} 必须是布尔值`);
       profile[key] = value[key];
     }
+  }
+  if (value.forwardFailurePolicy !== undefined) {
+    if (!["rollback", "continue"].includes(value.forwardFailurePolicy)) throw new Error("forwardFailurePolicy 必须是 rollback 或 continue");
+    profile.forwardFailurePolicy = value.forwardFailurePolicy;
   }
   for (const key of ["identityFile", "knownHostsFile"]) {
     if (profile[key]) expandPath(profile[key]);

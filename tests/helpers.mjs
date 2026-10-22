@@ -5,10 +5,13 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fingerprint } from "../src/host-keys.mjs";
+import { keys } from "./fixtures.mjs";
 
 const { Server, utils } = ssh2;
-export const keys = utils.generateKeyPairSync("ed25519");
-export const hostPublicKey = utils.parseKey(keys.private).getPublicSSH();
+export { keys };
+const parsedKey = utils.parseKey(keys.private);
+if (parsedKey instanceof Error) throw new Error("Invalid test-only SSH fixture", { cause: parsedKey });
+export const hostPublicKey = parsedKey.getPublicSSH();
 
 export async function temporary(t) {
   const directory = await mkdtemp(join(tmpdir(), "migpie-remote-test-"));
@@ -75,7 +78,9 @@ export async function until(predicate, message = "condition not met") {
   throw new Error(message);
 }
 
-export async function sshServer(t, { rejectRemote = false, hangAuth = false, hangForward = false } = {}) {
+export async function sshServer(t, { rejectRemote = false, hangAuth = false, hangForward = false, clientPublicKey = hostPublicKey } = {}) {
+  const acceptedKey = utils.parseKey(`ssh-ed25519 ${clientPublicKey.toString("base64")}`);
+  if (acceptedKey instanceof Error) throw acceptedKey;
   const clients = new Set();
   const listeners = new Set();
   const sockets = new Set();
@@ -101,8 +106,8 @@ export async function sshServer(t, { rejectRemote = false, hangAuth = false, han
       if (hangAuth) return;
       if (ctx.username === "tester" && ctx.method === "password" && ctx.password === "local-test-secret") ctx.accept();
       else if (ctx.username === "tester" && ctx.method === "publickey"
-        && ctx.key.data.equals(hostPublicKey)
-        && (!ctx.signature || utils.parseKey(keys.private).verify(ctx.blob, ctx.signature, ctx.hashAlgo))) ctx.accept();
+        && ctx.key.data.equals(clientPublicKey)
+        && (!ctx.signature || acceptedKey.verify(ctx.blob, ctx.signature, ctx.hashAlgo))) ctx.accept();
       else ctx.reject();
     });
     client.on("ready", () => {
