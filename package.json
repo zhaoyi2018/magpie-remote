@@ -21,6 +21,7 @@
   "keywords": ["magpie-plugin", "opencode", "opencode-plugin", "ssh", "tools", "port-forwarding"],
   "engines": { "node": ">=22" },
   "scripts": {
+    "icons": "node scripts/generate-icon.mjs",
     "test": "node --test --test-concurrency=1",
     "test:host": "node scripts/host-smoke.mjs",
     "check": "node scripts/check.mjs",

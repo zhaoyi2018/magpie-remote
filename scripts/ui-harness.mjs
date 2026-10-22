@@ -29,7 +29,7 @@ export async function startUIHarness() {
       response.setHeader("Content-Type", "text/javascript");
       return response.end(`window.magpie={ready:new Promise(resolve=>{addEventListener('message',e=>{if(e.source===parent&&e.data?.id==='launch-ready')resolve(e.data.result);});parent.postMessage({magpie:1,id:'launch-ready',method:'hello'},'*');})};`);
     }
-    const types = { "index.html": "text/html; charset=utf-8", "launch.js": "text/javascript", "launch.css": "text/css", "theme.js": "text/javascript", "icon.svg": "image/svg+xml", ".runtime/endpoint.js": "text/javascript" };
+    const types = { "index.html": "text/html; charset=utf-8", "launch.js": "text/javascript", "launch.css": "text/css", "theme.js": "text/javascript", "icon.png": "image/png", "icon-dark.png": "image/png", "icon.svg": "image/svg+xml", ".runtime/endpoint.js": "text/javascript" };
     if (!Object.hasOwn(types, file)) { response.writeHead(404); return response.end(); }
     const data = await readFile(new URL(file, root));
     response.setHeader("Content-Type", types[file]);

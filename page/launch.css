@@ -7,5 +7,5 @@ h1 { font-size: 20px; font-weight: 650; margin: 16px 0 6px; }
 p { color: var(--muted); }
 button { margin: 14px 0; border: 0; padding: 8px 16px; border-radius: 7px; color: var(--on-accent); background: var(--accent); cursor: pointer; font: inherit; }
 .hint { max-width: 420px; font-size: 12px; }
-img { border-radius: 10px; }
+img { border-radius: 10px; background: transparent; }
 [hidden] { display: none !important; }
