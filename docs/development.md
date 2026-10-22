@@ -20,6 +20,15 @@ bun test tests --timeout 15000
 
 Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对路径运行同样的命令。
 
+## SVG 图标复用约定
+
+页面和弹窗中的 SVG 图标统一由[公共图标模块](../page/icons.js)管理，开发时遵守以下约定：
+
+- 使用图标前先检查公共库，已有相同或同义图标时直接复用，不重复添加。
+- 静态位置使用 `data-icon="图标名称"`，由 `renderIcons()` 统一渲染；动态创建和切换图标使用公共模块的 `icon()`、`setIcon()`。
+- 公共库中确实没有所需图标时，才在 `page/icons.js` 的 `definitions` 中新增，并使用明确、可复用的名称。页面 HTML 和业务脚本中不单独定义或复制 SVG 路径、`symbol`。
+- 图标颜色和尺寸通过公共样式及所在组件的 CSS 调整，不为样式差异新增同一图标的副本。
+
 ## 与 Magpie 规范对应
 
 | 规范要求 | 本项目实现 |
@@ -27,7 +36,7 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 | 包入口可由 `exports["./server"]`、`main` 等定位 | 两者均指向根目录 `index.mjs` |
 | 入口支持 `export default { id, server }` | 仅导出该对象，辅助函数位于 `src/` |
 | 插件函数接收 `input, options`，返回 hooks | `createPlugin` 返回 `{ tool }` |
-| 工具参数支持 JSON Schema | 10 个工具声明 JSON Schema，内部另有运行校验 |
+| 工具参数支持 JSON Schema | 12 个工具声明 JSON Schema，内部另有运行校验 |
 | `ctx.abort` 是取消信号 | 连接和新增转发将其传入会话层 |
 | npm 安装不会运行依赖安装脚本 | 纯 JavaScript 路径已在禁用脚本、排除可选原生包的安装下测试 |
 | Git / 目录安装需要已存在的入口文件 | 全部运行源码随 Git 跟踪，无 `dist` 依赖 |

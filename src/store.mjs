@@ -55,6 +55,20 @@ export class ProfileStore {
     });
   }
 
+  importProfiles(values) {
+    const incoming = values.map(validateProfile);
+    if (new Set(incoming.map((profile) => profile.id)).size !== incoming.length) throw new Error("导入的连接 id 不能重复");
+    return this.#change(async (profiles) => {
+      const ids = new Set(profiles.map((profile) => profile.id));
+      const imported = [], skipped = [];
+      for (const profile of incoming) {
+        if (ids.has(profile.id)) { skipped.push({ id: profile.id, reason: "连接已存在，未覆盖" }); continue; }
+        profiles.push(profile); ids.add(profile.id); imported.push(profile);
+      }
+      return { imported, skipped };
+    });
+  }
+
   #change(update) {
     const operation = this.#pending.then(async () => {
       const profiles = await this.list();

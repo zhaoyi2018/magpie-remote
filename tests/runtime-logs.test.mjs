@@ -1,0 +1,74 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { SessionManager } from "../src/sessions.mjs";
+import { ProfileStore } from "../src/store.mjs";
+import { createTools } from "../src/plugin.mjs";
+import { startManagementServer } from "../src/web-server.mjs";
+import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
+
+test("management snapshots include real lifecycle logs across reconnects without persisting credentials", async (t) => {
+  const fixture = await sshServer(t);
+  const echo = await echoServer(t);
+  const store = new ProfileStore(join(await temporary(t), "connections.json"));
+  const sessions = new SessionManager({ env: {} });
+  const tools = createTools(store, sessions);
+  const web = await startManagementServer({ tools });
+  t.after(async () => { await web.close(); await sessions.close(); });
+  const profile = { ...fixture.profile, passwordEnv: undefined };
+  await tools.save_connection.execute({ connection: profile });
+  await tools.connect.execute({ connectionId: profile.id }, { credentials: { password: "local-test-secret" } });
+  const rule = { id: "web", name: "本地开发代理", direction: "c2s", bindPort: 0, targetPort: echo.port };
+  const forward = await tools.forward_add.execute({ connectionId: profile.id, forward: rule });
+  assert.deepEqual(await exchange(forward.bindPort), Buffer.from("SSH tunnel round trip"));
+  await tools.forward_remove.execute({ connectionId: profile.id, forwardId: rule.id });
+  await tools.disconnect.execute({ connectionId: profile.id });
+  const previous = sessions.status(profile.id);
+  await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
+  assert.ok(previous.logs.some((entry) => entry.message.includes("认证成功")));
+  assert.ok(previous.logs.some((entry) => entry.message.includes("本地开发代理") && entry.message.includes("启动")));
+  assert.ok(previous.logs.some((entry) => entry.message.includes("监听已释放")));
+  assert.ok(previous.logs.some((entry) => entry.message.includes("SSH 连接已断开")));
+  await tools.connect.execute({ connectionId: profile.id }, { credentials: { password: "local-test-secret" } });
+  const response = await fetch(new URL("api/snapshot", web.url), { headers: { Authorization: "Bearer " + web.token } });
+  const { connections: [row] } = await response.json();
+  assert.ok(row.session.logs.length > previous.logs.length);
+  assert.ok(row.session.logs.every((entry) => Number.isFinite(Date.parse(entry.time))));
+  assert.equal(row.session.lastConnectedAt, row.session.connectedAt);
+  assert.ok(!JSON.stringify(row).includes("local-test-secret"));
+  assert.ok(!(await readFile(store.file, "utf8")).includes("local-test-secret"));
+  assert.ok(!(await readFile(store.file, "utf8")).includes('"logs"'));
+  row.session.logs[0].message = "must not modify live history";
+  assert.notEqual(sessions.status(profile.id).logs[0].message, row.session.logs[0].message);
+});
+
+test("failed authentication and forwarding are recorded as errors and history remains bounded", async (t) => {
+  const fixture = await sshServer(t);
+  const echo = await echoServer(t);
+  const sessions = new SessionManager({ env: {} });
+  t.after(() => sessions.close());
+  const profile = { ...fixture.profile, passwordEnv: undefined };
+  await assert.rejects(sessions.connect(profile, { credentials: { password: "never-log-this" } }));
+  let status = sessions.status(profile.id);
+  assert.ok(status.logs.some((entry) => entry.level === "error" && entry.message.includes("SSH 连接失败")));
+  assert.ok(!JSON.stringify(status.logs).includes("never-log-this"));
+  await sessions.connect(profile, { credentials: { password: "local-test-secret" } });
+  const spec = { id: "test", direction: "c2s", bindPort: 0, targetPort: echo.port };
+  const first = await sessions.addForward(profile.id, spec);
+  await assert.rejects(sessions.addForward(profile.id, { ...spec, id: "collision", bindPort: echo.port }));
+  assert.ok(sessions.status(profile.id).logs.some((entry) => entry.level === "error" && entry.message.includes("collision")));
+  await sessions.removeForward(profile.id, spec.id);
+  for (let i = 0; i < 102; i++) {
+    await sessions.addForward(profile.id, spec);
+    await sessions.removeForward(profile.id, spec.id);
+  }
+  status = sessions.status(profile.id);
+  assert.equal(status.logs.length, 200);
+  assert.equal(status.state, "connected");
+  const copy = sessions.status(profile.id);
+  copy.logs[0].message = "changed";
+  assert.notEqual(sessions.status(profile.id).logs[0].message, "changed");
+  await sessions.disconnect(profile.id);
+  assert.equal(sessions.status(profile.id).logs.length, 200);
+});

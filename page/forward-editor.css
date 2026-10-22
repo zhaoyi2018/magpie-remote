@@ -1,0 +1,68 @@
+.forward-editor { width: min(680px, calc(100vw - 24px)); }
+.forward-editor[open] { display: flex; flex-direction: column; overflow: hidden; }
+.forward-editor .dialog-heading { align-items: center; padding: 20px 28px; flex-shrink: 0; }
+.forward-editor .dialog-heading h2 { font-size: 20px; }
+.forward-editor .icon-button { color: var(--muted); }
+.forward-editor form { display: flex; flex-direction: column; min-height: 0; }
+.forward-editor .dialog-content { padding: 18px 28px 20px; min-height: 0; overflow: auto; }
+.forward-editor label, .forward-editor legend { font-size: 14px; }
+.forward-editor input:not([type="radio"]):not([type="checkbox"]):not([type="hidden"]) { background: var(--surface); padding: 9px 12px; min-height: 40px; font-size: 15px; }
+.forward-editor .forward-name { margin-bottom: 24px; }
+.forward-editor fieldset { padding: 0; border: 0; margin: 0 0 24px; min-width: 0; }
+.forward-editor legend { font-weight: 650; padding: 0; margin-bottom: 10px; }
+.forward-direction-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.forward-editor .forward-direction { margin-bottom: 16px; }
+.forward-editor .forward-direction-option { display: flex; align-items: center; gap: 16px; padding: 16px; min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; transition: background .15s, border-color .15s; }
+.forward-direction-option:hover { background: var(--surface-muted); }
+.forward-direction-option:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
+.forward-direction-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
+.forward-editor .forward-direction-option input { display: block; flex: 0 0 18px; width: 18px; height: 18px; min-height: 0; padding: 0; margin: 0; accent-color: var(--accent); cursor: pointer; box-shadow: none; }
+.forward-icon { width: 24px; height: 24px; }
+.forward-icon > .icon { width: 100%; height: 100%; }
+.forward-direction-option > .forward-icon { width: 26px; height: 26px; }
+.forward-direction-option span { min-width: 0; }
+.forward-direction-option strong { display: block; font-size: 15px; font-weight: 600; }
+.forward-direction-option:has(input:checked) strong { color: var(--accent); }
+.forward-direction-option small { display: block; margin-top: 4px; font-size: 12px; font-weight: 450; }
+.forward-preview { border-radius: 10px; background: var(--surface-muted); padding: 20px 24px 16px; margin-bottom: 26px; }
+.forward-flow { display: grid; grid-template-columns: minmax(0, 1fr) 32px minmax(0, 1.1fr) 32px minmax(0, 1fr); align-items: center; gap: 14px; }
+.forward-flow-node { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 50px; border-radius: 8px; background: var(--surface); padding: 10px; font-size: 14px; font-weight: 550; white-space: nowrap; }
+.forward-flow-node .forward-icon { width: 22px; height: 22px; }
+.forward-flow-arrow { width: 32px; color: var(--muted); }
+.forward-preview > p { text-align: center; font-size: 12px; color: var(--muted); margin-top: 10px; }
+.forward-address-fields { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .9fr); gap: 32px; }
+.forward-editor .forward-address-fields label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 18px; margin: 0; color: var(--muted); font-weight: 450; white-space: nowrap; }
+.forward-editor .forward-address-fields input { margin: 0; color: var(--fg); }
+.forward-editor .forward-preset { display: flex; align-items: center; gap: 10px; font-weight: 450; margin: 0 0 18px; }
+.forward-editor .forward-preset input { display: block; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); box-shadow: none; cursor: pointer; }
+.forward-editor .forward-preset input:disabled { cursor: default; }
+.forward-note { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); font-size: 13px; }
+.forward-note .forward-icon { width: 24px; height: 24px; }
+.forward-action-hint { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.forward-editor .field-error { margin: 12px 0 0; }
+.forward-editor .dialog-actions { position: static; padding: 18px 28px; flex-shrink: 0; gap: 12px; }
+.forward-editor .dialog-actions .button { padding: 9px 22px; min-height: 44px; font-size: 15px; }
+.forward-editor #save-forward { display: inline-flex; align-items: center; justify-content: center; gap: 10px; }
+.forward-add-icon > .icon { width: 20px; height: 20px; }
+
+@media (max-width: 600px) {
+  .forward-editor .dialog-heading { padding: 16px 18px; }
+  .forward-editor .dialog-heading h2 { font-size: 18px; }
+  .forward-editor .dialog-content { padding: 16px 18px; }
+  .forward-editor .forward-name, .forward-editor .forward-address { margin-bottom: 20px; }
+  .forward-direction-options { grid-template-columns: 1fr; gap: 8px; }
+  .forward-editor .forward-direction-option { padding: 12px 14px; }
+  .forward-preview { padding: 16px 12px 12px; margin-bottom: 20px; }
+  .forward-flow { grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1.1fr) 18px minmax(0, 1fr); gap: 6px; }
+  .forward-flow-node { flex-direction: column; gap: 6px; padding: 10px 4px; font-size: 12px; }
+  .forward-flow-arrow { width: 18px; }
+  .forward-preview > p { font-size: 11px; }
+  .forward-address-fields { grid-template-columns: minmax(0, 1fr) minmax(0, .75fr); gap: 14px; }
+  .forward-editor .forward-address-fields label { display: block; font-size: 12px; }
+  .forward-editor .forward-address-fields input { margin-top: 6px; }
+  .forward-editor .forward-preset { font-size: 13px; align-items: flex-start; }
+  .forward-editor .forward-preset input { margin-top: 1px; }
+  .forward-note { gap: 10px; padding: 10px 12px; font-size: 12px; }
+  .forward-editor .dialog-actions { padding: 14px 18px; }
+  .forward-editor .dialog-actions .button { font-size: 14px; padding: 8px 18px; }
+}

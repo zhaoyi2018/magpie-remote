@@ -7,9 +7,11 @@ import { dirname } from "node:path";
 const assets = new Map([
   ["", ["manage.html", "text/html; charset=utf-8"]],
   ["app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["icons.js", ["icons.js", "text/javascript; charset=utf-8"]],
   ["app.css", ["app.css", "text/css; charset=utf-8"]],
   ["connection-editor.js", ["connection-editor.js", "text/javascript; charset=utf-8"]],
   ["connection-editor.css", ["connection-editor.css", "text/css; charset=utf-8"]],
+  ["forward-editor.css", ["forward-editor.css", "text/css; charset=utf-8"]],
   ["theme.js", ["theme.js", "text/javascript; charset=utf-8"]],
   ["icon.png", ["icon.png", "image/png"]],
   ["icon-dark.png", ["icon-dark.png", "image/png"]],
@@ -118,7 +120,9 @@ export async function startManagementServer({ tools, port = 0 }) {
     response.setHeader("Content-Security-Policy", [
       "default-src 'none'", `script-src ${origin}`, `style-src ${origin}`,
       `img-src ${origin} data:`, `connect-src ${origin}`, "object-src 'none'", "base-uri 'none'",
-      "form-action 'none'", "sandbox allow-scripts", "frame-ancestors http://127.0.0.1:* http://localhost:*",
+      "form-action 'none'", "sandbox allow-scripts",
+      // Magpie's Windows desktop uses Wails' virtual origin rather than a loopback URL.
+      "frame-ancestors http://127.0.0.1:* http://localhost:* http://wails.localhost",
     ].join("; "));
     response.writeHead(200, { "Content-Type": asset[1] });
     response.end(request.method === "HEAD" ? undefined : data);

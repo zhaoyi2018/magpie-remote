@@ -47,11 +47,14 @@ export function expandPath(value) {
 
 export function validateForward(value) {
   object(value, "转发配置");
-  onlyKeys(value, ["id", "direction", "bindHost", "bindPort", "targetHost", "targetPort"], "转发配置");
+  onlyKeys(value, ["id", "name", "direction", "bindHost", "bindPort", "targetHost", "targetPort"], "转发配置");
   const direction = text(value.direction, "direction");
   if (!["c2s", "s2c"].includes(direction)) throw new Error("direction 必须是 c2s 或 s2c");
+  const name = value.name === undefined ? undefined : text(value.name, "规则名称");
+  if (name?.length > 100) throw new Error("规则名称长度不能超过 100 个字符");
   return {
     id: identifier(value.id, "转发 id"),
+    ...(name !== undefined && { name }),
     direction,
     bindHost: text(value.bindHost, "bindHost", "127.0.0.1"),
     bindPort: integer(value.bindPort, "bindPort", undefined, 0),

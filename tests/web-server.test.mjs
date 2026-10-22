@@ -61,6 +61,20 @@ test("the management page is self-contained and only serves its declared assets"
   assert.equal((await fetch(new URL("api/call", web.url), { method: "POST", headers: web.headers, body: "x".repeat(70000) })).status, 413);
 });
 
+test("the page permits Magpie's Windows desktop origin without permitting arbitrary frame parents", async (t) => {
+  const web = await service(t);
+  const response = await fetch(web.url);
+  const directive = response.headers.get("content-security-policy").split(";")
+    .map((value) => value.trim()).find((value) => value.startsWith("frame-ancestors "));
+  assert.ok(directive, "The management page must restrict its embedding origins");
+  const origins = directive.split(/\s+/).slice(1);
+  assert.ok(origins.includes("http://wails.localhost"), "Magpie's Windows desktop must be able to embed the page");
+  assert.ok(origins.includes("http://127.0.0.1:*"));
+  assert.ok(origins.includes("http://localhost:*"));
+  assert.ok(origins.every((origin) => ["http://wails.localhost", "http://127.0.0.1:*", "http://localhost:*"].includes(origin)),
+    "The fix must not permit unrelated websites to embed the page");
+});
+
 test("page actions authenticate with a transient password and persist, run and delete both forward directions", async (t) => {
   const fixture = await sshServer(t);
   const echo = await echoServer(t);
@@ -83,6 +97,18 @@ test("page actions authenticate with a transient password and persist, run and d
   await web.call("disconnect", { connectionId: profile.id });
   await web.call("remove_connection", { connectionId: profile.id });
   assert.deepEqual(await web.store.list(), []);
+});
+
+test("the authenticated page can preview a local SSH file and import only its selected host", async (t) => {
+  const web = await service(t);
+  const file = join(await temporary(t), "ssh-config");
+  await writeFile(file, "Host selected unselected\n HostName server.example\n User developer\n");
+  const preview = await web.call("ssh_config_preview", { configPath: file });
+  assert.deepEqual(await web.store.list(), []);
+  const result = await web.call("ssh_config_import", { configPath: file, revision: preview.revision, aliases: ["selected"] });
+  assert.equal(result.imported.length, 1);
+  assert.deepEqual((await web.store.list()).map((profile) => profile.id), ["selected"]);
+  assert.equal(web.sessions.status("selected").state, "disconnected");
 });
 
 test("the endpoint launcher is removed only by the host that published it", async (t) => {

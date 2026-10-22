@@ -4,6 +4,7 @@ import { ProfileStore } from "./store.mjs";
 import { SessionManager } from "./sessions.mjs";
 import { startManagementServer, publishEndpoint } from "./web-server.mjs";
 import { fileURLToPath } from "node:url";
+import { readSSHConfig } from "./ssh-config.mjs";
 
 const runtimes = new WeakMap();
 export async function closePlugin(hooks) {
@@ -25,6 +26,7 @@ const forwardSchema = {
   required: ["id", "direction", "bindPort", "targetPort"],
   properties: {
     id: idSchema,
+    name: { ...stringSchema, maxLength: 100, description: "Optional display name for the forward" },
     direction: { type: "string", enum: ["c2s", "s2c"], description: "c2s = SSH -L; s2c = SSH -R" },
     bindHost: { ...stringSchema, default: "127.0.0.1" },
     bindPort: { type: "integer", minimum: 0, maximum: 65535, description: "0 selects an available port" },
@@ -70,6 +72,32 @@ export function createTools(store, sessions) {
     return operation;
   };
   return {
+    ssh_config_preview: {
+      description: "Preview concrete hosts from the local user's and system OpenSSH configuration, or one specified file. Reads Include files without executing commands or connecting. Existing profiles are marked and not overwritten.",
+      args: args({ configPath: stringSchema }, []),
+      async execute({ configPath } = {}) {
+        const preview = await readSSHConfig({ configPath });
+        const ids = new Set((await store.list()).map((profile) => profile.id));
+        return { ...preview, candidates: preview.candidates.map((candidate) => ({ ...candidate, exists: Boolean(candidate.profile && ids.has(candidate.profile.id)) })) };
+      },
+    },
+    ssh_config_import: {
+      description: "Import only explicitly selected aliases from a previously previewed OpenSSH configuration revision. Creates new profiles atomically, skips existing IDs, never connects, and optionally includes TCP forward presets.",
+      args: args({ configPath: stringSchema, revision: { type: "string", pattern: "^[a-f0-9]{64}$" }, aliases: { type: "array", minItems: 1, maxItems: 500, uniqueItems: true, items: stringSchema }, includeForwards: { type: "boolean", default: true } }, ["revision", "aliases"]),
+      async execute({ configPath, revision, aliases, includeForwards = true }) {
+        if (!Array.isArray(aliases) || !aliases.length || aliases.length > 500 || aliases.some((alias) => typeof alias !== "string") || new Set(aliases).size !== aliases.length) throw new Error("请勾选 1–500 个不同的 SSH 主机");
+        if (typeof includeForwards !== "boolean") throw new Error("includeForwards 必须是布尔值");
+        const preview = await readSSHConfig({ configPath });
+        if (preview.revision !== revision) throw new Error("SSH 配置已变化，请重新预览后再导入");
+        const candidates = new Map(preview.candidates.map((candidate) => [candidate.alias, candidate]));
+        const profiles = aliases.map((alias) => {
+          const candidate = candidates.get(alias);
+          if (!candidate?.selectable) throw new Error(`主机 ${alias} 不在可导入列表中，请重新预览`);
+          return { ...candidate.profile, forwards: includeForwards ? candidate.profile.forwards : [] };
+        });
+        return store.importProfiles(profiles);
+      },
+    },
     connections: {
       description: "List saved SSH connection profiles and their current session states. Does not connect.",
       args: args({}),

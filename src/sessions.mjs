@@ -42,8 +42,11 @@ export class SessionManager {
     const session = {
       id: profile.id, state: "connecting", client: new Client(), forwards: new Map(),
       host: profile.host, port: profile.port, username: profile.username,
+      logs: previous?.logs ?? [],
+      lastConnectedAt: previous?.connectedAt ?? previous?.lastConnectedAt,
     };
     this.#sessions.set(profile.id, session);
+    this.#log(session, "info", "正在建立 SSH 连接 " + profile.username + "@" + profile.host + ":" + profile.port);
     session.pending = this.#open(session, profile, signal, credentials);
     return session.pending;
   }
@@ -97,6 +100,8 @@ export class SessionManager {
           if (session.state !== "connecting") return;
           session.state = "connected";
           session.connectedAt = new Date().toISOString();
+          session.lastConnectedAt = session.connectedAt;
+          this.#log(session, "info", "SSH 认证成功，连接已建立");
           finish();
         });
         session.client.on("error", (error) => {
@@ -111,7 +116,10 @@ export class SessionManager {
         });
         session.client.once("close", () => {
           if (session.state === "connecting") finish(new Error("SSH 认证完成前连接已关闭"));
-          if (session.state !== "failed") session.state = "disconnected";
+          if (!["failed", "disconnected"].includes(session.state)) {
+            session.state = "disconnected";
+            this.#log(session, "warn", "SSH 连接已关闭，正在释放全部转发");
+          }
           void this.#releaseAll(session);
         });
         session.client.connect(config);
@@ -171,8 +179,10 @@ export class SessionManager {
       aborted(signal);
       if (session.state !== "connected") throw new Error("SSH 连接已关闭");
       forward.state = "listening";
+      this.#log(session, "info", "转发「" + (forward.name ?? forward.id) + "」已启动（" + forward.direction + "）：" + forward.bindHost + ":" + forward.bindPort + " → " + forward.targetHost + ":" + forward.targetPort);
       return this.#forwardView(forward);
     } catch (error) {
+      this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」启动失败：" + error.message);
       session.forwards.delete(forward.id);
       await this.#releaseLocal(forward);
       // A remote allocation whose reply was lost must not outlive its session.
@@ -203,16 +213,19 @@ export class SessionManager {
       session.forwards.delete(forward.id);
       await this.#releaseLocal(forward);
     }
+    this.#log(session, "info", "转发「" + (forward.name ?? forward.id) + "」已停止，监听已释放");
     return { id: forwardId, stopped: true };
   }
 
   async disconnect(id) {
     const session = this.#sessions.get(id);
     if (!session) return { id, state: "disconnected", forwards: [] };
+    if (session.state === "disconnected") return this.#view(session);
     session.state = "disconnected";
     session.rejectConnect?.(new Error("连接已断开"));
     session.client.destroy();
     await this.#releaseAll(session);
+    this.#log(session, "info", "SSH 连接已断开，全部转发已停止");
     return this.#view(session);
   }
 
@@ -259,6 +272,7 @@ export class SessionManager {
         clearTimeout(timer);
         if (error) {
           forward.lastError = error.message;
+          this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」目标连接失败：" + error.message);
           socket.destroy();
           return;
         }
@@ -288,7 +302,10 @@ export class SessionManager {
       socket.destroy();
     };
     const timer = setTimeout(deny, this.forwardTimeoutMs);
-    socket.once("error", deny);
+    socket.once("error", (error) => {
+      this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」本地目标连接失败：" + error.message);
+      deny();
+    });
     socket.once("close", () => { clearTimeout(timer); deny(); });
     socket.once("connect", () => {
       clearTimeout(timer);
@@ -303,6 +320,7 @@ export class SessionManager {
   #fail(session, error) {
     if (session.state === "disconnected") return;
     session.lastError = String(error.message ?? error).slice(0, 300);
+    if (session.state !== "failed") this.#log(session, "error", "SSH 连接失败：" + session.lastError);
     session.state = "failed";
     session.rejectConnect?.(error);
     session.client.destroy();
@@ -323,15 +341,21 @@ export class SessionManager {
     await closeServer(forward.server);
   }
 
+  #log(session, level, message) {
+    session.logs.push({ time: new Date().toISOString(), level, message: String(message).replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500) });
+    if (session.logs.length > 200) session.logs.splice(0, session.logs.length - 200);
+  }
+
   #forwardView(forward) {
-    const { id, direction, bindHost, bindPort, targetHost, targetPort, state, lastError } = forward;
-    return { id, direction, bindHost, bindPort, targetHost, targetPort, state, ...(lastError && { lastError }) };
+    const { id, name, direction, bindHost, bindPort, targetHost, targetPort, state, lastError } = forward;
+    return { id, ...(name !== undefined && { name }), direction, bindHost, bindPort, targetHost, targetPort, state, ...(lastError && { lastError }) };
   }
 
   #view(session) {
-    const { id, host, port, username, state, connectedAt, hostFingerprint, lastError } = session;
+    const { id, host, port, username, state, connectedAt, lastConnectedAt, hostFingerprint, lastError } = session;
     return {
-      id, host, port, username, state, connectedAt, hostFingerprint,
+      id, host, port, username, state, connectedAt, lastConnectedAt, hostFingerprint,
+      logs: session.logs.map((entry) => ({ ...entry })),
       ...(lastError && { lastError }),
       forwards: [...session.forwards.values()].map((forward) => this.#forwardView(forward)),
     };

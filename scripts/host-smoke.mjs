@@ -61,7 +61,7 @@ try {
   });
   assert.equal(loaded.plugins.length, 1);
   assert.equal(loaded.plugins[0].error, undefined, loaded.plugins[0].error);
-  assert.equal(loaded.plugins[0].tools.length, 10);
+  assert.equal(loaded.plugins[0].tools.length, 12);
   const call = async (name, args = {}) => JSON.parse((await rpc("tool", { spec: root, name, args, ms: 5000 })).text);
   await call("save_connection", { connection: fixture.profile });
   assert.equal((await call("connect", { connectionId: fixture.profile.id })).state, "connected");
@@ -78,7 +78,7 @@ try {
   await call("disconnect", { connectionId: fixture.profile.id });
   await call("remove_connection", { connectionId: fixture.profile.id });
   assert.deepEqual(await call("connections"), []);
-  console.log("Magpie host: 10 tools registered; SSH authentication, c2s and s2c round trips, port release and profile removal passed.");
+  console.log("Magpie host: 12 tools registered; SSH authentication, c2s and s2c round trips, port release and profile removal passed.");
   if (process.argv.includes("--ui")) {
     const harness = await startUIHarness();
     cleanup.unshift(() => harness.close());

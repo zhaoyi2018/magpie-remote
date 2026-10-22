@@ -7,12 +7,14 @@ flowchart TD
   Agent[支持 MCP 的 Agent] --> Gateway[Magpie Plugin tools]
   Gateway --> Host[Bun 插件宿主]
   Host --> Entry[index.mjs / default server]
-  Entry --> Tools[src/plugin.mjs / 10 个工具]
+  Entry --> Tools[src/plugin.mjs / 12 个工具]
   Page[Magpie 内嵌启动页] --> UI[本机管理服务与页面]
   Entry --> UI
   UI --> Tools
   Tools --> Config[src/config.mjs / 校验]
   Tools --> Store[src/store.mjs / 配置持久化]
+  Tools --> Import[src/ssh-config.mjs / SSH 配置预览]
+  Import --> Source[用户与系统 SSH 配置 / 只读]
   Tools --> Sessions[src/sessions.mjs / 会话与转发]
   Sessions --> Trust[src/host-keys.mjs / 主机公钥]
   Sessions --> SSH[ssh2 Client]
@@ -51,6 +53,12 @@ sequenceDiagram
 ```
 
 工具入口按连接 id 串行处理修改、连接与转发操作，独立连接可以并行。断开操作会立即取消同一连接等待中的连接请求。配置写入另有进程内串行队列；临时文件写完后重命名替换，避免留下半个 JSON。
+
+## SSH 配置导入
+
+预览工具读取用户与系统配置及 Include 文件，计算有效的主机候选和 revision，并附加现有连接 id 的冲突标记。导入工具重新读取并核对 revision，只把用户所选且受支持的连接交给 `ProfileStore.importProfiles`。它与其他配置写入共用串行队列，在同一次原子替换中新增连接并跳过已有 id，不覆盖旧配置。源文件和当前 SSH 会话不参与写入；读取阶段不执行命令。
+
+完整映射、限制及管理页接入说明见 [SSH 配置导入](ssh-import.md)。
 
 ## TCP 数据路径
 
