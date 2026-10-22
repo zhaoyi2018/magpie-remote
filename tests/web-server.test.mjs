@@ -55,10 +55,38 @@ test("the management page is self-contained and only serves its declared assets"
   assert.match(await response.text(), /连接服务器/);
   assert.match(response.headers.get("content-security-policy"), /sandbox allow-scripts/);
   assert.equal((await fetch(new URL("app.js", web.url))).status, 200);
+  assert.equal((await fetch(new URL("backups.js", web.url))).status, 200);
   assert.equal((await fetch(new URL("src/store.mjs", web.url))).status, 404);
   assert.equal((await fetch(new URL("../package.json", web.url))).status, 404);
   assert.equal((await fetch(new URL("api/call", web.url), { method: "POST", headers: web.headers, body: "not JSON" })).status, 400);
   assert.equal((await fetch(new URL("api/call", web.url), { method: "POST", headers: web.headers, body: "x".repeat(70000) })).status, 413);
+});
+
+test("authenticated backup recovery remains available when the normal snapshot is broken", async (t) => {
+  const web = await service(t);
+  await web.call("save_connection", { connection: { id: "recover", host: "host.example", username: "tester", autoReconnect: true } });
+  const backup = await web.call("config_backup", {});
+  const broken = "{ broken configuration";
+  await writeFile(web.store.file, broken);
+  const failed = await fetch(new URL("api/snapshot", web.url), { headers: web.headers });
+  assert.equal(failed.status, 400);
+  const error = await failed.json();
+  assert.equal(error.code, "CONFIG_INVALID");
+  assert.equal(error.category, "configuration");
+  assert.equal(error.retryable, false);
+  assert.equal((await web.call("config_backups", {}))[0].id, backup.id);
+  const preview = await web.call("config_restore_preview", { backupId: backup.id });
+  assert.equal(preview.currentValid, false);
+  const denied = await fetch(new URL("api/call", web.url), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method: "config_restore", args: { backupId: backup.id, revision: preview.revision } }) });
+  assert.equal(denied.status, 401);
+  assert.equal(await readFile(web.store.file, "utf8"), broken);
+  const result = await web.call("config_restore", { backupId: backup.id, revision: preview.revision, stopConnections: true });
+  assert.equal(await readFile(result.preserved.recoveryFile, "utf8"), broken);
+  const recovered = await fetch(new URL("api/snapshot", web.url), { headers: web.headers });
+  assert.equal(recovered.status, 200);
+  const row = (await recovered.json()).connections[0];
+  assert.equal(row.connection.autoReconnect, true);
+  assert.equal(row.session.state, "disconnected");
 });
 
 test("the page permits Magpie's Windows desktop origin without permitting arbitrary frame parents", async (t) => {

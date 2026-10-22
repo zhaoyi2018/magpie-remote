@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { expandPath } from "./config.mjs";
+import { OperationError } from "./errors.mjs";
 
 export function fingerprint(key) {
   return `SHA256:${createHash("sha256").update(key).digest("base64").replace(/=+$/, "")}`;
@@ -36,7 +37,7 @@ export async function hostVerifier(profile) {
   try {
     contents = await readFile(file, "utf8");
   } catch (error) {
-    if (error.code !== "ENOENT") throw new Error("无法读取 known_hosts 文件", { cause: error });
+    if (error.code !== "ENOENT") throw new OperationError("HOST_KEY_UNAVAILABLE", "无法读取 known_hosts 文件", { cause: error });
   }
   const host = profile.port === 22 ? profile.host : `[${profile.host}]:${profile.port}`;
   const entries = contents.split(/\r?\n/).flatMap((line) => {

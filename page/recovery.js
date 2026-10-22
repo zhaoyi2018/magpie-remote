@@ -21,6 +21,7 @@ export async function readResponse(response) {
   if (!response.ok) throw Object.assign(new Error(data.error || "请求失败 (" + response.status + ")"), {
     code: data.code ?? ([401, 404].includes(response.status) ? "MANAGEMENT_EXPIRED" : "OPERATION_FAILED"),
     status: response.status,
+    category: data.category, retryable: data.retryable === true,
     ...(data.code === "CREDENTIALS_REQUIRED" && { credentialFields: data.credentialFields }),
   });
   return data;
@@ -28,7 +29,7 @@ export async function readResponse(response) {
 
 export function managementFailure(error) {
   if (error.code === "CONFIG_INVALID" || error.code === "CONFIG_UNREADABLE") {
-    return { label: "连接配置需要修复", message: error.message + "。管理服务仍在运行，修复配置文件后点击重试。", action: "retry" };
+    return { label: "连接配置需要修复", message: error.message + "。管理服务仍在运行，可从「备份与恢复」恢复，或修复配置文件后重试。", action: "retry" };
   }
   if (error.code === "MANAGEMENT_EXPIRED") {
     return { label: "管理页面已过期", message: "插件可能已重新加载，请重新打开页面以获取新的管理地址。", action: "reopen" };

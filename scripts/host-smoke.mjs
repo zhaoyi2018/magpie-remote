@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { basename, dirname, join, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { echoServer, exchange, sshServer } from "../tests/helpers.mjs";
+import { echoServer, exchange, sshServer, until } from "../tests/helpers.mjs";
 import { startUIHarness } from "./ui-harness.mjs";
 
 const [bunPath, hostPath] = process.argv.slice(2);
@@ -61,9 +61,9 @@ try {
   });
   assert.equal(loaded.plugins.length, 1);
   assert.equal(loaded.plugins[0].error, undefined, loaded.plugins[0].error);
-  assert.equal(loaded.plugins[0].tools.length, 12);
+  assert.equal(loaded.plugins[0].tools.length, 16);
   const call = async (name, args = {}) => JSON.parse((await rpc("tool", { spec: root, name, args, ms: 5000 })).text);
-  await call("save_connection", { connection: fixture.profile });
+  await call("save_connection", { connection: { ...fixture.profile, autoReconnect: true } });
   assert.equal((await call("connect", { connectionId: fixture.profile.id })).state, "connected");
   for (const direction of ["c2s", "s2c"]) {
     const forward = await call("forward_add", {
@@ -75,10 +75,27 @@ try {
     await call("forward_remove", { connectionId: fixture.profile.id, forwardId: direction });
     await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
   }
-  await call("disconnect", { connectionId: fixture.profile.id });
+  for (const direction of ["c2s", "s2c"]) await call("forward_add", {
+    connectionId: fixture.profile.id, forward: { id: direction, direction, bindPort: 0, targetPort: echo.port },
+  });
+  const before = await call("status", { connectionId: fixture.profile.id });
+  for (const client of fixture.clients) client.end();
+  await until(async () => {
+    const status = await call("status", { connectionId: fixture.profile.id });
+    return status.state === "connected" && status.reconnect.state === "idle" && status.connectedAt !== before.connectedAt;
+  }, "Actual host did not reconnect");
+  const recovered = await call("status", { connectionId: fixture.profile.id });
+  assert.equal(recovered.forwards.length, 2);
+  for (const forward of recovered.forwards) assert.ok((await exchange(forward.bindPort)).length);
+  const backup = await call("config_backup");
+  assert.ok((await call("config_backups")).some((item) => item.id === backup.id));
+  const preview = await call("config_restore_preview", { backupId: backup.id });
+  await call("config_restore", { backupId: backup.id, revision: preview.revision, stopConnections: true });
+  assert.equal((await call("status", { connectionId: fixture.profile.id })).reconnect.state, "stopped");
+  for (const forward of recovered.forwards) await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
   await call("remove_connection", { connectionId: fixture.profile.id });
   assert.deepEqual(await call("connections"), []);
-  console.log("Magpie host: 12 tools registered; SSH authentication, c2s and s2c round trips, port release and profile removal passed.");
+  console.log("Magpie host: 16 tools registered; SSH authentication, c2s/s2c recovery and data round trips, backup/restore, retry cancellation, port release and profile removal passed.");
   if (process.argv.includes("--ui")) {
     const harness = await startUIHarness();
     cleanup.unshift(() => harness.close());

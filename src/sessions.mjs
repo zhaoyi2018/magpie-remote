@@ -3,12 +3,12 @@ import { createServer, connect as connectTCP } from "node:net";
 import { validateForward, validateProfile } from "./config.mjs";
 import { fingerprint, hostVerifier } from "./host-keys.mjs";
 import { prepareAuthentication, credentialRequest } from "./authentication.mjs";
-import { OperationError } from "./errors.mjs";
+import { OperationError, errorDetails, sshFailure } from "./errors.mjs";
 
 const { Client } = ssh2;
 
 function aborted(signal) {
-  if (signal?.aborted) throw new Error("操作已取消");
+  if (signal?.aborted) throw new OperationError("OPERATION_CANCELLED", "操作已取消");
 }
 
 function closeServer(server) {
@@ -18,11 +18,21 @@ function closeServer(server) {
 
 export class SessionManager {
   #sessions = new Map();
+  #intents = new Map();
+  #closed = false;
 
-  constructor({ connectTimeoutMs = 15000, forwardTimeoutMs = 10000, env = process.env } = {}) {
+  constructor({ connectTimeoutMs = 15000, forwardTimeoutMs = 10000, env = process.env,
+    reconnectDelayMs = 1000, reconnectMaxDelayMs = 30000, reconnectStableMs = 30000, random = Math.random,
+    keepaliveIntervalMs = 15000, keepaliveCountMax = 3 } = {}) {
     this.connectTimeoutMs = connectTimeoutMs;
     this.forwardTimeoutMs = forwardTimeoutMs;
     this.env = env;
+    this.reconnectDelayMs = reconnectDelayMs;
+    this.reconnectMaxDelayMs = reconnectMaxDelayMs;
+    this.reconnectStableMs = reconnectStableMs;
+    this.random = random;
+    this.keepaliveIntervalMs = keepaliveIntervalMs;
+    this.keepaliveCountMax = keepaliveCountMax;
   }
 
   status(id) {
@@ -31,35 +41,74 @@ export class SessionManager {
   }
 
   isActive(id) {
-    return ["connecting", "connected"].includes(this.#sessions.get(id)?.state);
+    return ["connecting", "connected"].includes(this.#sessions.get(id)?.state)
+      || ["waiting", "connecting"].includes(this.#intents.get(id)?.phase);
   }
 
   async connect(value, { signal, credentials } = {}) {
     aborted(signal);
+    if (this.#closed) throw new OperationError("OPERATION_CANCELLED", "插件已关闭");
     const profile = validateProfile(value);
     const previous = this.#sessions.get(profile.id);
     if (previous?.state === "connected") return this.#view(previous);
     if (previous?.state === "connecting") return previous.pending;
+    const continuing = this.#intents.get(profile.id);
+    const wantedForwards = continuing?.enabled && continuing.wanted && JSON.stringify(continuing.profile) === JSON.stringify(profile)
+      ? continuing.forwards : new Map((profile.autoStartForwards === false ? [] : profile.forwards).map((forward) => [forward.id, forward]));
+    this.#stopIntent(profile.id);
+    const intent = { profile, enabled: profile.autoReconnect === true, wanted: true, attempts: 0, phase: "connecting",
+      forwards: new Map(wantedForwards) };
+    this.#intents.set(profile.id, intent);
+    return this.#start(intent, signal, credentials);
+  }
+
+  #start(intent, signal, credentials) {
+    const profile = intent.profile;
+    const previous = this.#sessions.get(profile.id);
+    intent.controller = new AbortController();
+    intent.phase = "connecting";
+    intent.nextRetryAt = undefined;
+    const combined = signal ? AbortSignal.any([signal, intent.controller.signal]) : intent.controller.signal;
     const session = {
       id: profile.id, state: "connecting", client: new Client(), forwards: new Map(), forwardErrors: new Map(),
       host: profile.host, port: profile.port, username: profile.username,
       logs: previous?.logs ?? [],
       lastConnectedAt: previous?.connectedAt ?? previous?.lastConnectedAt,
+      intent, established: false,
     };
     this.#sessions.set(profile.id, session);
     this.#log(session, "info", "正在建立 SSH 连接 " + profile.username + "@" + profile.host + ":" + profile.port);
-    session.pending = this.#open(session, profile, signal, credentials);
+    session.pending = (async () => {
+      await previous?.cleanup;
+      aborted(combined);
+      return this.#open(session, profile, combined, credentials);
+    })().then(() => {
+      aborted(combined);
+      if (session.state !== "connected") throw new OperationError("SSH_DISCONNECTED", "SSH 连接已中断");
+      session.established = true;
+      intent.phase = "idle";
+      intent.reason = undefined;
+      clearTimeout(intent.stableTimer);
+      intent.stableTimer = setTimeout(() => { intent.attempts = 0; }, this.reconnectStableMs);
+      intent.stableTimer.unref?.();
+      return this.#view(session);
+    }).catch(async (error) => {
+      if (!["disconnected", "failed"].includes(session.state)) this.#fail(session, error);
+      await this.#releaseAll(session);
+      this.#scheduleReconnect(session, error);
+      throw error;
+    });
     return session.pending;
   }
 
   async #open(session, profile, signal, credentials = {}) {
-    const cancel = () => this.#fail(session, new Error("连接已取消"));
+    const cancel = () => this.#fail(session, new OperationError("OPERATION_CANCELLED", "连接已取消并停止"));
     signal?.addEventListener("abort", cancel, { once: true });
     try {
       const verify = await hostVerifier(profile);
       const config = {
         host: profile.host, port: profile.port, username: profile.username,
-        readyTimeout: this.connectTimeoutMs, keepaliveInterval: 15000, keepaliveCountMax: 3,
+        readyTimeout: this.connectTimeoutMs, keepaliveInterval: this.keepaliveIntervalMs, keepaliveCountMax: this.keepaliveCountMax,
         hostVerifier: (key) => {
           session.hostFingerprint = fingerprint(key);
           session.hostRejected = !verify(key);
@@ -98,24 +147,22 @@ export class SessionManager {
           const reason = session.hostRejected
             ? new OperationError("HOST_KEY_REJECTED", "SSH 主机公钥未被信任或已变化；请核对 hostFingerprint / known_hosts")
             : ["client-authentication", "agent"].includes(error.level)
-              ? credentialRequest(authentication.issues) ?? new OperationError("SSH_AUTH_FAILED", "SSH 认证失败，请检查用户名和凭据：" + error.message, { cause: error })
-              : new OperationError("SSH_CONNECTION_FAILED", "SSH 连接失败：" + error.message, { cause: error });
+              ? credentialRequest(authentication.issues) ?? sshFailure(error)
+              : sshFailure(error);
           finish(reason);
           this.#fail(session, reason);
         });
         session.client.once("close", () => {
-          if (session.state === "connecting") finish(new Error("SSH 认证完成前连接已关闭"));
-          if (!["failed", "disconnected"].includes(session.state)) {
-            session.state = "disconnected";
-            this.#log(session, "warn", "SSH 连接已关闭，正在释放全部转发");
-          }
-          void this.#releaseAll(session);
+          if (["failed", "disconnected"].includes(session.state)) return;
+          const reason = new OperationError("SSH_DISCONNECTED", "SSH 连接已关闭，正在释放全部转发");
+          finish(reason);
+          this.#fail(session, reason, "disconnected");
         });
         session.client.connect(config);
       });
-      if (profile.autoStartForwards !== false) {
-        for (const forward of profile.forwards) {
-          try { await this.addForward(profile.id, forward, { signal }); }
+      if (session.intent.forwards.size) {
+        for (const forward of [...session.intent.forwards.values()]) {
+          try { await this.addForward(profile.id, forward, { signal, internal: true }); }
           catch (error) {
             if (profile.forwardFailurePolicy !== "continue" || session.state !== "connected" || signal?.aborted) throw error;
             session.forwardErrors.set(forward.id, { id: forward.id, message: error.message });
@@ -129,16 +176,17 @@ export class SessionManager {
     } catch (error) {
       if (session.state !== "disconnected") this.#fail(session, error);
       await this.#releaseAll(session);
-      throw error;
+      throw session.failure ?? error;
     } finally {
       signal?.removeEventListener("abort", cancel);
     }
   }
 
-  async addForward(id, value, { signal } = {}) {
+  async addForward(id, value, { signal, internal = false } = {}) {
     aborted(signal);
     const spec = validateForward(value);
     const session = this.#sessions.get(id);
+    if (!internal && session?.intent.phase === "connecting") throw new OperationError("SESSION_BUSY", "连接恢复中，请稍后再操作转发");
     if (session?.state !== "connected") throw new Error("请先成功建立 SSH 连接，再创建转发");
     if (session.forwards.has(spec.id)) throw new Error(`转发 ${spec.id} 已存在`);
     if (spec.bindPort !== 0 && [...session.forwards.values()].some((item) => (
@@ -147,7 +195,7 @@ export class SessionManager {
     const forward = { ...spec, state: "starting", resources: new Set() };
     let remoteRejected = false;
     session.forwards.set(forward.id, forward);
-    const cancel = () => this.#fail(session, new Error("转发创建已取消，SSH 连接已关闭"));
+    const cancel = () => this.#fail(session, new OperationError("OPERATION_CANCELLED", "转发创建已取消，SSH 连接已关闭"));
     signal?.addEventListener("abort", cancel, { once: true });
     try {
       await this.#deadline(session, new Promise((resolve, reject) => {
@@ -156,7 +204,7 @@ export class SessionManager {
           forward.server = createServer({ allowHalfOpen: true }, (socket) => this.#outgoing(session, forward, socket));
           forward.server.on("error", (error) => {
             forward.lastError = error.code ?? error.message;
-            if (forward.state === "starting") reject(error);
+            if (forward.state === "starting") reject(new OperationError("FORWARD_BIND_FAILED", "无法建立本地监听：" + error.message, { cause: error }));
             else forward.state = "failed";
           });
           forward.server.listen({ host: forward.bindHost, port: forward.bindPort, exclusive: true }, () => {
@@ -181,6 +229,7 @@ export class SessionManager {
       aborted(signal);
       if (session.state !== "connected") throw new Error("SSH 连接已关闭");
       forward.state = "listening";
+      session.intent.forwards.set(spec.id, spec);
       session.forwardErrors.delete(forward.id);
       this.#log(session, "info", "转发「" + (forward.name ?? forward.id) + "」已启动（" + forward.direction + "）：" + forward.bindHost + ":" + forward.bindPort + " → " + forward.targetHost + ":" + forward.targetPort);
       return this.#forwardView(forward);
@@ -191,7 +240,7 @@ export class SessionManager {
       await this.#releaseLocal(forward);
       // A remote allocation whose reply was lost must not outlive its session.
       if (forward.direction === "s2c" && !remoteRejected) this.#fail(session, error);
-      throw error;
+      throw session.failure ?? error;
     } finally {
       forward.rejectSetup = undefined;
       signal?.removeEventListener("abort", cancel);
@@ -203,6 +252,7 @@ export class SessionManager {
     const forward = session?.forwards.get(forwardId);
     if (!forward) throw new Error(`转发 ${forwardId} 不存在`);
     if (forward.state === "starting") throw new Error("转发正在创建，请等待完成或断开整个连接");
+    session.intent.forwards.delete(forwardId);
     forward.state = "stopping";
     try {
       if (forward.direction === "s2c" && session.state === "connected") {
@@ -222,9 +272,10 @@ export class SessionManager {
   }
 
   async disconnect(id) {
+    this.#stopIntent(id);
     const session = this.#sessions.get(id);
     if (!session) return { id, state: "disconnected", forwards: [] };
-    if (session.state === "disconnected") return this.#view(session);
+    if (session.state === "disconnected") { await this.#releaseAll(session); return this.#view(session); }
     session.state = "disconnected";
     session.rejectConnect?.(new Error("连接已断开"));
     session.client.destroy();
@@ -234,7 +285,55 @@ export class SessionManager {
   }
 
   async close() {
+    this.#closed = true;
+    await this.disconnectAll();
+  }
+
+  async disconnectAll() {
     await Promise.all([...this.#sessions.keys()].map((id) => this.disconnect(id)));
+  }
+
+  forgetForward(id, forwardId) {
+    this.#intents.get(id)?.forwards.delete(forwardId);
+    this.#sessions.get(id)?.forwardErrors.delete(forwardId);
+  }
+
+  #stopIntent(id) {
+    const intent = this.#intents.get(id);
+    if (!intent) return;
+    intent.wanted = false;
+    intent.phase = "stopped";
+    intent.nextRetryAt = undefined;
+    clearTimeout(intent.timer);
+    clearTimeout(intent.stableTimer);
+    intent.timer = undefined;
+    intent.controller?.abort();
+    this.#intents.delete(id);
+  }
+
+  #scheduleReconnect(session, error) {
+    const intent = session.intent;
+    if (this.#closed || !intent.wanted || this.#intents.get(session.id) !== intent || this.#sessions.get(session.id) !== session) return;
+    clearTimeout(intent.stableTimer);
+    if (intent.timer) return;
+    intent.reason = error.message;
+    if (!intent.enabled || error.retryable !== true) {
+      intent.phase = intent.enabled ? "paused" : "idle";
+      if (intent.enabled) this.#log(session, "warn", "自动重连已暂停：" + error.message);
+      return;
+    }
+    const base = Math.min(this.reconnectMaxDelayMs, this.reconnectDelayMs * 2 ** Math.min(intent.attempts, 16));
+    const delay = Math.min(this.reconnectMaxDelayMs, Math.max(1, Math.round(base * (0.8 + this.random() * 0.4))));
+    intent.attempts++;
+    intent.phase = "waiting";
+    intent.nextRetryAt = new Date(Date.now() + delay).toISOString();
+    this.#log(session, "warn", `网络暂不可用，${Math.ceil(delay / 1000)} 秒后进行第 ${intent.attempts} 次自动重连`);
+    intent.timer = setTimeout(() => {
+      intent.timer = undefined;
+      if (this.#closed || !intent.wanted || this.#intents.get(session.id) !== intent) return;
+      void this.#start(intent).catch(() => {});
+    }, delay);
+    intent.timer.unref?.();
   }
 
   #deadline(session, promise) {
@@ -322,22 +421,27 @@ export class SessionManager {
     });
   }
 
-  #fail(session, error) {
-    if (session.state === "disconnected") return;
+  #fail(session, error, state = "failed") {
+    if (["disconnected", "failed"].includes(session.state)) return;
+    session.failure = error;
+    session.error = errorDetails(error);
     session.lastError = String(error.message ?? error).slice(0, 300);
     if (session.state !== "failed") this.#log(session, "error", "SSH 连接失败：" + session.lastError);
-    session.state = "failed";
+    session.state = state;
     session.rejectConnect?.(error);
     session.client.destroy();
-    void this.#releaseAll(session);
+    const cleanup = this.#releaseAll(session);
+    if (session.established) void cleanup.then(() => this.#scheduleReconnect(session, error));
   }
 
-  async #releaseAll(session) {
+  #releaseAll(session) {
+    if (session.cleanup) return session.cleanup;
     const forwards = [...session.forwards.values()];
     session.forwards.clear();
     const error = new Error("SSH 连接已关闭");
     for (const forward of forwards) forward.rejectSetup?.(error);
-    await Promise.all(forwards.map((forward) => this.#releaseLocal(forward)));
+    session.cleanup = Promise.all(forwards.map((forward) => this.#releaseLocal(forward)));
+    return session.cleanup;
   }
 
   async #releaseLocal(forward) {
@@ -363,6 +467,10 @@ export class SessionManager {
       logs: session.logs.map((entry) => ({ ...entry })),
       forwardErrors: [...session.forwardErrors.values()].map((entry) => ({ ...entry })),
       ...(lastError && { lastError }),
+      ...(session.error && { error: { ...session.error } }),
+      reconnect: { enabled: session.intent.enabled, state: session.intent.phase, attempts: session.intent.attempts,
+        ...(session.intent.nextRetryAt && { nextRetryAt: session.intent.nextRetryAt }),
+        ...(session.intent.reason && { reason: session.intent.reason }) },
       forwards: [...session.forwards.values()].map((forward) => this.#forwardView(forward)),
     };
   }

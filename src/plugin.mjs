@@ -5,6 +5,7 @@ import { SessionManager } from "./sessions.mjs";
 import { startManagementServer, publishEndpoint } from "./web-server.mjs";
 import { fileURLToPath } from "node:url";
 import { readSSHConfig } from "./ssh-config.mjs";
+import { OperationError } from "./errors.mjs";
 
 const runtimes = new WeakMap();
 export async function closePlugin(hooks) {
@@ -43,6 +44,7 @@ const profileSchema = {
     authMethod: { type: "string", enum: ["agent", "key", "environment"], description: "Preferred authentication method; other configured credentials remain available as fallbacks" },
     autoStartForwards: { type: "boolean", default: true, description: "Start saved forward presets after successful authentication" },
     autoConnect: { type: "boolean", default: false, description: "Try connecting once when the plugin host starts; no session credentials are persisted" },
+    autoReconnect: { type: "boolean", default: false, description: "Retry network failures with capped exponential backoff; manual disconnect cancels retries and temporary credentials are never retained" },
     forwardFailurePolicy: { type: "string", enum: ["rollback", "continue"], default: "rollback", description: "Whether a rejected preset rolls back the connection or allows other presets to continue; uncertain remote allocations always close SSH" },
     identityFile: { ...stringSchema, description: "Absolute path or ~/ path to an SSH private key; never its contents" },
     agent: { ...stringSchema, description: "SSH agent socket or Windows named pipe" },
@@ -63,9 +65,17 @@ export function createTools(store, sessions) {
   // independent connections to proceed in parallel in Magpie's shared host.
   const operations = new Map();
   const pendingConnects = new Map();
+  let restoring = false;
+  const assertMutable = () => {
+    if (restoring) throw new OperationError("CONFIG_RESTORE_BUSY", "正在恢复配置，请稍后重试");
+  };
+  const assertForwardEditable = (id) => {
+    if (["waiting", "connecting"].includes(sessions.status(id).reconnect?.state)) throw new OperationError("SESSION_BUSY", "请先停止连接或自动重连，再修改转发预设");
+  };
   const serial = (id, action) => {
     identifier(id);
-    const operation = (operations.get(id) ?? Promise.resolve()).catch(() => {}).then(action);
+    assertMutable();
+    const operation = (operations.get(id) ?? Promise.resolve()).catch(() => {}).then(() => { assertMutable(); return action(); });
     operations.set(id, operation);
     void operation.finally(() => {
       if (operations.get(id) === operation) operations.delete(id);
@@ -73,6 +83,39 @@ export function createTools(store, sessions) {
     return operation;
   };
   return {
+    config_backups: {
+      description: "List local configuration backup metadata, even when the current configuration is damaged. Never returns credentials or backup contents.",
+      args: args({}),
+      execute() { return store.listBackups(); },
+    },
+    config_backup: {
+      description: "Create a validated local configuration backup. Retains the latest five valid snapshots; stores only profile paths and environment-variable names.",
+      args: args({}),
+      execute() { assertMutable(); return store.createBackup(); },
+    },
+    config_restore_preview: {
+      description: "Preview the connections in a selected backup and those that will be removed. Returns a revision required for restore; does not change files or sessions.",
+      args: args({ backupId: stringSchema }),
+      execute({ backupId }) { return store.previewRestore(backupId); },
+    },
+    config_restore: {
+      description: "Restore an explicitly previewed backup, preserving the previous configuration. Requires stopConnections=true when sessions or retries are active; cancels them and never auto-connects restored profiles. Rejects stale previews.",
+      args: args({ backupId: stringSchema, revision: { type: "string", pattern: "^[a-f0-9]{64}$" }, stopConnections: { type: "boolean", default: false } }, ["backupId", "revision"]),
+      async execute({ backupId, revision, stopConnections = false }) {
+        assertMutable();
+        if (typeof stopConnections !== "boolean") throw new Error("stopConnections 必须是布尔值");
+        restoring = true;
+        try {
+          const preview = await store.previewRestore(backupId);
+          if (revision !== preview.revision) throw new OperationError("CONFIG_RESTORE_STALE", "配置或备份已变化，请重新预览后恢复");
+          if (!stopConnections && (pendingConnects.size || sessions.status().some((session) => sessions.isActive(session.id)))) throw new OperationError("CONFIG_RESTORE_ACTIVE", "请先断开所有连接并停止自动重连，或明确选择停止连接后恢复");
+          for (const pending of pendingConnects.values()) for (const controller of pending) controller.abort();
+          await sessions.disconnectAll();
+          await Promise.allSettled([...operations.values()]);
+          return await store.restore(backupId, revision);
+        } finally { restoring = false; }
+      },
+    },
     ssh_config_preview: {
       description: "Preview concrete hosts from the local user's and system OpenSSH configuration, or one specified file. Reads Include files without executing commands or connecting. Existing profiles are marked and not overwritten.",
       args: args({ configPath: stringSchema }, []),
@@ -86,6 +129,7 @@ export function createTools(store, sessions) {
       description: "Import only explicitly selected aliases from a previously previewed OpenSSH configuration revision. Creates new profiles atomically, skips existing IDs, never connects, and optionally includes TCP forward presets.",
       args: args({ configPath: stringSchema, revision: { type: "string", pattern: "^[a-f0-9]{64}$" }, aliases: { type: "array", minItems: 1, maxItems: 500, uniqueItems: true, items: stringSchema }, includeForwards: { type: "boolean", default: true } }, ["revision", "aliases"]),
       async execute({ configPath, revision, aliases, includeForwards = true }) {
+        assertMutable();
         if (!Array.isArray(aliases) || !aliases.length || aliases.length > 500 || aliases.some((alias) => typeof alias !== "string") || new Set(aliases).size !== aliases.length) throw new Error("请勾选 1–500 个不同的 SSH 主机");
         if (typeof includeForwards !== "boolean") throw new Error("includeForwards 必须是布尔值");
         const preview = await readSSHConfig({ configPath });
@@ -96,6 +140,7 @@ export function createTools(store, sessions) {
           if (!candidate?.selectable) throw new Error(`主机 ${alias} 不在可导入列表中，请重新预览`);
           return { ...candidate.profile, forwards: includeForwards ? candidate.profile.forwards : [] };
         });
+        assertMutable();
         return store.importProfiles(profiles);
       },
     },
@@ -132,6 +177,7 @@ export function createTools(store, sessions) {
       args: args({ connectionId: idSchema }),
       execute({ connectionId }, ctx = {}) {
         identifier(connectionId);
+        assertMutable();
         const controller = new AbortController();
         const pending = pendingConnects.get(connectionId) ?? new Set();
         pending.add(controller);
@@ -182,12 +228,16 @@ export function createTools(store, sessions) {
       execute({ connectionId, forward }) {
         const spec = validateForward(forward);
         return serial(connectionId, async () => {
+          assertForwardEditable(connectionId);
           if (sessions.status(connectionId).forwards.some((item) => item.id === spec.id)) {
             throw new Error("请先停止这条转发，再修改预设");
           }
           const profile = await store.get(connectionId);
+          assertMutable();
+          assertForwardEditable(connectionId);
           const forwards = profile.forwards.filter((item) => item.id !== spec.id);
           forwards.push(spec);
+          sessions.forgetForward(connectionId, spec.id);
           await store.save({ ...profile, forwards });
           return spec;
         });
@@ -199,11 +249,15 @@ export function createTools(store, sessions) {
       execute({ connectionId, forwardId }) {
         identifier(forwardId);
         return serial(connectionId, async () => {
+          assertForwardEditable(connectionId);
           const profile = await store.get(connectionId);
+          assertMutable();
+          assertForwardEditable(connectionId);
           const running = sessions.status(connectionId).forwards.some((item) => item.id === forwardId);
           const saved = profile.forwards.some((item) => item.id === forwardId);
           if (!running && !saved) throw new Error(`转发 ${forwardId} 不存在`);
           if (running) await sessions.removeForward(connectionId, forwardId);
+          sessions.forgetForward(connectionId, forwardId);
           if (saved) await store.save({ ...profile, forwards: profile.forwards.filter((item) => item.id !== forwardId) });
           return { id: forwardId, removed: true };
         });

@@ -1,5 +1,6 @@
 import { icon, renderIcons, setIcon } from "./icons.js";
 import { launcherURL, managementFailure, readResponse } from "./recovery.js";
+import { createBackupManager } from "./backups.js";
 
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -39,7 +40,8 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
     toastTimer = setTimeout(() => { $("toast").hidden = true; }, 3200);
   }
   function selected() { return state.rows.find((row) => row.connection.id === state.selected); }
-  function active(session) { return ["connected", "connecting"].includes(session.state); }
+  function recovering(session) { return ["waiting", "connecting"].includes(session?.reconnect?.state); }
+  function active(session) { return ["connected", "connecting", "reconnecting"].includes(session.state) || recovering(session); }
   function endpoint(host, port) { return (host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host) + ":" + port; }
   function address(connection) { return connection.username + "@" + endpoint(connection.host, connection.port); }
   function auth(connection) {
@@ -49,9 +51,10 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
     return connection.identityFile ? "私钥文件" : connection.agent ? "SSH agent" : connection.passwordEnv ? "密码环境变量" : "登录密码 / 宿主 agent";
   }
   function uniqueId(prefix) { return prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7); }
-  const labels = { connecting: "连接中", connected: "已连接", disconnected: "未连接", failed: "连接失败", listening: "运行中", starting: "启动中", stopping: "停止中", stopped: "已停止" };
+  const labels = { reconnecting: "等待重连", connecting: "连接中", connected: "已连接", disconnected: "未连接", failed: "连接失败", listening: "运行中", starting: "启动中", stopping: "停止中", stopped: "已停止" };
   function viewState(row) {
     const busy = state.busy.get(row.connection.id);
+    if (row.session.reconnect?.state === "waiting" && busy?.name !== "connect") return "reconnecting";
     return busy?.name === "connect" && row.session.state !== "connected" ? "connecting" : row.session.state;
   }
   function visibleRows() {
@@ -147,6 +150,7 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
   function render() {
     if ($("forward-editor").open) syncForwardAction();
     $("new-connection").disabled = $("empty-add").disabled = $("import-config").disabled = !state.online;
+    $("open-backups").disabled = serviceFailure?.action === "reopen";
     const connected = state.rows.filter((row) => row.session.state === "connected").length;
     const running = state.rows.reduce((sum, row) => sum + row.session.forwards.filter((rule) => rule.state === "listening").length, 0);
     $("connected-count").textContent = connected; $("running-count").textContent = running;
@@ -175,14 +179,19 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
       : "连接认证成功后启动预设转发；SSH 断开时会自动释放监听端口。";
     $("detail-state").className = "badge " + status;
     $("detail-state").textContent = labels[status] ?? status;
-    $("connect-label").textContent = busy?.name === "connect" ? (session.state === "connected" ? "正在重连…" : "正在连接…") : status === "connected" ? "重新连接" : "连接服务器";
+    $("connect-label").textContent = busy?.name === "connect" ? (session.state === "connected" ? "正在重连…" : "正在连接…") : status === "connected" ? "重新连接" : status === "reconnecting" ? "立即重试" : "连接服务器";
     $("connect").classList.toggle("primary", status !== "connected");
     $("connect").disabled = !state.online || status === "connecting" || Boolean(busy);
     $("disconnect").disabled = !state.online || !active({ state: status }) || (Boolean(busy) && busy.name !== "connect");
-    $("disconnect-label").textContent = status === "connecting" || busy?.name === "connect" ? "取消连接" : "断开连接";
+    $("disconnect-label").textContent = status === "reconnecting" || (status === "connecting" && session.reconnect?.attempts > 0) ? "停止重连" : status === "connecting" || busy?.name === "connect" ? "取消连接" : "断开连接";
     $("credentials-connect").disabled = !state.online || active({ state: status }) || Boolean(busy);
     $("edit-connection").disabled = $("delete-connection").disabled = !state.online || active(session) || Boolean(busy);
-    $("new-forward").disabled = $("empty-forward").disabled = !state.online || Boolean(busy);
+    $("new-forward").disabled = $("empty-forward").disabled = !state.online || Boolean(busy) || recovering(session);
+    const retry = session.reconnect;
+    $("reconnect-status").hidden = !["waiting", "paused"].includes(retry?.state) && !(retry?.state === "connecting" && retry.attempts > 0);
+    $("reconnect-status").textContent = retry?.state === "waiting" ? `第 ${retry.attempts} 次重连将在 ${new Date(retry.nextRetryAt).toLocaleTimeString("zh-CN", { hour12: false })} 尝试；可随时停止。`
+      : retry?.state === "paused" ? "自动重连已暂停：" + retry.reason + "。处理后请手动连接。"
+      : `正在进行第 ${retry?.attempts ?? 0} 次重连…`;
     const error = state.errors.get(connection.id) ?? (session.state === "failed" ? session.lastError : "");
     $("operation-error").textContent = error ?? ""; $("operation-error").hidden = !error;
     const last = session.connectedAt ?? session.lastConnectedAt;
@@ -215,7 +224,7 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
     if (!rows.length) $("connection-list").append(element("p", "no-matches", state.rows.length ? "没有匹配的连接" : "尚未添加连接"));
   }
   function renderForwards({ connection, session }, busy) {
-    const signature = JSON.stringify([connection.id, connection.forwards, session.forwards, session.forwardErrors, session.state, busy, state.online]);
+    const signature = JSON.stringify([connection.id, connection.forwards, session.forwards, session.forwardErrors, session.state, session.reconnect?.state, busy, state.online]);
     if (signature === forwardSignature) return;
     forwardSignature = signature;
     const rules = new Map(connection.forwards.map((rule) => [rule.id, { ...rule, saved: true, state: "stopped" }]));
@@ -239,7 +248,7 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
       if (rule.lastError) status.append(element("div", "row-error", rule.lastError));
       const actions = element("td"), actionsBox = element("div", "rule-actions");
       const running = session.forwards.some((item) => item.id === rule.id);
-      const enabled = state.online && !busy;
+      const enabled = state.online && !busy && !recovering(session);
       if (running) actionsBox.append(button("停止", () => run(connection.id, "stop-forward", () => call("forward_remove", { connectionId: connection.id, forwardId: rule.id }), "转发已停止"), "text-button", !enabled));
       else {
         const start = button("启动", () => run(connection.id, "start-forward", () => call("forward_add", { connectionId: connection.id, forward: connection.forwards.find((item) => item.id === rule.id) }), "转发已启动"), "text-button", !enabled || session.state !== "connected");
@@ -266,6 +275,7 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
     const values = [["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username], ["认证方式", auth(connection)], ["自动启动预设", connection.autoStartForwards === false ? "已关闭" : "已开启"], ["预设失败处理", connection.forwardFailurePolicy === "continue" ? "保留连接，继续其他预设" : "回滚本次连接"], ["启动时连接", connection.autoConnect ? "已开启" : "已关闭"], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent], ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv], ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"], ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"]];
     values.push(["连接后启动转发", connection.autoStartForwards !== false ? "已开启" : "已关闭"], ["应用启动时重连", connection.autoConnect ? "已开启" : "已关闭"]);
     $("settings-list").replaceChildren();
+    values.splice(7, 0, ["断网自动重连", connection.autoReconnect ? "已开启，仅网络故障重试" : "已关闭"]);
     for (const [label, value] of values) {
       if (!value) continue;
       const row = element("div", "settings-row");
@@ -403,7 +413,7 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
     $("rule-action-hint").hidden = connected;
     $("save-forward-icon").hidden = forwardSaving || Boolean(editingForwardId) || !connected;
     $("save-forward-label").textContent = forwardSaving ? "正在保存…" : editingForwardId ? "保存修改" : connected ? "创建并启动" : "保存预设";
-    $("save-forward").disabled = forwardSaving || !state.online || !row || state.busy.has(editingForwardConnection);
+    $("save-forward").disabled = forwardSaving || !state.online || !row || state.busy.has(editingForwardConnection) || recovering(row?.session);
   }
   function openForward(rule) {
     if (forwardSaving) return;
@@ -525,8 +535,9 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
       if (importPreview) renderImport();
     }
   }
-  function confirmAction(title, description) {
+  function confirmAction(title, description, acceptLabel = "确认删除") {
     $("confirm-title").textContent = title; $("confirm-description").textContent = description;
+    $("confirm-accept").textContent = acceptLabel;
     const dialog = $("confirm-dialog"); dialog.returnValue = "";
     return new Promise((resolve) => {
       dialog.addEventListener("close", () => resolve(dialog.returnValue === "yes"), { once: true }); dialog.showModal();
@@ -606,6 +617,8 @@ import { launcherURL, managementFailure, readResponse } from "./recovery.js";
   });
   $("delete-connection").addEventListener("click", () => void deleteConnection());
   $("import-config").addEventListener("click", () => { $("import-dialog").showModal(); if (!importPreview) void previewImport(); });
+  const backups = createBackupManager({ call, refresh, toast, confirmAction });
+  $("open-backups").addEventListener("click", () => backups.open());
   $("preview-import").addEventListener("click", () => void previewImport());
   $("import-path").addEventListener("input", invalidatePreview);
   $("import-all").addEventListener("change", () => { $("import-list").querySelectorAll("input:not(:disabled)").forEach((node) => { node.checked = $("import-all").checked; }); updateImportSelection(); });

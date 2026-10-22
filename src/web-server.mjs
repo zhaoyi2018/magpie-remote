@@ -3,11 +3,13 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { readFileSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
+import { errorDetails } from "./errors.mjs";
 
 const assets = new Map([
   ["", ["manage.html", "text/html; charset=utf-8"]],
   ["app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
+  ["backups.js", ["backups.js", "text/javascript; charset=utf-8"]],
   ["icons.js", ["icons.js", "text/javascript; charset=utf-8"]],
   ["app.css", ["app.css", "text/css; charset=utf-8"]],
   ["connection-editor.js", ["connection-editor.js", "text/javascript; charset=utf-8"]],
@@ -61,7 +63,7 @@ export async function startManagementServer({ tools, port = 0 }) {
   const server = createServer((request, response) => {
     void handle(request, response).catch((error) => {
       if (!response.headersSent && !response.destroyed) json(response, error.status ?? 400, {
-        error: error.message, code: error.code ?? "OPERATION_FAILED",
+        ...errorDetails(error), error: error.message,
         ...(error.code === "CREDENTIALS_REQUIRED" && { credentialFields: error.credentialFields }),
       });
       else response.destroy();

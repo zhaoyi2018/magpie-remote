@@ -4,6 +4,10 @@
 
 | 工具 | 必填参数 | 返回与行为 |
 | --- | --- | --- |
+| `migpie-remote_config_backups` | 无 | 列出备份标识、时间、来源、连接数量及有效性；当前配置损坏时仍可用 |
+| `migpie-remote_config_backup` | 无 | 手动保存当前有效配置，返回备份元数据 |
+| `migpie-remote_config_restore_preview` | `backupId` | 预览恢复连接、将移除的连接及当前文件有效性，返回 revision；不改变配置和会话 |
+| `migpie-remote_config_restore` | `backupId`, `revision`；可选 `stopConnections` | 保留旧配置后恢复；有活跃连接、连接请求或重试时需明确传 true，否则拒绝；恢复后保持停止 |
 | `migpie-remote_ssh_config_preview` | 无；可选 `configPath` | 只读预览系统 SSH 配置，返回 revision、候选主机及是否已存在 |
 | `migpie-remote_ssh_config_import` | `revision`, `aliases`；可选 `configPath`, `includeForwards` | 仅新增选中且支持的连接；原子保存，跳过已存在 id，不连接 SSH |
 | `migpie-remote_connections` | 无，传 `{}` | 所有配置及对应会话快照；不创建连接 |
@@ -37,6 +41,7 @@
 | `autoStartForwards` | 可选布尔值，默认 true；认证成功后自动启动预设转发 |
 | `forwardFailurePolicy` | 可选 `rollback`（默认）或 `continue`；预设发生可恢复错误时，全部回滚或保留连接并继续其余预设；远程分配状态不明时仍关闭 SSH |
 | `autoConnect` | 可选布尔值，默认 false；插件宿主启动或重载时尝试连接一次 |
+| `autoReconnect` | 可选布尔值，默认 false；网络故障自动退避重试；显式断开或宿主关闭时取消 |
 | `identityFile`, `knownHostsFile` | 可选绝对路径，或以 `~/` 开头 |
 | `agent` | 可选 socket 路径、Windows 命名管道或受 ssh2 支持的 agent 标识 |
 | `passwordEnv`, `passphraseEnv` | 可选环境变量名称，不能填写秘密原文 |
@@ -67,6 +72,12 @@
 
 也可以使用 `forward_save` 单独保存预设。若同 id 转发正在运行，需先停止再编辑。管理页新建转发时，已连接 SSH 可「创建并启动」，取消「保存为预设」只创建当前会话的临时转发；未连接时可「保存预设」，连接成功后自动启动。预设保存成功但启动失败时会保留预设并提示错误。管理页与 MCP 共用会话。
 
+## 配置恢复流程
+
+调用 `config_backups` 选取有效备份，随后 `config_restore_preview({backupId})` 返回 `backupId`、`createdAt`、`revision`、`currentValid`、`currentCount`、`connectionCount`、`connections` 和 `removed`。连接清单只含 `{id, name}`，不包含认证引用或凭据。将同一次预览的标识与 revision 传入 `config_restore`；页面确认恢复时传入 `stopConnections: true`。
+
+恢复返回 `{restored: true, connectionCount, preserved}`，`preserved.backupId` 指向恢复前的有效配置，损坏原文件则用 `preserved.recoveryFile` 返回保留路径；原文件不存在时无需保留。恢复不启动恢复后的配置。过期预览返回 `CONFIG_RESTORE_STALE`，恢复期间其他修改返回 `CONFIG_RESTORE_BUSY`，当前连接未明确允许停止时返回 `CONFIG_RESTORE_ACTIVE`。备份无效或不可读时拒绝恢复；备份保留失败时不替换原配置。恢复过程如果因文件变化或磁盘写入失败而中止，已经停止的连接仍保持停止，需手动连接。
+
 ## 状态与错误
 
 会话状态是 `connecting`、`connected`、`disconnected` 或 `failed`。转发状态是 `starting`、`listening`、`stopping` 或 `failed`。`status` 包含地址、用户名、已观察到的公钥指纹、连接时间、当前转发及最近错误；另有 lastConnectedAt 和 logs（time、level、message）。已创建会话的 `forwardErrors` 数组以 `{id, message}` 记录当前会话中启动失败的规则，重试成功后移除对应项；页面将它与预设合并显示，失败项不计入运行中的转发。每个连接保留最近 200 条内存日志，重连后延续，宿主重启后清空，不返回密码、口令或私钥内容。
@@ -77,6 +88,10 @@
 
 错误以工具异常返回，由 Magpie 转换为 MCP 错误。配置文件损坏时会报错，保存操作不会覆盖损坏文件。工具使用 JSON Schema 声明参数，并在插件内部再次校验配置、标识符及端口。
 
-管理 HTTP API 的错误体为 `{error, code}`；缺少可用凭据时还返回 `credentialFields`（`password` / `passphrase`），页面据此提示本次输入。常见代码包括 `CREDENTIALS_REQUIRED`、`KEY_INVALID`、`KEY_UNAVAILABLE`、`HOST_KEY_REJECTED`、`SSH_AUTH_FAILED`、`SSH_TIMEOUT`、`SSH_CONNECTION_FAILED`、`FORWARD_REJECTED`、`FORWARD_TIMEOUT`、`CONFIG_INVALID`、`CONFIG_UNREADABLE` 和 `MANAGEMENT_EXPIRED`。这些代码用于区分凭据、配置及管理服务恢复，不保证宿主转换后的 MCP 错误保留相同结构。
+已创建会话额外返回 `reconnect: {enabled, state, attempts, nextRetryAt?, reason?}`。重连状态为 `idle`、`connecting`、`waiting`、`paused`、`stopped`，页面的「等待重连」由 `waiting` 派生，原会话状态枚举不变。等待和重连中的配置仍算活跃，修改前需断开。计数为本轮已安排的自动尝试次数，稳定连接 30 秒后归零；手动停止清除下一次尝试。失败时的 `error` 为 `{code, message, category, retryable}`，另保留原 `lastError`。
+
+管理 HTTP API 的操作错误体为 `{error, code, message, category, retryable}`；缺少可用凭据时还返回 `credentialFields`（`password` / `passphrase`），页面据此提示本次输入。`category` 区分 `network`、`authentication`、`credentials`、`trust`、`forward`、`configuration`、`cancelled` 和其他 `operation`。只有已识别的网络中断、连接拒绝、网络不可达、临时 DNS 故障及 SSH 超时可重试；未知握手错误与无法解析的主机名不会无限重试。
+
+常见代码包括 `SSH_NETWORK`、`SSH_DISCONNECTED`、`SSH_TIMEOUT`、`SSH_AUTH_FAILED`、`SSH_CONNECTION_FAILED`、`CREDENTIALS_REQUIRED`、`KEY_INVALID`、`KEY_UNAVAILABLE`、`HOST_KEY_REJECTED`、`HOST_KEY_UNAVAILABLE`、`FORWARD_BIND_FAILED`、`FORWARD_REJECTED`、`FORWARD_TIMEOUT`、`CONFIG_INVALID`、`CONFIG_UNREADABLE`、`CONFIG_BACKUP_FAILED`、`CONFIG_BACKUP_INVALID` 和 `OPERATION_CANCELLED`。管理地址过期仍返回 `MANAGEMENT_EXPIRED`。这些代码不保证在宿主转换后的 MCP 错误中保留相同结构。
 
 接口定义来源：[plugin.mjs](../src/plugin.mjs)；运行校验来源：[config.mjs](../src/config.mjs)。返回[文档导航](README.md)。

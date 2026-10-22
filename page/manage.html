@@ -17,6 +17,7 @@
     <header class="topbar">
       <div><h1>SSH 连接</h1><p>管理远程 SSH 会话与端口转发</p></div>
       <div class="top-actions">
+        <button class="button" id="open-backups" type="button"><span data-icon="shield"></span>备份与恢复</button>
         <button class="button" id="import-config" type="button"><span data-icon="upload"></span>导入配置</button>
         <button class="button primary" id="new-connection" type="button"><span data-icon="plus"></span>新建连接</button>
       </div>
@@ -50,6 +51,7 @@
           </header>
           <dl class="connection-meta"><div><dt>服务器</dt><dd id="detail-address"></dd></div><div><dt>用户</dt><dd id="detail-user"></dd></div><div><dt>认证方式</dt><dd id="detail-auth"></dd></div><div><dt>连接时长</dt><dd id="connection-time">—</dd></div></dl>
           <div id="operation-error" class="operation-error" role="alert" hidden></div>
+          <p id="reconnect-status" class="reconnect-status" role="status" hidden></p>
           <div class="detail-tabs" role="tablist" aria-label="连接详情">
             <button id="tab-forwards" type="button" role="tab" aria-selected="true" aria-controls="panel-forwards">端口转发 <span id="forward-count">(0)</span></button>
             <button id="tab-connection" type="button" role="tab" aria-selected="false" aria-controls="panel-connection" tabindex="-1">连接设置</button>
@@ -109,6 +111,8 @@
         <label class="check-label"><input id="profile-auto-forwards" type="checkbox" checked>连接成功后自动启动预设转发</label>
         <label class="check-label"><input id="profile-continue-forwards" type="checkbox">个别预设启动失败时保留连接，继续启动其他预设</label>
         <label class="check-label"><input id="profile-auto-connect" type="checkbox">应用启动时尝试重新连接</label>
+        <label class="check-label"><input id="profile-auto-reconnect" type="checkbox">网络中断后自动重连</label>
+        <p class="profile-storage-note">仅网络故障会重试；手动断开后停止。需要本次登录凭据时暂停，等待重新填写。</p>
         <p class="profile-storage-note">仅保存配置与转发预设；当前 SSH 会话不写入磁盘。</p>
       </section>
       <details id="profile-host-advanced" class="profile-other-settings">
@@ -161,6 +165,12 @@
       <p id="rule-action-hint" class="forward-action-hint" hidden>SSH 尚未连接，保存的预设将在连接成功后自动启动。</p>
       <p id="rule-error" class="field-error" role="alert" hidden></p>
     </div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button id="save-forward" class="button primary" type="button"><span id="save-forward-icon" class="forward-add-icon" data-icon="plus" aria-hidden="true"></span><span id="save-forward-label">创建并启动</span></button></div></form>
+  </dialog>
+
+  <dialog id="backup-dialog" aria-labelledby="backup-title" aria-describedby="backup-description">
+    <div class="dialog-heading"><div><h2 id="backup-title">备份与恢复</h2><p id="backup-description">保存配置前自动备份，保留最近 5 份有效快照。备份不包含登录密码或私钥内容。</p></div><button class="icon-button close-dialog" type="button" aria-label="关闭"><span data-icon="close"></span></button></div>
+    <div class="dialog-content"><p class="field-note">恢复前可预览连接清单。确认恢复会停止所有连接与自动重连，并保留恢复前的配置。</p><div id="backup-list" class="backup-list" aria-live="polite"></div><p id="backup-error" class="field-error" role="alert" hidden></p></div>
+    <div class="dialog-actions"><button class="button close-dialog" type="button">关闭</button><button id="refresh-backups" class="button" type="button">刷新列表</button><button id="create-backup" class="button primary" type="button">立即备份</button></div>
   </dialog>
 
   <dialog id="import-dialog" class="import-dialog" aria-labelledby="import-title">

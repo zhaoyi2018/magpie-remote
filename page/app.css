@@ -105,8 +105,8 @@ h1, h2, h3, h4, p, dl { margin: 0; }
 .card-title .badge::before { width: 7px; height: 7px; }
 .badge.connected, .badge.listening { color: var(--ok); }
 .badge.connected::before, .badge.listening::before { background: var(--ok); }
-.badge.connecting, .badge.starting, .badge.stopping { color: var(--warn); }
-.badge.connecting::before, .badge.starting::before, .badge.stopping::before { background: var(--warn); }
+.badge.connecting, .badge.reconnecting, .badge.starting, .badge.stopping { color: var(--warn); }
+.badge.connecting::before, .badge.reconnecting::before, .badge.starting::before, .badge.stopping::before { background: var(--warn); }
 .badge.failed { color: var(--danger); }
 .badge.failed::before { background: var(--danger); }
 .sidebar-foot { padding: 16px 9px 0; color: var(--muted); font-size: 11px; flex-shrink: 0; }
@@ -227,6 +227,14 @@ input[readonly] { color: var(--muted); background: var(--surface-muted); }
 .field-error { color: var(--danger); font-size: 12px; margin-bottom: 14px; overflow-wrap: anywhere; }
 .confirm-dialog { padding: 24px 24px 0; width: min(400px, calc(100vw - 28px)); }
 .confirm-dialog > p { color: var(--muted); font-size: 13px; margin: 10px 0 20px; }
+.confirm-dialog > p { white-space: pre-line; overflow-wrap: anywhere; }
+.reconnect-status { color: var(--warn); font-size: 13px; padding: 12px 0; }
+.backup-list { margin: 16px 0; border-top: 1px solid var(--line); }
+.backup-item { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.backup-item > div { min-width: 0; overflow-wrap: anywhere; }
+.backup-item strong { font-size: 13px; font-weight: 500; }
+.backup-item .button { flex-shrink: 0; }
+#backup-dialog .dialog-actions { flex-wrap: wrap; }
 .confirm-dialog .dialog-actions { padding: 16px 0; }
 .import-dialog { width: min(720px, calc(100vw - 28px)); }
 .import-path { display: flex; align-items: flex-end; gap: 12px; margin-bottom: 18px; }
@@ -294,8 +302,8 @@ input[readonly] { color: var(--muted); background: var(--surface-muted); }
   .topbar { align-items: stretch; flex-direction: column; gap: 12px; }
   .topbar h1 { font-size: 26px; }
   .topbar p { font-size: 13px; margin-top: 3px; }
-  .top-actions { padding: 0; }
-  .top-actions .button { flex: 1; }
+  .top-actions { padding: 0; flex-wrap: wrap; }
+  .top-actions .button { flex: 1 1 130px; font-size: 13px; }
   .overview { flex-wrap: wrap; padding: 12px; gap: 12px; }
   .overview-stats { gap: 12px; font-size: 12px; }
   .stat { gap: 7px; }

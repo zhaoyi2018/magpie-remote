@@ -14,6 +14,8 @@ npm test
 
 测试专用的固定 Ed25519 密钥保存在 `tests/fixtures.mjs`，包含未加密和加密样本，不能用于实际服务器。固定样本避免 ssh2 随机生成某些前导零公钥时出现的偶发解析失败；测试同时核对私钥解析结果与声明的公钥。这些样本与其他测试文件均不随 npm 包发布。
 
+Next 的 `tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `tests/network-proxy.mjs` 的双向丢包代理，验证显式断线、静默断网、恢复、退避上限、手动停止、临时凭据缺失和跨连接隔离。测试缩短保活与重试间隔，不修改系统网卡、防火墙或日常连接。`tests/backups.test.mjs` 验证快照轮换、无变化不轮换、损坏文件原样保留、过期预览、备份失败、并发恢复和连接停止；HTTP 测试覆盖主配置损坏时的已认证恢复入口。
+
 如需使用与宿主一致的 Bun：
 
 ```powershell
@@ -38,7 +40,7 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 | 包入口可由 `exports["./server"]`、`main` 等定位 | 两者均指向根目录 `index.mjs` |
 | 入口支持 `export default { id, server }` | 仅导出该对象，辅助函数位于 `src/` |
 | 插件函数接收 `input, options`，返回 hooks | `createPlugin` 返回 `{ tool }` |
-| 工具参数支持 JSON Schema | 12 个工具声明 JSON Schema，内部另有运行校验 |
+| 工具参数支持 JSON Schema | 16 个工具声明 JSON Schema，内部另有运行校验 |
 | `ctx.abort` 是取消信号 | 连接和新增转发将其传入会话层 |
 | npm 安装不会运行依赖安装脚本 | 纯 JavaScript 路径已在禁用脚本、排除可选原生包的安装下测试 |
 | Git / 目录安装需要已存在的入口文件 | 全部运行源码随 Git 跟踪，无 `dist` 依赖 |
@@ -54,7 +56,7 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 node scripts/host-smoke.mjs 'C:/path/to/bun.exe' 'C:/path/to/host-current.js'
 ```
 
-脚本给子进程配置独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入当前项目。随后通过宿主 RPC 保存测试配置、SSH 认证、创建两个方向的转发、实际传输数据、停止转发、断开并删除配置。测试结束后关闭该子进程并清理其临时目录。该脚本只用于开发验证，内部宿主协议变化时需要复核。
+脚本给子进程配置独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入当前项目。随后通过宿主 RPC 检查 16 个工具、保存测试配置、SSH 认证、双向转发数据往返、断线自动重连、备份预览恢复、取消重连意图、释放端口与删除配置。测试结束后关闭该子进程并清理其临时目录。该脚本只用于开发验证，内部宿主协议变化时需要复核。
 
 宿主会向脚本所在项目的 `page/.runtime/` 发布启动地址。如果日常 Magpie 正在加载这个源码目录，应在不包含 `.runtime` 的隔离源码副本中执行宿主验证，避免覆盖日常页面的启动地址。纯页面验证也可给 `startUIHarness` 传入 `getEndpoint` 回调，直接使用隔离管理服务的地址。
 

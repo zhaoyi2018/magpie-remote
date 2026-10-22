@@ -66,7 +66,7 @@ export function validateForward(value) {
 export function validateProfile(value) {
   object(value, "连接配置");
   const optional = ["identityFile", "agent", "passwordEnv", "passphraseEnv", "knownHostsFile", "hostFingerprint"];
-  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", "forwardFailurePolicy", ...optional], "连接配置");
+  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", "autoReconnect", "forwardFailurePolicy", ...optional], "连接配置");
   if (value.forwards !== undefined && !Array.isArray(value.forwards)) throw new Error("forwards 必须是数组");
   const profile = {
     id: identifier(value.id, "连接 id"),
@@ -83,7 +83,7 @@ export function validateProfile(value) {
     if (!["agent", "key", "environment"].includes(value.authMethod)) throw new Error("authMethod 必须是 agent、key 或 environment");
     profile.authMethod = value.authMethod;
   }
-  for (const key of ["autoStartForwards", "autoConnect"]) {
+  for (const key of ["autoStartForwards", "autoConnect", "autoReconnect"]) {
     if (value[key] !== undefined) {
       if (typeof value[key] !== "boolean") throw new Error(`${key} 必须是布尔值`);
       profile[key] = value[key];
