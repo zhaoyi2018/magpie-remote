@@ -1,6 +1,6 @@
-# migpie-remote
+# magpie-remote
 
-为 **Magpie** 提供 SSH 连接管理和双向 TCP 端口转发。项目名称保留 `migpie-remote`，产品名称使用官方拼写 Magpie。
+为 **Magpie** 提供 SSH 连接管理和双向 TCP 端口转发。
 
 在 Magpie 侧栏的 **SSH 连接** 页面中，可管理服务器、连接和断开，以及保存、启动、停止和删除 c2s / s2c 端口转发。Agent 也可以通过 **Tools / MCP** 操作同一批配置与 SSH 会话。
 
