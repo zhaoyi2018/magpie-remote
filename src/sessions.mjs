@@ -23,7 +23,7 @@ export class SessionManager {
 
   constructor({ connectTimeoutMs = 15000, forwardTimeoutMs = 10000, env = process.env,
     reconnectDelayMs = 1000, reconnectMaxDelayMs = 30000, reconnectStableMs = 30000, random = Math.random,
-    keepaliveIntervalMs = 15000, keepaliveCountMax = 3 } = {}) {
+    keepaliveIntervalMs = 15000, keepaliveCountMax = 3, connectTarget = connectTCP } = {}) {
     this.connectTimeoutMs = connectTimeoutMs;
     this.forwardTimeoutMs = forwardTimeoutMs;
     this.env = env;
@@ -33,6 +33,7 @@ export class SessionManager {
     this.random = random;
     this.keepaliveIntervalMs = keepaliveIntervalMs;
     this.keepaliveCountMax = keepaliveCountMax;
+    this.connectTarget = connectTarget;
   }
 
   status(id) {
@@ -192,7 +193,7 @@ export class SessionManager {
     if (spec.bindPort !== 0 && [...session.forwards.values()].some((item) => (
       item.direction === spec.direction && item.bindHost === spec.bindHost && item.bindPort === spec.bindPort
     ))) throw new Error("该监听地址和端口已被另一条转发使用");
-    const forward = { ...spec, state: "starting", resources: new Set() };
+    const forward = { ...spec, state: "starting", resources: new Set(), targetConnection: { state: "unknown" } };
     let remoteRejected = false;
     session.forwards.set(forward.id, forward);
     const cancel = () => this.#fail(session, new OperationError("OPERATION_CANCELLED", "转发创建已取消，SSH 连接已关闭"));
@@ -293,6 +294,17 @@ export class SessionManager {
     await Promise.all([...this.#sessions.keys()].map((id) => this.disconnect(id)));
   }
 
+  async forgetConnection(id) {
+    if (this.isActive(id)) throw new OperationError("SESSION_BUSY", "请先断开连接，再清理运行记录");
+    const session = this.#sessions.get(id);
+    this.#stopIntent(id);
+    if (session) {
+      session.client.destroy();
+      await this.#releaseAll(session);
+      if (this.#sessions.get(id) === session) this.#sessions.delete(id);
+    }
+  }
+
   forgetForward(id, forwardId) {
     this.#intents.get(id)?.forwards.delete(forwardId);
     this.#sessions.get(id)?.forwardErrors.delete(forwardId);
@@ -352,13 +364,45 @@ export class SessionManager {
   #track(forward, resource) {
     forward.resources.add(resource);
     resource.once("close", () => forward.resources.delete(resource));
-    resource.on("error", (error) => { forward.lastError = error.code ?? error.message; });
+    resource.on("error", () => {});
     return resource;
   }
 
-  #bridge(forward, channel, socket) {
+  #beginTarget(forward) {
+    const attempt = { state: "connecting" };
+    forward.targetAttempt = attempt;
+    forward.targetConnection = { ...forward.targetConnection, state: "connecting", lastAttemptAt: new Date().toISOString() };
+    return attempt;
+  }
+
+  #targetResult(session, forward, attempt, error) {
+    if (attempt.state === "failed" || (!error && attempt.state !== "connecting")) return;
+    attempt.state = error ? "failed" : "succeeded";
+    if (session.state !== "connected" || forward.state !== "listening") return;
+    const current = forward.targetAttempt === attempt;
+    if (error) {
+      const failure = error instanceof OperationError ? error
+        : new OperationError("FORWARD_TARGET_FAILED", "目标连接失败：" + error.message, { cause: error });
+      if (current) {
+        forward.lastError = failure.message;
+        forward.targetConnection = { ...forward.targetConnection, state: "failed", lastFailureAt: new Date().toISOString(), error: errorDetails(failure) };
+      }
+      this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」" + failure.message);
+    } else if (current) {
+      const recovered = Boolean(forward.lastError);
+      delete forward.lastError;
+      forward.targetConnection = { ...forward.targetConnection, state: "succeeded", lastSuccessAt: new Date().toISOString() };
+      delete forward.targetConnection.error;
+      if (recovered) this.#log(session, "info", "转发「" + (forward.name ?? forward.id) + "」目标连接已恢复");
+    }
+  }
+
+  #bridge(session, forward, channel, socket, attempt) {
     this.#track(forward, channel);
-    const stop = () => { channel.destroy(); socket.destroy(); };
+    const stop = (error) => {
+      this.#targetResult(session, forward, attempt, new OperationError("FORWARD_STREAM_FAILED", "目标连接传输失败：" + error.message, { cause: error }));
+      channel.destroy(); socket.destroy();
+    };
     channel.on("error", stop);
     socket.on("error", stop);
     channel.once("close", () => socket.end());
@@ -369,14 +413,23 @@ export class SessionManager {
   #outgoing(session, forward, socket) {
     if (session.state !== "connected" || forward.state !== "listening") return socket.destroy();
     this.#track(forward, socket);
-    const timer = setTimeout(() => socket.destroy(), this.forwardTimeoutMs);
-    socket.once("close", () => clearTimeout(timer));
+    const attempt = this.#beginTarget(forward);
+    const timer = setTimeout(() => {
+      this.#targetResult(session, forward, attempt, new OperationError("FORWARD_TARGET_TIMEOUT", "目标连接超时：服务器未及时建立转发通道"));
+      socket.destroy();
+    }, this.forwardTimeoutMs);
+    socket.once("error", (error) => {
+      if (attempt.state === "connecting") this.#targetResult(session, forward, attempt, error);
+    });
+    socket.once("close", () => {
+      clearTimeout(timer);
+      if (attempt.state === "connecting") this.#targetResult(session, forward, attempt, new OperationError("FORWARD_TARGET_CANCELLED", "目标连接建立前，请求已关闭"));
+    });
     session.client.forwardOut(socket.remoteAddress ?? "127.0.0.1", socket.remotePort ?? 0,
       forward.targetHost, forward.targetPort, (error, channel) => {
         clearTimeout(timer);
         if (error) {
-          forward.lastError = error.message;
-          this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」目标连接失败：" + error.message);
+          this.#targetResult(session, forward, attempt, error);
           socket.destroy();
           return;
         }
@@ -386,7 +439,8 @@ export class SessionManager {
           socket.destroy();
           return;
         }
-        this.#bridge(forward, channel, socket);
+        this.#targetResult(session, forward, attempt);
+        this.#bridge(session, forward, channel, socket, attempt);
       });
   }
 
@@ -396,7 +450,10 @@ export class SessionManager {
       && (item.bindHost === info.destIP || ["0.0.0.0", "::", "*"].includes(item.bindHost))
     ));
     if (!forward || session.state !== "connected") return reject();
-    const socket = this.#track(forward, connectTCP({ host: forward.targetHost, port: forward.targetPort, allowHalfOpen: true }));
+    const attempt = this.#beginTarget(forward);
+    let socket;
+    try { socket = this.#track(forward, this.connectTarget({ host: forward.targetHost, port: forward.targetPort, allowHalfOpen: true })); }
+    catch (error) { this.#targetResult(session, forward, attempt, error); return reject(); }
     let answered = false;
     const deny = () => {
       if (!answered) {
@@ -405,19 +462,33 @@ export class SessionManager {
       }
       socket.destroy();
     };
-    const timer = setTimeout(deny, this.forwardTimeoutMs);
+    const timer = setTimeout(() => {
+      this.#targetResult(session, forward, attempt, new OperationError("FORWARD_TARGET_TIMEOUT", "目标连接超时：本机目标未及时接受 TCP 连接"));
+      deny();
+    }, this.forwardTimeoutMs);
     socket.once("error", (error) => {
-      this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」本地目标连接失败：" + error.message);
+      if (attempt.state === "connecting") this.#targetResult(session, forward, attempt, error);
       deny();
     });
-    socket.once("close", () => { clearTimeout(timer); deny(); });
+    socket.once("close", () => {
+      clearTimeout(timer);
+      if (attempt.state === "connecting") this.#targetResult(session, forward, attempt, new OperationError("FORWARD_TARGET_CANCELLED", "目标连接建立前，请求已关闭"));
+      deny();
+    });
     socket.once("connect", () => {
       clearTimeout(timer);
       if (answered || session.state !== "connected" || forward.state !== "listening") return deny();
       answered = true;
-      const channel = accept();
-      if (channel) this.#bridge(forward, channel, socket);
-      else socket.destroy();
+      try {
+        const channel = accept();
+        if (channel) {
+          this.#targetResult(session, forward, attempt);
+          this.#bridge(session, forward, channel, socket, attempt);
+        } else {
+          this.#targetResult(session, forward, attempt, new OperationError("FORWARD_TARGET_CANCELLED", "目标连接建立前，远程请求已关闭"));
+          socket.destroy();
+        }
+      } catch (error) { this.#targetResult(session, forward, attempt, error); socket.destroy(); }
     });
   }
 
@@ -456,8 +527,9 @@ export class SessionManager {
   }
 
   #forwardView(forward) {
-    const { id, name, direction, bindHost, bindPort, targetHost, targetPort, state, lastError } = forward;
-    return { id, ...(name !== undefined && { name }), direction, bindHost, bindPort, targetHost, targetPort, state, ...(lastError && { lastError }) };
+    const { id, name, direction, bindHost, bindPort, targetHost, targetPort, state, lastError, targetConnection } = forward;
+    return { id, ...(name !== undefined && { name }), direction, bindHost, bindPort, targetHost, targetPort, state, ...(lastError && { lastError }),
+      targetConnection: { ...targetConnection, ...(targetConnection.error && { error: { ...targetConnection.error } }) } };
   }
 
   #view(session) {

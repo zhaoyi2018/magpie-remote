@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { validateForward } from "../src/config.mjs";
-import { ProfileStore } from "../src/store.mjs";
+import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { createTools } from "../src/plugin.mjs";
 import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
@@ -32,7 +32,7 @@ test("named presets and temporary forwards retain their names and transmit in bo
   await tools.save_connection.execute({ connection: fixture.profile });
   for (const direction of ["c2s", "s2c"]) {
     const forward = { id: direction, name: `${direction} 中文规则`, direction, bindPort: 0, targetPort: echo.port };
-    await tools.forward_save.execute({ connectionId: fixture.profile.id, forward });
+    await tools.forward_save.execute({ connectionId: fixture.profile.id, forward, expectedRevision: profileRevision(await store.get(fixture.profile.id)) });
   }
   const connected = await tools.connect.execute({ connectionId: fixture.profile.id });
   for (const forward of connected.forwards) {

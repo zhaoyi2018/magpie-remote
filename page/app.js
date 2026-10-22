@@ -13,6 +13,7 @@ import { createBackupManager } from "./backups.js";
   let editingForwardConnection = null;
   let editingForwardId = null;
   let editingForwardSaved = false;
+  let editingForwardRevision = null;
   let forwardSaving = false;
   let credentialConnection = null;
   let menuTrigger = null;
@@ -235,8 +236,8 @@ import { createBackupManager } from "./backups.js";
     }
     if (!rows.length) $("connection-list").append(element("p", "no-matches", state.rows.length ? "没有匹配的连接" : "尚未添加连接"));
   }
-  function renderForwards({ connection, session }, busy) {
-    const signature = JSON.stringify([connection.id, connection.forwards, session.forwards, session.forwardErrors, session.state, session.reconnect?.state, busy, state.online]);
+  function renderForwards({ connection, revision, session }, busy) {
+    const signature = JSON.stringify([connection.id, revision, connection.forwards, session.forwards, session.forwardErrors, session.state, session.reconnect?.state, busy, state.online]);
     if (signature === forwardSignature) return;
     forwardSignature = signature;
     const rules = new Map(connection.forwards.map((rule) => [rule.id, { ...rule, saved: true, state: "stopped" }]));
@@ -267,7 +268,17 @@ import { createBackupManager } from "./backups.js";
       arrow.append(element("span", "sr-only", "转发至"));
       route.append(listener, arrow, target); path.append(route);
       const status = element("td");
-      status.append(element("span", "badge " + rule.state, rule.state === "failed" ? "启动失败" : labels[rule.state] ?? rule.state));
+      status.append(element("span", "badge " + rule.state, rule.state === "failed" ? "启动失败" : rule.state === "listening" ? "监听中" : labels[rule.state] ?? rule.state));
+      if (rule.targetConnection) {
+        const target = rule.targetConnection;
+        status.append(element("div", "target-result", { unknown: "目标：尚无连接请求", connecting: "目标：正在建立连接", succeeded: "目标：最近连接成功", failed: "目标：最近连接异常" }[target.state] ?? target.state));
+        for (const [key, label] of [["lastAttemptAt", "尝试"], ["lastFailureAt", "失败"], ["lastSuccessAt", "成功"]]) {
+          if (!target[key]) continue;
+          const time = element("time", "target-time", label + " " + new Date(target[key]).toLocaleTimeString("zh-CN", { hour12: false }));
+          time.dateTime = target[key]; time.title = new Date(target[key]).toLocaleString("zh-CN", { hour12: false });
+          status.append(time);
+        }
+      }
       if (rule.lastError) status.append(element("div", "row-error", rule.lastError));
       const actions = element("td"), actionsBox = element("div", "rule-actions");
       const running = session.forwards.some((item) => item.id === rule.id);
@@ -282,7 +293,7 @@ import { createBackupManager } from "./backups.js";
       edit.title = running ? "先停止这条转发再编辑" : rule.saved ? "编辑转发规则" : "临时转发没有保存的预设";
       const remove = button("", async () => {
         if (await confirmAction("删除转发规则", "删除「" + (rule.name ?? rule.id) + "」的预设；正在运行的转发也会停止。")) {
-          await run(connection.id, "delete-forward", () => call("forward_delete", { connectionId: connection.id, forwardId: rule.id }), "转发规则已删除");
+          await run(connection.id, "delete-forward", () => call("forward_delete", { connectionId: connection.id, forwardId: rule.id, expectedRevision: revision }), "转发规则已删除");
         }
       }, "icon-button", !enabled);
       remove.append(icon("trash")); remove.title = "删除规则"; remove.setAttribute("aria-label", "删除转发 " + (rule.name ?? rule.id));
@@ -414,7 +425,7 @@ import { createBackupManager } from "./backups.js";
   }
   async function deleteConnection(row = selected()) {
     if (row && await confirmAction("删除 SSH 连接", "删除「" + row.connection.name + "」及其全部转发预设。")) {
-      await run(row.connection.id, "delete", () => call("remove_connection", { connectionId: row.connection.id }), "连接已删除");
+      await run(row.connection.id, "delete", () => call("remove_connection", { connectionId: row.connection.id, expectedRevision: row.revision }), "连接已删除");
     }
   }
   function rulePreview() {
@@ -443,6 +454,7 @@ import { createBackupManager } from "./backups.js";
   function openForward(rule) {
     if (forwardSaving) return;
     editingForwardConnection = state.selected; editingForwardId = rule?.id ?? null;
+    editingForwardRevision = selected()?.revision ?? null;
     editingForwardSaved = Boolean(rule);
     $("forward-editor-title").textContent = rule ? "编辑端口转发" : "新建端口转发";
     const values = { id: rule?.id ?? uniqueId("forward"), name: rule?.name ?? rule?.id ?? "", "bind-host": rule?.bindHost ?? "127.0.0.1", "bind-port": rule?.bindPort ?? "", "target-host": rule?.targetHost ?? "127.0.0.1", "target-port": rule?.targetPort ?? "" };
@@ -468,7 +480,8 @@ import { createBackupManager } from "./backups.js";
       if (!editingForwardId && !editingForwardSaved && (row.connection.forwards.some((rule) => rule.id === forward.id) || row.session.forwards.some((rule) => rule.id === forward.id))) throw new Error("规则标识已存在，请重新打开窗口");
       const start = !editingForwardId && row.session.state === "connected";
       if ($("rule-save-preset").checked || !start) {
-        await call("forward_save", { connectionId: editingForwardConnection, forward });
+        const result = await call("forward_save", { connectionId: editingForwardConnection, forward, expectedRevision: editingForwardRevision });
+        editingForwardRevision = result.revision;
         editingForwardSaved = saved = true;
       }
       if (start) await call("forward_add", { connectionId: editingForwardConnection, forward });

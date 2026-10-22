@@ -2,6 +2,7 @@
   window.createSSHConnectionEditor = ({ getRows, isOnline, call, onSaved }) => {
   const $ = (id) => document.getElementById(id);
   let editingConnection = null;
+  let editingRevision = null, editingForwards = [];
   let connectionSaving = false;
   const uniqueId = (prefix) => prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
   for (const node of document.querySelectorAll("#connection-editor [data-icon]")) {
@@ -30,7 +31,11 @@
   }
   function openConnection(connection) {
     if (connectionSaving) return;
+    const row = connection && getRows().find((item) => item.connection.id === connection.id);
+    connection = row?.connection ?? connection;
     editingConnection = connection?.id ?? null;
+    editingRevision = row?.revision ?? null;
+    editingForwards = structuredClone(connection?.forwards ?? []);
     $("connection-form").reset();
     $("connection-editor-title").textContent = connection ? "编辑 SSH 连接" : "新建 SSH 连接";
     $("connection-editor-description").textContent = connection ? "更新连接配置，下次连接时生效" : "保存连接配置，认证成功后建立独立会话";
@@ -67,8 +72,9 @@
     $("connection-editor").querySelectorAll(".close-dialog").forEach((node) => { node.disabled = true; });
     try {
       if (!isOnline()) throw new Error("管理服务已离线，请重新打开页面");
+      if (!isNew && !editingRevision) throw new Error("连接已不存在或配置版本不可用，请关闭弹窗后重新读取配置");
       validateInputs(["profile-name", "profile-host", "profile-port", "profile-username", "profile-id", "profile-identity", "profile-passphrase-env", "profile-password-env"]);
-      const connection = { id: $("profile-id").value.trim() || uniqueId("server"), name: $("profile-name").value.trim(), host: $("profile-host").value.trim(), port: Number($("profile-port").value), username: $("profile-username").value.trim(), forwards: getRows().find((row) => row.connection.id === editingConnection)?.connection.forwards ?? [] };
+      const connection = { id: $("profile-id").value.trim() || uniqueId("server"), name: $("profile-name").value.trim(), host: $("profile-host").value.trim(), port: Number($("profile-port").value), username: $("profile-username").value.trim(), forwards: editingForwards };
       connection.authMethod = $("profile-auth").value;
       connection.autoStartForwards = $("profile-auto-forwards").checked;
       if ($("profile-continue-forwards").checked) connection.forwardFailurePolicy = "continue";
@@ -83,9 +89,9 @@
         optional.agent = "profile-agent";
       }
       for (const [key, id] of Object.entries(optional)) if ($(id).value.trim()) connection[key] = $(id).value.trim();
-      await call("save_connection", { connection });
+      const saved = await call("save_connection", { connection, expectedRevision: editingRevision });
       $("connection-editor").close();
-      await onSaved(connection, isNew);
+      await onSaved(saved.connection, isNew);
     } catch (error) {
       $("profile-error").textContent = error.message;
       $("profile-error").hidden = false;

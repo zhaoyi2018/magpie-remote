@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { identifier, pluginOptions, validateForward, validateProfile } from "./config.mjs";
-import { ProfileStore } from "./store.mjs";
+import { ProfileStore, assertProfileRevision, profileRevision } from "./store.mjs";
 import { SessionManager } from "./sessions.mjs";
 import { startManagementServer, publishEndpoint } from "./web-server.mjs";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ export async function closePlugin(hooks) {
 const idSchema = { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$" };
 const stringSchema = { type: "string", minLength: 1 };
 const portSchema = { type: "integer", minimum: 1, maximum: 65535 };
+const revisionSchema = { type: "string", pattern: "^[a-f0-9]{64}$", description: "The revision returned by connections for this profile; reread and reconcile on CONFIG_CONFLICT" };
 const forwardSchema = {
   type: "object", additionalProperties: false,
   required: ["id", "direction", "bindPort", "targetPort"],
@@ -145,30 +146,33 @@ export function createTools(store, sessions) {
       },
     },
     connections: {
-      description: "List saved SSH connection profiles and their current session states. Does not connect.",
+      description: "List saved SSH profiles as {connection, revision, session}. Use each profile's revision as expectedRevision when editing or deleting its configuration. Does not connect.",
       args: args({}),
       async execute() {
-        return (await store.list()).map((connection) => ({ connection, session: sessions.status(connection.id) }));
+        return (await store.list()).map((connection) => ({ connection, revision: profileRevision(connection), session: sessions.status(connection.id) }));
       },
     },
     save_connection: {
-      description: "Create or replace an SSH profile. Stores paths and environment-variable names, never passwords or key contents. Disconnect before updating an active profile.",
-      args: args({ connection: profileSchema }),
-      execute({ connection }) {
+      description: "Create or replace an SSH profile and return {connection, revision}. Existing profiles require expectedRevision from connections; omit it or use null only for create-only requests. Conflicts never overwrite newer edits. Stores paths and environment-variable names, never passwords or key contents. Disconnect before updating an active profile.",
+      args: args({ connection: profileSchema, expectedRevision: { anyOf: [revisionSchema, { type: "null" }], description: "Use null for create-only; use the connections revision to replace an existing profile" } }, ["connection"]),
+      execute({ connection, expectedRevision }) {
         const profile = validateProfile(connection);
-        return serial(profile.id, () => {
+        return serial(profile.id, async () => {
           if (sessions.isActive(profile.id)) throw new Error("请先断开连接再修改配置");
-          return store.save(profile);
+          const saved = await store.save(profile, { expectedRevision });
+          return { connection: saved, revision: profileRevision(saved) };
         });
       },
     },
     remove_connection: {
-      description: "Delete a saved SSH profile. Disconnect the profile first so its active tunnels are not removed accidentally.",
-      args: args({ connectionId: idSchema }),
-      execute({ connectionId }) {
-        return serial(connectionId, () => {
+      description: "Delete a saved SSH profile using its expectedRevision from connections, then discard its runtime history. Disconnect the profile first so its active tunnels are not removed accidentally.",
+      args: args({ connectionId: idSchema, expectedRevision: revisionSchema }),
+      execute({ connectionId, expectedRevision }) {
+        return serial(connectionId, async () => {
           if (sessions.isActive(connectionId)) throw new Error("请先断开连接再删除配置");
-          return store.remove(connectionId);
+          const result = await store.remove(connectionId, { expectedRevision });
+          await sessions.forgetConnection(connectionId);
+          return result;
         });
       },
     },
@@ -200,7 +204,7 @@ export function createTools(store, sessions) {
       },
     },
     status: {
-      description: "Show session state, observed public host fingerprint, forwards and recent transport errors. Only connected confirms authentication; listening does not guarantee target application health.",
+      description: "Show session state, observed public host fingerprint, forwards with recent targetConnection results, and transport errors. Only connected confirms authentication; listening and target TCP success do not guarantee target application health.",
       args: args({ connectionId: idSchema }, []),
       execute({ connectionId } = {}) {
         if (connectionId !== undefined) identifier(connectionId);
@@ -223,42 +227,44 @@ export function createTools(store, sessions) {
       },
     },
     forward_save: {
-      description: "Create or replace a saved c2s/s2c forward preset without disconnecting SSH. Stop this particular forward before editing it. Saving does not start the forward.",
-      args: args({ connectionId: idSchema, forward: forwardSchema }),
-      execute({ connectionId, forward }) {
+      description: "Create or replace a saved c2s/s2c forward preset using the profile's expectedRevision from connections; return {forward, revision}. Stop this particular forward before editing it. Saving does not start the forward.",
+      args: args({ connectionId: idSchema, forward: forwardSchema, expectedRevision: revisionSchema }),
+      execute({ connectionId, forward, expectedRevision }) {
         const spec = validateForward(forward);
         return serial(connectionId, async () => {
           assertForwardEditable(connectionId);
+          const profile = await store.get(connectionId);
+          assertProfileRevision(profile, expectedRevision);
           if (sessions.status(connectionId).forwards.some((item) => item.id === spec.id)) {
             throw new Error("请先停止这条转发，再修改预设");
           }
-          const profile = await store.get(connectionId);
           assertMutable();
           assertForwardEditable(connectionId);
           const forwards = profile.forwards.filter((item) => item.id !== spec.id);
           forwards.push(spec);
+          const saved = await store.save({ ...profile, forwards }, { expectedRevision });
           sessions.forgetForward(connectionId, spec.id);
-          await store.save({ ...profile, forwards });
-          return spec;
+          return { forward: spec, revision: profileRevision(saved) };
         });
       },
     },
     forward_delete: {
-      description: "Stop one forward if it is running, and remove its saved preset. Leaves the SSH connection established.",
-      args: args({ connectionId: idSchema, forwardId: idSchema }),
-      execute({ connectionId, forwardId }) {
+      description: "Stop one forward if it is running, and remove its saved preset using the profile's expectedRevision from connections. Leaves the SSH connection established. Stale requests do not stop running tunnels.",
+      args: args({ connectionId: idSchema, forwardId: idSchema, expectedRevision: revisionSchema }),
+      execute({ connectionId, forwardId, expectedRevision }) {
         identifier(forwardId);
         return serial(connectionId, async () => {
           assertForwardEditable(connectionId);
           const profile = await store.get(connectionId);
+          assertProfileRevision(profile, expectedRevision);
           assertMutable();
           assertForwardEditable(connectionId);
           const running = sessions.status(connectionId).forwards.some((item) => item.id === forwardId);
           const saved = profile.forwards.some((item) => item.id === forwardId);
           if (!running && !saved) throw new Error(`转发 ${forwardId} 不存在`);
           if (running) await sessions.removeForward(connectionId, forwardId);
+          if (saved) await store.save({ ...profile, forwards: profile.forwards.filter((item) => item.id !== forwardId) }, { expectedRevision });
           sessions.forgetForward(connectionId, forwardId);
-          if (saved) await store.save({ ...profile, forwards: profile.forwards.filter((item) => item.id !== forwardId) });
           return { id: forwardId, removed: true };
         });
       },

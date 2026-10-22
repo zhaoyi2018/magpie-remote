@@ -16,6 +16,8 @@ npm test
 
 Next 的 `tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `tests/network-proxy.mjs` 的双向丢包代理，验证显式断线、静默断网、恢复、退避上限、手动停止、临时凭据缺失和跨连接隔离。测试缩短保活与重试间隔，不修改系统网卡、防火墙或日常连接。`tests/backups.test.mjs` 验证快照轮换、无变化不轮换、损坏文件原样保留、过期预览、备份失败、并发恢复和连接停止；HTTP 测试覆盖主配置损坏时的已认证恢复入口。
 
+`tests/consistency.test.mjs` 验证旧版本写入与删除保护、同连接排队冲突、独立连接互不冲突、无变化版本稳定，以及删除失败保护和运行记录清理。`tests/forward-diagnostics.test.mjs` 使用本机 SSH 服务、迟到通道回调及可注入的本地目标连接，验证双向目标超时、真实拒绝与恢复、旧请求不覆盖新结果和快照隔离；不使用外部不可达地址模拟超时。HTTP 测试还覆盖页面和 MCP 共用版本保护。
+
 如需使用与宿主一致的 Bun：
 
 ```powershell

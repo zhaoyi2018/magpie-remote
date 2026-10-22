@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { get } from "node:http";
 import { startManagementServer, publishEndpoint } from "../src/web-server.mjs";
 import { createTools } from "../src/plugin.mjs";
-import { ProfileStore } from "../src/store.mjs";
+import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
 
@@ -113,17 +113,17 @@ test("page actions authenticate with a transient password and persist, run and d
   assert.ok(!(await readFile(web.store.file, "utf8")).includes("local-test-secret"));
   for (const direction of ["c2s", "s2c"]) {
     const spec = { id: direction, direction, bindPort: 0, targetPort: echo.port };
-    await web.call("forward_save", { connectionId: profile.id, forward: spec });
+    await web.call("forward_save", { connectionId: profile.id, forward: spec, expectedRevision: profileRevision(await web.store.get(profile.id)) });
     assert.equal(web.sessions.status(profile.id).state, "connected");
     const forward = await web.call("forward_add", { connectionId: profile.id, forward: spec });
     assert.deepEqual(await exchange(forward.bindPort), Buffer.from("SSH tunnel round trip"));
-    await assert.rejects(web.call("forward_save", { connectionId: profile.id, forward: spec }), /先停止/);
-    await web.call("forward_delete", { connectionId: profile.id, forwardId: direction });
+    await assert.rejects(web.call("forward_save", { connectionId: profile.id, forward: spec, expectedRevision: profileRevision(await web.store.get(profile.id)) }), /先停止/);
+    await web.call("forward_delete", { connectionId: profile.id, forwardId: direction, expectedRevision: profileRevision(await web.store.get(profile.id)) });
     assert.equal((await web.store.get(profile.id)).forwards.length, 0);
     await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
   }
   await web.call("disconnect", { connectionId: profile.id });
-  await web.call("remove_connection", { connectionId: profile.id });
+  await web.call("remove_connection", { connectionId: profile.id, expectedRevision: profileRevision(await web.store.get(profile.id)) });
   assert.deepEqual(await web.store.list(), []);
 });
 
@@ -137,6 +137,30 @@ test("the authenticated page can preview a local SSH file and import only its se
   assert.equal(result.imported.length, 1);
   assert.deepEqual((await web.store.list()).map((profile) => profile.id), ["selected"]);
   assert.equal(web.sessions.status("selected").state, "disconnected");
+});
+
+test("HTTP edits and MCP edits share revisions and conflicts preserve the newer configuration", async (t) => {
+  const web = await service(t);
+  const original = { id: "shared", name: "Original", host: "host.example", username: "dev" };
+  const created = await web.call("save_connection", { connection: original, expectedRevision: null });
+  assert.equal(created.connection.id, original.id);
+  const response = await fetch(new URL("api/snapshot", web.url), { headers: web.headers });
+  const { connections: [editing] } = await response.json();
+  assert.equal(editing.revision, created.revision);
+  const tools = createTools(web.store, web.sessions);
+  const updated = await tools.save_connection.execute({ connection: { ...editing.connection, name: "Changed through MCP" }, expectedRevision: editing.revision });
+  const conflict = await fetch(new URL("api/call", web.url), {
+    method: "POST", headers: web.headers,
+    body: JSON.stringify({ method: "save_connection", args: { connection: { ...editing.connection, host: "stale.example" }, expectedRevision: editing.revision } }),
+  });
+  assert.equal(conflict.status, 400);
+  assert.equal((await conflict.json()).code, "CONFIG_CONFLICT");
+  assert.equal((await web.store.get(original.id)).name, "Changed through MCP");
+  const saved = await web.call("forward_save", { connectionId: original.id, forward: { id: "web", direction: "c2s", bindPort: 0, targetPort: 8080 }, expectedRevision: updated.revision });
+  assert.equal(saved.forward.id, "web");
+  assert.notEqual(saved.revision, updated.revision);
+  await web.call("remove_connection", { connectionId: original.id, expectedRevision: saved.revision });
+  assert.deepEqual(web.sessions.status(), []);
 });
 
 test("the endpoint launcher is removed only by the host that published it", async (t) => {

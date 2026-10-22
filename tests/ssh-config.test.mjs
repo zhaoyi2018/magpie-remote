@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import { readSSHConfig } from "../src/ssh-config.mjs";
-import { ProfileStore } from "../src/store.mjs";
+import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { createTools } from "../src/plugin.mjs";
 import { temporary } from "./helpers.mjs";
@@ -116,7 +116,7 @@ test("SSH preview and selective import preserve source files and skip existing p
   assert.deepEqual((await store.get("second")).forwards, []);
   assert.equal(sessions.status("second").state, "disconnected");
   assert.equal((await store.list()).length, 1);
-  await store.save({ id: "second", name: "Keep my changes", host: "existing.example", username: "existing" });
+  await store.save({ id: "second", name: "Keep my changes", host: "existing.example", username: "existing" }, { expectedRevision: profileRevision(await store.get("second")) });
   const [a, b] = await Promise.all([0, 1].map(() => tools.ssh_config_import.execute({ configPath: f.configPath, revision: preview.revision, aliases: ["first", "second"] })));
   assert.equal(a.imported.length + b.imported.length, 1);
   assert.equal((await store.get("second")).name, "Keep my changes");

@@ -189,6 +189,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .rule-actions .icon-button { width: 28px; height: 32px; }
 .rule-actions .icon { width: 15px; height: 15px; }
 .row-error { overflow-wrap: anywhere; color: var(--danger); font-size: 11px; margin-top: 4px; }
+.target-result, .target-time { display: block; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.target-result { margin-top: 6px; }
 .temporary-tag { display: block; font-size: 10px; color: var(--muted); margin-top: 3px; }
 .info-note { display: flex; align-items: flex-start; gap: 9px; padding: 0 2px; color: var(--muted); margin-top: 18px; font-size: 12px; max-width: 78ch; }
 .info-note .icon { width: 16px; height: 16px; margin-top: 2px; }

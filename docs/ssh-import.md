@@ -1,6 +1,6 @@
 # 系统 SSH 配置的预览与选择导入
 
-后端已提供 `ssh_config_preview`、`ssh_config_import` 两个工具，MCP 与本机管理页共用。当前按用户要求先完成后端和文档；管理页面正在单独改版，导入界面尚未完成联调验收。
+`ssh_config_preview`、`ssh_config_import` 两个工具由 MCP 与本机管理页共用。管理页已接入预览、勾选和导入流程，并在隔离环境完成联调；验证范围见[验证记录](verification.md)。
 
 ## 读取范围
 
@@ -95,6 +95,6 @@ const result = await call("ssh_config_import", {
 
 当前新版页面使用 `import-config` 入口、`import-dialog` 弹窗、`import-path` 路径输入、`preview-import` 预览按钮、`import-list` 候选列表、`import-all` 全选、`import-forwards` 转发选项和 `confirm-import` 导入按钮。接入时需统一页面与脚本中的控件 id，避免混用旧稿的 `ssh-import-*` 控件名。
 
-完成后刷新连接列表，显示实际 imported / skipped 数量；可选中第一条新增连接，但不自动连接。页面正在独立改版，本次后端验收不代表这些交互已经完成。
+完成后刷新连接列表，显示实际 imported / skipped 数量；可选中第一条新增连接，但不自动连接。系统 SSH 配置发生变化时仍要求重新预览；已有连接始终跳过，不能用导入操作覆盖。
 
 实现依据：[配置读取](../src/ssh-config.mjs)、[工具入口](../src/plugin.mjs)、[原子存储](../src/store.mjs)。返回[文档导航](README.md)。

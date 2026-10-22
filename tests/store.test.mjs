@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ProfileStore } from "../src/store.mjs";
+import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { validateProfile, validateForward, pluginOptions } from "../src/config.mjs";
 import { temporary } from "./helpers.mjs";
 
@@ -13,9 +13,9 @@ test("profiles survive reload and concurrent saves retain every connection", asy
   await Promise.all(Array.from({ length: 8 }, (_, i) => store.save({ id: `host-${i}`, host: "host.example", username: "dev" })));
   const reloaded = new ProfileStore(file);
   assert.equal((await reloaded.list()).length, 8);
-  await reloaded.save({ id: "host-0", name: "Updated", host: "host.example", username: "dev" });
+  await reloaded.save({ id: "host-0", name: "Updated", host: "host.example", username: "dev" }, { expectedRevision: profileRevision(await reloaded.get("host-0")) });
   assert.equal((await reloaded.get("host-0")).name, "Updated");
-  await reloaded.remove("host-0");
+  await reloaded.remove("host-0", { expectedRevision: profileRevision(await reloaded.get("host-0")) });
   await assert.rejects(reloaded.get("host-0"), /不存在/);
 });
 

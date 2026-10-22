@@ -63,7 +63,11 @@ try {
   assert.equal(loaded.plugins[0].error, undefined, loaded.plugins[0].error);
   assert.equal(loaded.plugins[0].tools.length, 16);
   const call = async (name, args = {}) => JSON.parse((await rpc("tool", { spec: root, name, args, ms: 5000 })).text);
-  await call("save_connection", { connection: { ...fixture.profile, autoReconnect: true } });
+  const initial = await call("save_connection", { connection: { ...fixture.profile, autoReconnect: true } });
+  assert.match(initial.revision, /^[a-f0-9]{64}$/);
+  const edited = await call("save_connection", { connection: { ...initial.connection, name: "Host smoke updated" }, expectedRevision: initial.revision });
+  assert.notEqual(edited.revision, initial.revision);
+  await assert.rejects(call("save_connection", { connection: initial.connection, expectedRevision: initial.revision }), /配置已被修改/);
   assert.equal((await call("connect", { connectionId: fixture.profile.id })).state, "connected");
   for (const direction of ["c2s", "s2c"]) {
     const forward = await call("forward_add", {
@@ -72,6 +76,7 @@ try {
     });
     const payload = Buffer.from(`Actual Magpie host: ${direction}`);
     assert.deepEqual(await exchange(forward.bindPort, payload), payload);
+    assert.equal((await call("status", { connectionId: fixture.profile.id })).forwards.find((item) => item.id === direction).targetConnection.state, "succeeded");
     await call("forward_remove", { connectionId: fixture.profile.id, forwardId: direction });
     await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
   }
@@ -93,9 +98,11 @@ try {
   await call("config_restore", { backupId: backup.id, revision: preview.revision, stopConnections: true });
   assert.equal((await call("status", { connectionId: fixture.profile.id })).reconnect.state, "stopped");
   for (const forward of recovered.forwards) await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
-  await call("remove_connection", { connectionId: fixture.profile.id });
+  const saved = (await call("connections")).find((row) => row.connection.id === fixture.profile.id);
+  await call("remove_connection", { connectionId: fixture.profile.id, expectedRevision: saved.revision });
   assert.deepEqual(await call("connections"), []);
-  console.log("Magpie host: 16 tools registered; SSH authentication, c2s/s2c recovery and data round trips, backup/restore, retry cancellation, port release and profile removal passed.");
+  assert.deepEqual(await call("status"), []);
+  console.log("Magpie host: 16 tools registered; versioned edits and stale rejection, SSH authentication, c2s/s2c diagnostics/recovery and data round trips, backup/restore, retry cancellation, port release and runtime deletion passed.");
   if (process.argv.includes("--ui")) {
     const harness = await startUIHarness();
     cleanup.unshift(() => harness.close());

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, writeFile, rm, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { ProfileStore } from "../src/store.mjs";
+import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { createTools } from "../src/plugin.mjs";
 import { echoServer, exchange, sshServer, temporary, until } from "./helpers.mjs";
@@ -16,7 +16,7 @@ test("writes back up the previous valid configuration and retain the latest five
   await assert.rejects(store.createBackup(), { code: "CONFIG_BACKUP_EMPTY" });
   await store.save(profile);
   assert.deepEqual(await store.listBackups(), []);
-  for (let i = 1; i <= 7; i++) await store.save({ ...profile, name: `revision-${i}` });
+  for (let i = 1; i <= 7; i++) await store.save({ ...profile, name: `revision-${i}` }, { expectedRevision: profileRevision(await store.get(profile.id)) });
   const reloaded = new ProfileStore(store.file);
   const backups = await reloaded.listBackups();
   assert.equal(backups.length, 5);
@@ -52,10 +52,10 @@ test("restore previews removals, preserves the previous configuration and surviv
 test("unchanged saves and skipped imports do not rotate useful backups", async (t) => {
   const store = await storeFor(t);
   await store.save(profile);
-  await store.save({ ...profile, name: "latest" });
+  await store.save({ ...profile, name: "latest" }, { expectedRevision: profileRevision(await store.get(profile.id)) });
   const backups = await store.listBackups();
   for (let i = 0; i < 6; i++) {
-    await store.save({ ...profile, name: "latest" });
+    await store.save({ ...profile, name: "latest" }, { expectedRevision: profileRevision(await store.get(profile.id)) });
     await store.importProfiles([profile]);
   }
   assert.deepEqual(await store.listBackups(), backups);
@@ -85,7 +85,7 @@ test("stale previews cannot overwrite changes to either the current file or sele
   await store.save(profile);
   const backup = await store.createBackup();
   let preview = await store.previewRestore(backup.id);
-  await store.save({ ...profile, name: "newer" });
+  await store.save({ ...profile, name: "newer" }, { expectedRevision: profileRevision(await store.get(profile.id)) });
   await assert.rejects(store.restore(backup.id, preview.revision), { code: "CONFIG_RESTORE_STALE" });
   preview = await store.previewRestore(backup.id);
   const file = join(store.backupDirectory, backup.id + ".json");
@@ -114,10 +114,10 @@ test("backup storage failure leaves current config intact and the write queue ca
   await store.save(profile);
   const before = await readFile(store.file);
   await writeFile(store.backupDirectory, "blocked directory");
-  await assert.rejects(store.save({ ...profile, name: "lost" }), { code: "CONFIG_BACKUP_FAILED" });
+  await assert.rejects(store.save({ ...profile, name: "lost" }, { expectedRevision: profileRevision(await store.get(profile.id)) }), { code: "CONFIG_BACKUP_FAILED" });
   assert.deepEqual(await readFile(store.file), before);
   await rm(store.backupDirectory);
-  await store.save({ ...profile, name: "recovered" });
+  await store.save({ ...profile, name: "recovered" }, { expectedRevision: profileRevision(await store.get(profile.id)) });
   assert.equal((await store.get(profile.id)).name, "recovered");
   assert.ok(!(await readdir(join(store.file, ".."))).some((file) => file.endsWith(".tmp")));
 });

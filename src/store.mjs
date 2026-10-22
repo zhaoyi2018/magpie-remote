@@ -7,6 +7,21 @@ import { OperationError } from "./errors.mjs";
 const backupID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const serialize = (profiles) => `${JSON.stringify({ version: 1, connections: profiles }, null, 2)}\n`;
+export const profileRevision = (profile) => hash(JSON.stringify(validateProfile(profile)));
+
+export function assertProfileRevision(current, expectedRevision) {
+  if (expectedRevision !== undefined && expectedRevision !== null
+    && (typeof expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(expectedRevision))) {
+    throw new OperationError("CONFIG_REVISION_INVALID", "配置版本无效，请重新读取连接配置");
+  }
+  if (current && expectedRevision === undefined) {
+    throw new OperationError("CONFIG_REVISION_REQUIRED", "修改已有配置前，请先读取 connections 返回的 revision，并作为 expectedRevision 提交");
+  }
+  if ((expectedRevision ?? null) !== (current ? profileRevision(current) : null)) {
+    throw new OperationError("CONFIG_CONFLICT", "连接配置已被修改、删除或创建，本次操作未执行。请保留草稿，重新打开配置并对照后再保存");
+  }
+}
+
 function decode(contents) {
   let data;
   try { data = JSON.parse(contents.toString("utf8")); }
@@ -47,20 +62,22 @@ export class ProfileStore {
     return profile;
   }
 
-  save(value) {
+  save(value, { expectedRevision } = {}) {
     const profile = validateProfile(value);
     return this.#change(async (profiles) => {
       const index = profiles.findIndex((item) => item.id === profile.id);
+      assertProfileRevision(profiles[index], expectedRevision);
       if (index === -1) profiles.push(profile);
       else profiles[index] = profile;
       return profile;
     });
   }
 
-  remove(id) {
+  remove(id, { expectedRevision } = {}) {
     identifier(id);
     return this.#change(async (profiles) => {
       const index = profiles.findIndex((item) => item.id === id);
+      assertProfileRevision(profiles[index], expectedRevision);
       if (index === -1) throw new Error(`连接 ${id} 不存在`);
       profiles.splice(index, 1);
       return { id, removed: true };

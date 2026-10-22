@@ -10,16 +10,16 @@
 | `migpie-remote_config_restore` | `backupId`, `revision`；可选 `stopConnections` | 保留旧配置后恢复；有活跃连接、连接请求或重试时需明确传 true，否则拒绝；恢复后保持停止 |
 | `migpie-remote_ssh_config_preview` | 无；可选 `configPath` | 只读预览系统 SSH 配置，返回 revision、候选主机及是否已存在 |
 | `migpie-remote_ssh_config_import` | `revision`, `aliases`；可选 `configPath`, `includeForwards` | 仅新增选中且支持的连接；原子保存，跳过已存在 id，不连接 SSH |
-| `migpie-remote_connections` | 无，传 `{}` | 所有配置及对应会话快照；不创建连接 |
-| `migpie-remote_save_connection` | `connection` | 新建或完整替换一条配置；已有活跃会话时拒绝修改 |
-| `migpie-remote_remove_connection` | `connectionId` | 删除已断开的配置，返回 `removed: true` |
+| `migpie-remote_connections` | 无，传 `{}` | 返回 `{connection, revision, session}` 数组；不创建连接 |
+| `migpie-remote_save_connection` | `connection`；更新时必填 `expectedRevision` | 新建或完整替换一条配置，返回 `{connection, revision}`；已有活跃会话时拒绝修改 |
+| `migpie-remote_remove_connection` | `connectionId`, `expectedRevision` | 删除已断开的配置并清理其运行记录，返回 `removed: true` |
 | `migpie-remote_connect` | `connectionId` | 认证后建立会话，并启动保存的预设转发；已连接时返回现有会话 |
 | `migpie-remote_disconnect` | `connectionId` | 断开会话并释放全部转发；保留配置 |
 | `migpie-remote_status` | 无；可选 `connectionId` | 单个会话或全部运行记录 |
 | `migpie-remote_forward_add` | `connectionId`, `forward` | 创建临时转发，返回实际绑定端口 |
 | `migpie-remote_forward_remove` | `connectionId`, `forwardId` | 停止单条转发和通道，返回 `stopped: true` |
-| `migpie-remote_forward_save` | `connectionId`, `forward` | 保存转发预设，不启动监听；可在 SSH 已连接时保存 |
-| `migpie-remote_forward_delete` | `connectionId`, `forwardId` | 停止指定转发并删除其预设，保持 SSH 连接 |
+| `migpie-remote_forward_save` | `connectionId`, `forward`, `expectedRevision` | 保存转发预设，返回 `{forward, revision}`，不启动监听；可在 SSH 已连接时保存 |
+| `migpie-remote_forward_delete` | `connectionId`, `forwardId`, `expectedRevision` | 停止指定转发并删除其预设，保持 SSH 连接；旧版本请求不停止转发 |
 
 ## SSH 配置的选择导入
 
@@ -50,6 +50,23 @@
 
 至少配置一种可用认证来源。未知连接字段会被拒绝。`save_connection` 为完整替换，不会与旧字段合并，因此更新时需带上要保留的配置。
 
+### 并发修改与版本校验
+
+`connections` 的每一行包含独立的 `revision`，表示这一条规范化配置的内容版本。修改连接、保存预设或删除时，将读取到的版本作为顶层参数 `expectedRevision` 提交；它不属于 `connection` 或 `forward` 对象。不同连接的修改互不冲突；没有内容变化的保存保持原版本，不轮换备份。
+
+```js
+const row = (await call("connections")).find((item) => item.connection.id === "dev-server");
+const saved = await call("save_connection", {
+  connection: { ...row.connection, name: "开发服务器" },
+  expectedRevision: row.revision,
+});
+// saved.connection 是保存后的配置，saved.revision 可用于下一次修改。
+```
+
+新建连接可省略 `expectedRevision` 或传 `null`，两者都仅允许创建不存在的 id。更新已有配置省略版本会返回 `CONFIG_REVISION_REQUIRED`；版本格式无效返回 `CONFIG_REVISION_INVALID`；内容已变化、已删除或新建 id 已存在时返回 `CONFIG_CONFLICT`。冲突不写入文件，不生成备份，也不会停止正在运行的转发。遇到冲突应保留草稿，重新读取并对照配置，再由调用方提交修改，不能自动取得新版本后覆盖。
+
+升级后需刷新 Agent 的工具定义。旧的无版本更新、预设保存和删除调用会被拒绝；`save_connection` 和 `forward_save` 的返回结构也已增加包装，分别读取 `connection` / `forward` 与 `revision`。配置文件仍为 version 1，既有配置和备份无需迁移。本保护依赖同一个宿主的写入队列，未增加跨进程锁。
+
 ## 转发配置
 
 ```json
@@ -70,7 +87,7 @@
 
 两侧地址的解释见[操作指南](usage.md)。该工具仅创建当前会话的转发；把同一对象放入连接的 `forwards` 数组才能持久保存。
 
-也可以使用 `forward_save` 单独保存预设。若同 id 转发正在运行，需先停止再编辑。管理页新建转发时，已连接 SSH 可「创建并启动」，取消「保存为预设」只创建当前会话的临时转发；未连接时可「保存预设」，连接成功后自动启动。预设保存成功但启动失败时会保留预设并提示错误。管理页与 MCP 共用会话。
+也可以使用 `forward_save` 单独保存预设，需携带所属连接的 `expectedRevision`，成功后返回 `{forward, revision}`。若同 id 转发正在运行，需先停止再编辑。管理页新建转发时，已连接 SSH 可「创建并启动」，取消「保存为预设」只创建当前会话的临时转发；未连接时可「保存预设」，连接成功后按自动启动设置运行。预设保存成功但启动失败时会保留预设并提示错误。管理页与 MCP 共用会话。
 
 ## 配置恢复流程
 
@@ -81,6 +98,10 @@
 ## 状态与错误
 
 会话状态是 `connecting`、`connected`、`disconnected` 或 `failed`。转发状态是 `starting`、`listening`、`stopping` 或 `failed`。`status` 包含地址、用户名、已观察到的公钥指纹、连接时间、当前转发及最近错误；另有 lastConnectedAt 和 logs（time、level、message）。已创建会话的 `forwardErrors` 数组以 `{id, message}` 记录当前会话中启动失败的规则，重试成功后移除对应项；页面将它与预设合并显示，失败项不计入运行中的转发。每个连接保留最近 200 条内存日志，重连后延续，宿主重启后清空，不返回密码、口令或私钥内容。
+
+每条运行转发另外返回 `targetConnection: {state, lastAttemptAt?, lastSuccessAt?, lastFailureAt?, error?}`。`state` 为 `unknown`、`connecting`、`succeeded` 或 `failed`，描述最近发起的目标连接；旧请求的迟到结果不覆盖新请求的状态。`succeeded` 仅证明目标 TCP 连接及 SSH 通道建立，不证明应用协议或业务健康。连接失败保留监听和 SSH 会话，成功重试后清除当前 `lastError` / `error`，保留失败时间和历史日志，并记录恢复事件。停止再启动转发时重新开始统计。
+
+目标建立超时返回 `FORWARD_TARGET_TIMEOUT`，连接失败为 `FORWARD_TARGET_FAILED`，传输异常为 `FORWARD_STREAM_FAILED`，建立前请求关闭为 `FORWARD_TARGET_CANCELLED`；这些是转发快照中的错误，不触发 SSH 自动重连。它们与远程监听分配超时 `FORWARD_TIMEOUT` 不同，后者仍关闭会话。删除连接成功后清除该连接的会话、重连意图和日志，全局 `status` 不再返回它；普通断开继续保留运行历史。删除写入失败时保留原配置与运行记录。
 
 当 SSH 公钥尚未通过信任校验时，可能已经取得其指纹；只有 `state: connected` 才表示该会话已通过校验和认证。
 

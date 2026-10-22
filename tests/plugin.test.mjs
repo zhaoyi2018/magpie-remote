@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { createPlugin, createTools } from "../src/plugin.mjs";
-import { ProfileStore } from "../src/store.mjs";
+import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import plugin from "../index.mjs";
 import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
@@ -43,7 +43,7 @@ test("Magpie tool workflow saves, connects, forwards, disconnects and removes a 
     await tools.forward_remove.execute({ connectionId: fixture.profile.id, forwardId: direction });
   }
   await tools.disconnect.execute({ connectionId: fixture.profile.id });
-  await tools.remove_connection.execute({ connectionId: fixture.profile.id });
+  await tools.remove_connection.execute({ connectionId: fixture.profile.id, expectedRevision: profileRevision(await store.get(fixture.profile.id)) });
   assert.deepEqual(await tools.connections.execute({}), []);
 });
 
