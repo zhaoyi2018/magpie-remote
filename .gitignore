@@ -1,0 +1,15 @@
+node_modules/
+.local/
+.sandbox/
+coverage/
+*.log
+*.tgz
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.DS_Store
+Thumbs.db

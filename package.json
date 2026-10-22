@@ -1,0 +1,22 @@
+{
+  "name": "migpie-remote",
+  "version": "0.1.0",
+  "description": "Magpie SSH connection manager with c2s (-L) and s2c (-R) TCP forwarding tools",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./server": "./index.mjs"
+  },
+  "files": ["index.mjs", "src/", "README.md", "docs/", "examples/", "LICENSE"],
+  "keywords": ["magpie-plugin", "opencode", "opencode-plugin", "ssh", "tools", "port-forwarding"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1",
+    "test:host": "node scripts/host-smoke.mjs",
+    "check": "node scripts/check.mjs",
+    "prepack": "npm run check && npm test"
+  },
+  "dependencies": { "ssh2": "1.17.0" },
+  "license": "MIT"
+}

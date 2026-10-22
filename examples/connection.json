@@ -1,0 +1,14 @@
+{
+  "connection": {
+    "id": "dev-server",
+    "name": "开发服务器",
+    "host": "server.example.com",
+    "port": 22,
+    "username": "developer",
+    "identityFile": "~/.ssh/id_ed25519",
+    "forwards": [
+      { "id": "server-web", "direction": "c2s", "bindPort": 18080, "targetPort": 8080 },
+      { "id": "local-magpie", "direction": "s2c", "bindPort": 13425, "targetPort": 3425 }
+    ]
+  }
+}

@@ -1,0 +1,94 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+import { basename, dirname, join, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { echoServer, exchange, sshServer } from "../tests/helpers.mjs";
+
+const [bunPath, hostPath] = process.argv.slice(2);
+assert.ok(bunPath && hostPath, "Usage: node scripts/host-smoke.mjs <bun executable> <Magpie host.js>");
+const root = fileURLToPath(new URL("../", import.meta.url));
+const directory = await mkdtemp(join(tmpdir(), "migpie-host-smoke-"));
+const cleanup = [];
+const context = { after(fn) { cleanup.unshift(fn); } };
+let child;
+try {
+  const fixture = await sshServer(context);
+  const echo = await echoServer(context);
+  child = spawn(resolve(bunPath), [resolve(hostPath)], {
+    cwd: directory, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      HOME: directory, USERPROFILE: directory,
+      XDG_CONFIG_HOME: join(directory, "config"), XDG_CACHE_HOME: join(directory, "cache"),
+      MIGPIE_TEST_PASSWORD: "local-test-secret",
+    },
+  });
+  const pending = new Map();
+  let sequence = 0;
+  let diagnostics = "";
+  child.stderr.on("data", (data) => { diagnostics = (diagnostics + data).slice(-4000); });
+  const fail = (error) => {
+    for (const waiter of pending.values()) waiter.reject(error);
+    pending.clear();
+  };
+  child.on("error", fail);
+  child.on("exit", (code) => fail(new Error(`Plugin host exited (${code}): ${diagnostics}`)));
+  const reader = createInterface({ input: child.stdout });
+  reader.on("line", (line) => {
+    const message = JSON.parse(line);
+    const waiter = pending.get(message.id);
+    if (!waiter) return;
+    pending.delete(message.id);
+    if (message.error) waiter.reject(new Error(message.error.message));
+    else waiter.resolve(message.result);
+  });
+  const rpc = (method, params) => new Promise((resolve, reject) => {
+    const id = ++sequence;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out: ${diagnostics}`)); }, 10000);
+    pending.set(id, {
+      resolve(result) { clearTimeout(timer); resolve(result); },
+      reject(error) { clearTimeout(timer); reject(error); },
+    });
+    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+  });
+  const loaded = await rpc("init", {
+    authPath: join(directory, "plugin-auth.json"), directory,
+    plugins: [{ spec: root, target: root }],
+  });
+  assert.equal(loaded.plugins.length, 1);
+  assert.equal(loaded.plugins[0].error, undefined, loaded.plugins[0].error);
+  assert.equal(loaded.plugins[0].tools.length, 8);
+  const call = async (name, args = {}) => JSON.parse((await rpc("tool", { spec: root, name, args, ms: 5000 })).text);
+  await call("save_connection", { connection: fixture.profile });
+  assert.equal((await call("connect", { connectionId: fixture.profile.id })).state, "connected");
+  for (const direction of ["c2s", "s2c"]) {
+    const forward = await call("forward_add", {
+      connectionId: fixture.profile.id,
+      forward: { id: direction, direction, bindPort: 0, targetPort: echo.port },
+    });
+    const payload = Buffer.from(`Actual Magpie host: ${direction}`);
+    assert.deepEqual(await exchange(forward.bindPort, payload), payload);
+    await call("forward_remove", { connectionId: fixture.profile.id, forwardId: direction });
+    await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
+  }
+  await call("disconnect", { connectionId: fixture.profile.id });
+  await call("remove_connection", { connectionId: fixture.profile.id });
+  assert.deepEqual(await call("connections"), []);
+  console.log("Magpie host: 8 tools registered; SSH authentication, c2s and s2c round trips, port release and profile removal passed.");
+} finally {
+  if (child && child.exitCode === null) {
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => { child.kill(); resolve(); }, 2000);
+      child.once("exit", () => { clearTimeout(timer); resolve(); });
+      child.stdin.end();
+    });
+  }
+  for (const fn of cleanup) await fn();
+  const absolute = resolve(directory);
+  assert.equal(dirname(absolute), resolve(tmpdir()));
+  assert.ok(basename(absolute).startsWith("migpie-host-smoke-"));
+  await rm(absolute, { recursive: true, force: true });
+}
