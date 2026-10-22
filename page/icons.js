@@ -17,6 +17,8 @@ const definitions = {
   trash: { paths: ["M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"] },
   forward: { paths: ["M3 7h17m-4-4 4 4-4 4M21 17H4m4-4-4 4 4 4"] },
   chevron: { paths: ["m6 9 6 6 6-6"] },
+  settings: { paths: ["M4 7h16M4 17h16M9 4v6M15 14v6"] },
+  logs: { paths: ["M8 3h10a2 2 0 0 1 2 2v16H6a2 2 0 0 1-2-2V7h4V3Z", "M8 7v12M12 8h4M12 12h4M12 16h4"] },
 };
 
 export function icon(name) {

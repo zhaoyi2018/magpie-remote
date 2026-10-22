@@ -3,13 +3,13 @@
 .connection-editor { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); border-radius: 16px; overflow: hidden; }
 .connection-editor[open] { display: flex; flex-direction: column; }
 .connection-editor .dialog-heading { padding: 24px 28px 8px; border: 0; flex-shrink: 0; }
-.connection-editor .dialog-heading h2 { font-size: 22px; font-weight: 700; letter-spacing: -.4px; }
+.connection-editor .dialog-heading h2 { font-size: 22px; font-weight: 500; }
 .connection-editor .dialog-heading p { margin-top: 6px; font-size: 14px; }
 .connection-editor .dialog-heading .icon-button { margin: -4px -10px 0 0; }
 .connection-editor form { display: flex; flex-direction: column; min-height: 0; }
 .connection-editor .dialog-content { padding: 24px 28px 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .connection-section { padding-bottom: 24px; margin-bottom: 24px; border-bottom: 1px solid var(--line); }
-.connection-section h3 { margin: 0 0 18px; font-size: 16px; font-weight: 700; }
+.connection-section h3 { margin: 0 0 18px; font-size: 16px; font-weight: 500; }
 .connection-editor .profile-row { display: grid; grid-template-columns: 116px minmax(0, 1fr); align-items: center; gap: 14px; margin: 0 0 18px; font-size: 14px; font-weight: 400; color: var(--muted); }
 .connection-editor .profile-row:last-child { margin-bottom: 0; }
 .connection-editor .profile-row input, .connection-editor .profile-port-row input { margin: 0; min-height: 42px; padding: 9px 12px; background: var(--surface); color: var(--fg); font-size: 14px; }
@@ -17,14 +17,14 @@
 .connection-editor .profile-host-row .profile-row { margin: 0; }
 .connection-editor .profile-port-row { display: grid; grid-template-columns: auto 82px; gap: 14px; align-items: center; margin: 0; font-size: 14px; font-weight: 400; color: var(--muted); }
 .auth-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; }
-.auth-options button { position: relative; min-height: 46px; padding: 10px 8px; background: transparent; color: var(--muted); border: 0; font-size: 14px; font-weight: 600; }
+.auth-options button { position: relative; min-height: 46px; padding: 10px 8px; background: transparent; color: var(--muted); border: 0; font-size: 14px; font-weight: 500; }
 .auth-options button + button { border-left: 1px solid var(--line); }
 .auth-options button:hover { color: var(--accent); background: var(--accent-soft); }
 .auth-options button[aria-checked="true"] { z-index: 1; margin: -1px; border: 2px solid var(--accent); border-radius: 8px; color: var(--accent); background: var(--accent-soft); }
 .auth-options button[aria-checked="true"] + button { border-left-color: transparent; }
 .auth-hint { margin: 8px 0 20px; min-height: 21px; font-size: 12px; color: var(--muted); }
 .auth-advanced { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.auth-advanced summary, .profile-other-settings summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 600; }
+.auth-advanced summary, .profile-other-settings summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 500; }
 .auth-advanced summary::-webkit-details-marker, .profile-other-settings summary::-webkit-details-marker { display: none; }
 .auth-advanced summary { padding: 13px 16px; background: var(--surface-muted); }
 .auth-advanced summary [data-icon], .profile-other-settings summary [data-icon] { color: var(--muted); transition: transform .15s; }

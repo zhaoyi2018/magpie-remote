@@ -1,9 +1,9 @@
 :root { color-scheme: light; --bg: var(--magpie-bg, #f3f4f3); --fg: var(--magpie-fg, #1a1d1c); --muted: var(--magpie-muted, #66706c); --accent: var(--magpie-accent, #187864); --on-accent: #fff; }
 :root[data-theme="dark"] { color-scheme: dark; --bg: var(--magpie-bg, #141716); --fg: var(--magpie-fg, #e7ece9); --muted: var(--magpie-muted, #9aa59f); --accent: var(--magpie-accent, #3dbe9a); --on-accent: #06241c; }
 html, body { min-height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--fg); font: 14px/1.6 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+body { background: var(--bg); color: var(--fg); font: 400 14px/1.65 "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif; }
 .launch { display: grid; justify-items: center; align-content: center; min-height: 75vh; padding: 32px; text-align: center; }
-h1 { font-size: 20px; font-weight: 650; margin: 16px 0 6px; }
+h1 { font-size: 20px; font-weight: 500; margin: 16px 0 6px; }
 p { color: var(--muted); }
 button { margin: 14px 0; border: 0; padding: 8px 16px; border-radius: 7px; color: var(--on-accent); background: var(--accent); cursor: pointer; font: inherit; }
 .hint { max-width: 420px; font-size: 12px; }

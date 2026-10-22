@@ -70,6 +70,7 @@ import { createBackupManager } from "./backups.js";
     if (!rows.some((row) => row.connection.id === state.selected)) {
       state.selected = rows[0]?.connection.id ?? null;
       setTab("forwards");
+      $("connection-detail").scrollTop = 0;
     }
   }
   function pick(row) {
@@ -77,6 +78,8 @@ import { createBackupManager } from "./backups.js";
     state.selected = row.connection.id;
     if (isNarrow()) listCollapsed = true;
     setTab("forwards"); render();
+    $("connection-detail").scrollTop = 0;
+    if (isNarrow()) $("toggle-list").focus();
   }
   function isNarrow() { return matchMedia("(max-width: 760px)").matches; }
   function applyLayout() {
@@ -153,7 +156,9 @@ import { createBackupManager } from "./backups.js";
     $("open-backups").disabled = serviceFailure?.action === "reopen";
     const connected = state.rows.filter((row) => row.session.state === "connected").length;
     const running = state.rows.reduce((sum, row) => sum + row.session.forwards.filter((rule) => rule.state === "listening").length, 0);
-    $("connected-count").textContent = connected; $("running-count").textContent = running;
+    for (const [id, count] of [["connected-count", connected], ["running-count", running]]) {
+      if ($(id).textContent !== String(count)) $(id).textContent = count;
+    }
     $("summary-dot").classList.toggle("is-live", connected > 0);
     $("connection-count").textContent = state.rows.length;
     document.querySelectorAll("[data-filter]").forEach((node) => node.setAttribute("aria-pressed", String(node.dataset.filter === state.filter)));
@@ -164,6 +169,7 @@ import { createBackupManager } from "./backups.js";
     $("empty-state").querySelector("p").textContent = state.rows.length ? "试试其他名称、主机地址，或清除当前筛选。" : "添加服务器，或导入已有 SSH 配置。连接后即可管理本地与远程端口转发。";
     $("empty-reset").hidden = !state.rows.length;
     $("empty-add").hidden = Boolean(state.rows.length);
+    $("empty-directions").hidden = Boolean(state.rows.length);
     $("last-connected").textContent = "尚未建立连接";
     applyLayout();
     if (!row) return;
@@ -173,7 +179,11 @@ import { createBackupManager } from "./backups.js";
     $("detail-name").textContent = connection.name;
     $("detail-address").textContent = endpoint(connection.host, connection.port);
     $("detail-user").textContent = connection.username;
-    $("detail-auth").textContent = $("auth-badge").textContent = auth(connection);
+    $("detail-auth").textContent = auth(connection);
+    $("connection-route").dataset.state = state.online ? status : "unknown";
+    $("route-status").textContent = !state.online ? "状态待同步" : {
+      connected: "会话已建立", connecting: "正在建立连接…", reconnecting: "网络中断，等待重连", failed: "连接失败，请重试", disconnected: "尚未建立连接",
+    }[status] ?? labels[status] ?? status;
     $("panel-forwards").querySelector(".info-note p").textContent = connection.autoStartForwards === false
       ? "当前已关闭自动启动预设，请手动启动所需转发；SSH 断开时会自动释放监听端口。"
       : "连接认证成功后启动预设转发；SSH 断开时会自动释放监听端口。";
@@ -213,9 +223,11 @@ import { createBackupManager } from "./backups.js";
       card.setAttribute("aria-label", connection.name + "，" + address(connection) + "，" + (labels[status] ?? status));
       const body = element("div", "card-body");
       const title = element("div", "card-title");
-      title.append(element("span", "card-name", connection.name), element("span", "badge " + status, labels[status] ?? status));
+      const name = element("span", "card-name", connection.name); name.title = connection.name;
+      title.append(name, element("span", "badge " + status, labels[status] ?? status));
       const host = element("div", "card-address", address(connection)); host.title = address(connection);
-      body.append(title, host); card.append(icon("server"), body);
+      const glyph = element("span", "connection-glyph"); glyph.append(icon("server"));
+      body.append(title, host); card.append(glyph, body);
       const more = button("", (event) => openMenu(row, event.currentTarget), "icon-button");
       more.append(icon("more")); more.setAttribute("aria-label", connection.name + "的更多操作");
       more.setAttribute("aria-expanded", "false"); more.setAttribute("aria-controls", "connection-menu");
@@ -234,15 +246,26 @@ import { createBackupManager } from "./backups.js";
     }
     for (const live of session.forwards) rules.set(live.id, { ...rules.get(live.id), ...live });
     $("forward-list").replaceChildren();
-    $("forward-count").textContent = "(" + rules.size + ")";
+    $("forward-count").textContent = rules.size;
     $("forward-empty").hidden = rules.size > 0;
     $("forward-list").closest(".table-wrap").hidden = rules.size === 0;
     for (const rule of rules.values()) {
       const tr = element("tr");
-      const name = element("td", "rule-name", rule.name ?? rule.id);
+      const name = element("td", "rule-name");
+      name.append(element("span", "rule-title", rule.name ?? rule.id));
+      const local = rule.direction === "c2s";
+      const direction = element("span", "direction-tag", local ? "本地转发 (-L)" : "远程转发 (-R)");
+      direction.prepend(icon(local ? "laptop" : "server"));
+      name.append(direction);
       if (!rule.saved) name.append(element("span", "temporary-tag", "临时规则"));
-      const direction = element("td", "direction-tag", rule.direction + " · " + (rule.direction === "c2s" ? "-L" : "-R"));
-      direction.title = rule.direction === "c2s" ? "本地监听 → 服务器目标" : "服务器监听 → 本地目标";
+      const path = element("td", "rule-path");
+      const route = element("div", "rule-route");
+      const listener = element("div", "rule-endpoint"), target = element("div", "rule-endpoint");
+      listener.append(element("span", "endpoint-label", local ? "本机监听" : "服务器监听"), element("span", "endpoint", endpoint(rule.bindHost, rule.bindPort)));
+      target.append(element("span", "endpoint-label", local ? "服务器目标" : "本机目标"), element("span", "endpoint", endpoint(rule.targetHost, rule.targetPort)));
+      const arrow = element("span", "rule-route-arrow"); arrow.append(icon("arrow"));
+      arrow.append(element("span", "sr-only", "转发至"));
+      route.append(listener, arrow, target); path.append(route);
       const status = element("td");
       status.append(element("span", "badge " + rule.state, rule.state === "failed" ? "启动失败" : labels[rule.state] ?? rule.state));
       if (rule.lastError) status.append(element("div", "row-error", rule.lastError));
@@ -264,7 +287,7 @@ import { createBackupManager } from "./backups.js";
       }, "icon-button", !enabled);
       remove.append(icon("trash")); remove.title = "删除规则"; remove.setAttribute("aria-label", "删除转发 " + (rule.name ?? rule.id));
       actionsBox.append(edit, remove); actions.append(actionsBox);
-      tr.append(name, direction, element("td", "endpoint", endpoint(rule.bindHost, rule.bindPort)), element("td", "endpoint", endpoint(rule.targetHost, rule.targetPort)), status, actions);
+      tr.append(name, path, status, actions);
       $("forward-list").append(tr);
     }
   }
@@ -273,7 +296,6 @@ import { createBackupManager } from "./backups.js";
     if (settingsSignature === signature) return;
     settingsSignature = signature;
     const values = [["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username], ["认证方式", auth(connection)], ["自动启动预设", connection.autoStartForwards === false ? "已关闭" : "已开启"], ["预设失败处理", connection.forwardFailurePolicy === "continue" ? "保留连接，继续其他预设" : "回滚本次连接"], ["启动时连接", connection.autoConnect ? "已开启" : "已关闭"], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent], ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv], ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"], ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"]];
-    values.push(["连接后启动转发", connection.autoStartForwards !== false ? "已开启" : "已关闭"], ["应用启动时重连", connection.autoConnect ? "已开启" : "已关闭"]);
     $("settings-list").replaceChildren();
     values.splice(7, 0, ["断网自动重连", connection.autoReconnect ? "已开启，仅网络故障重试" : "已关闭"]);
     for (const [label, value] of values) {
@@ -403,7 +425,7 @@ import { createBackupManager } from "./backups.js";
     setIcon($("rule-listener-icon"), local ? "laptop" : "server");
     setIcon($("rule-relay-icon"), local ? "server" : "laptop");
     $("rule-preview").setAttribute("aria-label", local ? "本机监听，经 SSH 服务器转发至远程目标" : "远程监听，经 SSH 客户端转发至本机目标");
-    $("rule-hint").textContent = local ? "c2s (-L)：本机监听端口，流量经 SSH 转发至服务器侧目标。" : "s2c (-R)：服务器监听端口，流量经 SSH 转发至本机侧目标。";
+    $("rule-hint").textContent = local ? "本地转发 (-L)：本机监听端口，流量经 SSH 转发至服务器侧目标。" : "远程转发 (-R)：服务器监听端口，流量经 SSH 转发至本机侧目标。";
   }
   function syncForwardAction() {
     const row = state.rows.find((item) => item.connection.id === editingForwardConnection);
@@ -411,6 +433,9 @@ import { createBackupManager } from "./backups.js";
     if (!connected || editingForwardSaved) $("rule-save-preset").checked = true;
     $("rule-save-preset").disabled = forwardSaving || !connected || editingForwardSaved;
     $("rule-action-hint").hidden = connected;
+    $("rule-action-hint").textContent = row?.connection.autoStartForwards === false
+      ? "SSH 尚未连接。保存预设后，请先连接服务器，再手动启动转发。"
+      : "SSH 尚未连接。预设会在连接成功后自动启动。";
     $("save-forward-icon").hidden = forwardSaving || Boolean(editingForwardId) || !connected;
     $("save-forward-label").textContent = forwardSaving ? "正在保存…" : editingForwardId ? "保存修改" : connected ? "创建并启动" : "保存预设";
     $("save-forward").disabled = forwardSaving || !state.online || !row || state.busy.has(editingForwardConnection) || recovering(row?.session);
@@ -591,7 +616,10 @@ import { createBackupManager } from "./backups.js";
     });
   }
   $("log-filter").addEventListener("change", () => { if (selected()) renderLogs(selected()); });
-  $("toggle-list").addEventListener("click", () => { listCollapsed = !$("app-layout").classList.contains("list-collapsed"); applyLayout(); });
+  $("toggle-list").addEventListener("click", () => {
+    listCollapsed = !$("app-layout").classList.contains("list-collapsed"); applyLayout();
+    if (!listCollapsed) $("search").focus();
+  });
   matchMedia("(max-width: 760px)").addEventListener("change", () => { listCollapsed = isNarrow(); applyLayout(); });
   $("connect").addEventListener("click", () => beginConnect());
   $("credentials-connect").addEventListener("click", () => beginConnect(selected(), true));

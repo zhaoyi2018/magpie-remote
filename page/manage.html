@@ -15,7 +15,11 @@
 <body>
   <div class="shell">
     <header class="topbar">
-      <div><h1>SSH 连接</h1><p>管理远程 SSH 会话与端口转发</p></div>
+      <div class="app-identity"><img src="icon.svg" width="38" height="38" alt=""><div><h1>SSH 连接</h1><p>服务器与端口转发工作台</p></div></div>
+      <div class="overview-stats" role="status" aria-label="连接概览" aria-live="polite">
+        <span class="stat"><span id="summary-dot" class="status-dot"></span><span><b id="connected-count">0</b> 个已连接</span></span>
+        <span class="stat"><span data-icon="forward"></span><span><b id="running-count">0</b> 条转发运行中</span></span>
+      </div>
       <div class="top-actions">
         <button class="button" id="open-backups" type="button"><span data-icon="shield"></span>备份与恢复</button>
         <button class="button" id="import-config" type="button"><span data-icon="upload"></span>导入配置</button>
@@ -23,43 +27,41 @@
       </div>
     </header>
     <div id="service-error" class="service-error" role="alert" hidden><span id="service-error-message">管理服务已断开，当前显示最后读取的状态。</span><button id="reopen" class="button" type="button">重新打开</button></div>
-    <section class="overview" aria-label="连接概览">
-      <div class="overview-stats" role="status" aria-live="polite">
-        <span class="stat"><span id="summary-dot" class="status-dot"></span><span><b id="connected-count">0</b> 个连接已建立</span></span>
-        <span class="stat-divider" aria-hidden="true"></span>
-        <span class="stat"><b class="forward-total" id="running-count">0</b> 条转发运行中</span>
-      </div>
-      <div class="filters" role="group" aria-label="按连接状态筛选"><button type="button" data-filter="all" aria-pressed="true">全部</button><button type="button" data-filter="connected" aria-pressed="false">已连接</button><button type="button" data-filter="disconnected" aria-pressed="false">未连接</button></div>
-    </section>
     <div class="app-layout" id="app-layout">
       <aside class="sidebar" id="server-pane" aria-label="连接配置">
-        <div class="sidebar-heading"><h2>连接配置</h2><span id="connection-count" class="count-pill">0</span></div>
-        <label class="search"><span class="sr-only">搜索连接名称或主机</span><span data-icon="search"></span><input id="search" type="search" placeholder="搜索连接名称或主机" autocomplete="off"></label>
+        <div class="sidebar-heading"><h2>服务器</h2><span id="connection-count" class="count-pill">0</span></div>
+        <label class="search"><span class="sr-only">搜索连接名称或主机</span><span data-icon="search"></span><input id="search" type="search" placeholder="搜索名称或主机" autocomplete="off"></label>
+        <div class="filters" role="group" aria-label="按连接状态筛选"><button type="button" data-filter="all" aria-pressed="true">全部</button><button type="button" data-filter="connected" aria-pressed="false">已连接</button><button type="button" data-filter="disconnected" aria-pressed="false">未连接</button></div>
         <div id="connection-list" class="connection-list" aria-label="服务器列表"></div>
-        <div class="sidebar-foot"><p><span data-icon="shield"></span>配置已保存 · 会话仅保留在本机内存</p><div class="service-row"><span id="service-state" class="service-state">正在同步</span><button class="icon-button" id="refresh" type="button" aria-label="刷新状态" title="刷新状态"><span data-icon="refresh"></span></button></div></div>
+        <div class="sidebar-foot"><div class="service-row"><span id="service-state" class="service-state">正在同步</span><button class="icon-button" id="refresh" type="button" aria-label="刷新状态" title="刷新状态"><span data-icon="refresh"></span></button></div><p><span data-icon="shield"></span>配置保存在本机，登录凭据不保存</p></div>
       </aside>
       <main class="workspace">
         <div class="narrow-bar" id="narrow-bar" hidden><button id="toggle-list" class="button small" type="button" aria-controls="server-pane" aria-expanded="true">收起列表</button><span id="narrow-current" class="narrow-current"></span></div>
         <section id="empty-state" class="empty-state">
-          <div class="empty-icon" data-icon="server" aria-hidden="true"></div><h2>从一条 SSH 连接开始</h2><p>添加服务器，或导入已有 SSH 配置。连接后即可管理本地与远程端口转发。</p><button id="empty-add" class="button primary" type="button"><span data-icon="plus"></span>新建连接</button>
-          <div class="empty-directions"><div><b>c2s · 本地转发</b><span>在本地访问服务器上的服务</span></div><div><b>s2c · 远程转发</b><span>让服务器访问你的本地服务</span></div></div>
+          <div class="empty-network" aria-hidden="true"><span data-icon="laptop"></span><span class="empty-network-line"></span><span data-icon="server"></span></div><h2>从一条 SSH 连接开始</h2><p>添加服务器，或导入已有 SSH 配置。连接后即可管理本地与远程端口转发。</p><button id="empty-add" class="button primary" type="button"><span data-icon="plus"></span>新建连接</button>
+          <div class="empty-directions" id="empty-directions"><div><span data-icon="laptop"></span><div><b>本地转发</b><span>在本机访问远程服务</span></div></div><div><span data-icon="server"></span><div><b>远程转发</b><span>让服务器访问本地服务</span></div></div></div>
         </section>
         <section id="connection-detail" class="detail" hidden>
           <header class="detail-heading">
-            <div class="detail-identity"><span class="server-icon" data-icon="server"></span><h2 id="detail-name"></h2><span id="detail-state" class="badge"></span><span id="auth-badge" class="auth-badge"></span></div>
+            <div class="detail-identity"><h2 id="detail-name"></h2><span id="detail-state" class="badge"></span></div>
             <div class="connection-controls"><button id="connect" class="button primary" type="button"><span data-icon="refresh"></span><span id="connect-label">连接服务器</span></button><button id="disconnect" class="button danger" type="button" disabled><span data-icon="disconnect"></span><span id="disconnect-label">断开连接</span></button></div>
           </header>
-          <dl class="connection-meta"><div><dt>服务器</dt><dd id="detail-address"></dd></div><div><dt>用户</dt><dd id="detail-user"></dd></div><div><dt>认证方式</dt><dd id="detail-auth"></dd></div><div><dt>连接时长</dt><dd id="connection-time">—</dd></div></dl>
+          <div class="connection-route" id="connection-route" data-state="disconnected" role="group" aria-label="SSH 连接路径">
+            <div class="route-node"><span class="route-icon" data-icon="laptop"></span><div><strong>本机</strong><span class="route-description">当前客户端</span></div></div>
+            <div class="route-bridge"><span class="route-protocol"><span data-icon="shield"></span>SSH 加密会话</span><span class="route-track" aria-hidden="true"></span><span class="route-status" id="route-status">尚未连接</span></div>
+            <div class="route-node route-remote"><span class="route-icon" data-icon="server"></span><div><strong>SSH 服务器</strong><span class="route-description endpoint" id="detail-address"></span></div></div>
+          </div>
+          <dl class="connection-meta"><div><dt>登录用户</dt><dd id="detail-user"></dd></div><div><dt>认证方式</dt><dd id="detail-auth"></dd></div><div><dt>连接时长</dt><dd id="connection-time">—</dd></div></dl>
           <div id="operation-error" class="operation-error" role="alert" hidden></div>
           <p id="reconnect-status" class="reconnect-status" role="status" hidden></p>
           <div class="detail-tabs" role="tablist" aria-label="连接详情">
-            <button id="tab-forwards" type="button" role="tab" aria-selected="true" aria-controls="panel-forwards">端口转发 <span id="forward-count">(0)</span></button>
-            <button id="tab-connection" type="button" role="tab" aria-selected="false" aria-controls="panel-connection" tabindex="-1">连接设置</button>
-            <button id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1">运行日志</button>
+            <button id="tab-forwards" type="button" role="tab" aria-selected="true" aria-controls="panel-forwards"><span data-icon="forward"></span>端口转发 <span id="forward-count">0</span></button>
+            <button id="tab-connection" type="button" role="tab" aria-selected="false" aria-controls="panel-connection" tabindex="-1"><span data-icon="settings"></span>连接设置</button>
+            <button id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1"><span data-icon="logs"></span>运行日志</button>
           </div>
           <section id="panel-forwards" class="tab-panel" role="tabpanel" aria-labelledby="tab-forwards" tabindex="0">
-            <div class="section-heading"><h3>转发规则</h3><button id="new-forward" class="button primary" type="button"><span data-icon="plus"></span>新建转发</button></div>
-            <div class="table-wrap"><table><thead><tr><th>名称</th><th>方向</th><th>监听地址</th><th>目标地址</th><th>状态</th><th class="actions-heading">操作</th></tr></thead><tbody id="forward-list"></tbody></table></div>
+            <div class="section-heading"><h3>转发规则</h3><button id="new-forward" class="button" type="button"><span data-icon="plus"></span>新建转发</button></div>
+            <div class="table-wrap"><table class="forward-table"><caption class="sr-only">端口转发规则及运行状态</caption><thead><tr><th scope="col">规则名称 / 方向</th><th scope="col">转发路径</th><th scope="col">状态</th><th scope="col" class="actions-heading">操作</th></tr></thead><tbody id="forward-list"></tbody></table></div>
             <div id="forward-empty" class="forward-empty"><span data-icon="forward"></span><h4>还没有端口转发</h4><p>添加一条规则，将需要的服务通过 SSH 安全连接。</p><button id="empty-forward" class="button" type="button">添加转发规则</button></div>
             <div class="info-note"><span data-icon="info"></span><p>连接认证成功后启动预设转发；SSH 断开时会自动释放监听端口。</p></div>
           </section>
@@ -131,7 +133,7 @@
 
   <dialog id="credential-dialog" aria-labelledby="credential-title">
     <div class="dialog-heading"><div><h2 id="credential-title">连接服务器</h2><p id="credential-address"></p></div><button class="icon-button close-dialog" type="button" aria-label="关闭"><span data-icon="close"></span></button></div>
-    <form id="credential-form"><div class="dialog-content"><p id="credential-hint" class="field-note" role="status"></p><p class="field-note">凭据仅用于本次登录，不写入配置。重新连接后，已保存的转发会自动启动。</p><label>登录密码<input id="login-password" type="password" autocomplete="off" placeholder="使用密码登录时填写"></label><label>私钥口令<input id="login-passphrase" type="password" autocomplete="off" placeholder="加密私钥需要时填写"></label></div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button class="button primary" type="submit">连接</button></div></form>
+    <form id="credential-form"><div class="dialog-content"><p id="credential-hint" class="field-note" role="status"></p><p class="field-note">凭据仅用于本次登录，不写入配置。</p><label>登录密码<input id="login-password" type="password" autocomplete="off" placeholder="使用密码登录时填写"></label><label>私钥口令<input id="login-passphrase" type="password" autocomplete="off" placeholder="加密私钥需要时填写"></label></div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button class="button primary" type="submit">连接</button></div></form>
   </dialog>
 
   <dialog id="forward-editor" class="forward-editor" aria-labelledby="forward-editor-title">
@@ -140,8 +142,8 @@
       <label class="forward-name">规则名称<input id="rule-name" placeholder="例如：本地 API 调试" maxlength="100" required></label>
       <input id="rule-id" type="hidden">
       <fieldset class="forward-direction"><legend>转发方向</legend><div class="forward-direction-options">
-        <label class="forward-direction-option"><input id="rule-direction-c2s" type="radio" name="rule-direction" value="c2s" checked><span class="forward-icon" data-icon="laptop" aria-hidden="true"></span><span><strong>c2s · 本地转发 (-L)</strong><small>在客户端监听</small></span></label>
-        <label class="forward-direction-option"><input id="rule-direction-s2c" type="radio" name="rule-direction" value="s2c"><span class="forward-icon" data-icon="server" aria-hidden="true"></span><span><strong>s2c · 远程转发 (-R)</strong><small>在服务器端监听</small></span></label>
+        <label class="forward-direction-option"><input id="rule-direction-c2s" type="radio" name="rule-direction" value="c2s" checked><span class="forward-icon" data-icon="laptop" aria-hidden="true"></span><span><strong>本地转发 (-L)</strong><small>在本机监听端口</small></span></label>
+        <label class="forward-direction-option"><input id="rule-direction-s2c" type="radio" name="rule-direction" value="s2c"><span class="forward-icon" data-icon="server" aria-hidden="true"></span><span><strong>远程转发 (-R)</strong><small>在服务器监听端口</small></span></label>
       </div></fieldset>
       <div id="rule-preview" class="forward-preview" role="img" aria-label="本机监听，经 SSH 服务器转发至远程目标">
         <div class="forward-flow" aria-hidden="true">
@@ -160,8 +162,8 @@
         <label>目标主机<input id="rule-target-host" value="127.0.0.1" required></label>
         <label>目标端口<input id="rule-target-port" type="number" min="1" max="65535" placeholder="8080" required></label>
       </div></fieldset>
-      <label class="forward-preset"><input id="rule-save-preset" type="checkbox" checked><span>保存为预设，连接成功后自动启动</span></label>
-      <div class="forward-note"><span class="forward-icon" data-icon="info" aria-hidden="true"></span><p id="rule-hint" aria-live="polite">c2s (-L)：本机监听端口，流量经 SSH 转发至服务器侧目标。</p></div>
+      <label class="forward-preset"><input id="rule-save-preset" type="checkbox" checked><span>保存为转发预设</span></label>
+      <div class="forward-note"><span class="forward-icon" data-icon="info" aria-hidden="true"></span><p id="rule-hint" aria-live="polite">本地转发 (-L)：本机监听端口，流量经 SSH 转发至服务器侧目标。</p></div>
       <p id="rule-action-hint" class="forward-action-hint" hidden>SSH 尚未连接，保存的预设将在连接成功后自动启动。</p>
       <p id="rule-error" class="field-error" role="alert" hidden></p>
     </div><div class="dialog-actions"><button class="button close-dialog" type="button">取消</button><button id="save-forward" class="button primary" type="button"><span id="save-forward-icon" class="forward-add-icon" data-icon="plus" aria-hidden="true"></span><span id="save-forward-label">创建并启动</span></button></div></form>
