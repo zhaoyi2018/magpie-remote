@@ -9,9 +9,9 @@ import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
 
 test("the package exposes a single OpenCode v1 plugin with JSON Schema tool arguments", async (t) => {
   const directory = await temporary(t);
-  const hooks = await plugin.server({ directory });
+  const hooks = await plugin.server({ directory }, { webUI: false });
   assert.deepEqual(Object.keys(hooks), ["tool"]);
-  assert.equal(Object.keys(hooks.tool).length, 8);
+  assert.equal(Object.keys(hooks.tool).length, 10);
   for (const tool of Object.values(hooks.tool)) {
     assert.equal(tool.args.type, "object");
     assert.equal(tool.args.additionalProperties, false);
@@ -19,7 +19,7 @@ test("the package exposes a single OpenCode v1 plugin with JSON Schema tool argu
   }
   assert.deepEqual(await hooks.tool.connections.execute({}), []);
   await hooks.tool.save_connection.execute({ connection: { id: "dev", host: "host.example", username: "dev" } });
-  const reloaded = await createPlugin({ directory });
+  const reloaded = await createPlugin({ directory }, { webUI: false });
   assert.equal((await reloaded.tool.connections.execute({}))[0].connection.id, "dev");
 });
 

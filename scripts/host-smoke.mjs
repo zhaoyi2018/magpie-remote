@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { echoServer, exchange, sshServer } from "../tests/helpers.mjs";
+import { startUIHarness } from "./ui-harness.mjs";
 
 const [bunPath, hostPath] = process.argv.slice(2);
 assert.ok(bunPath && hostPath, "Usage: node scripts/host-smoke.mjs <bun executable> <Magpie host.js>");
@@ -60,7 +61,7 @@ try {
   });
   assert.equal(loaded.plugins.length, 1);
   assert.equal(loaded.plugins[0].error, undefined, loaded.plugins[0].error);
-  assert.equal(loaded.plugins[0].tools.length, 8);
+  assert.equal(loaded.plugins[0].tools.length, 10);
   const call = async (name, args = {}) => JSON.parse((await rpc("tool", { spec: root, name, args, ms: 5000 })).text);
   await call("save_connection", { connection: fixture.profile });
   assert.equal((await call("connect", { connectionId: fixture.profile.id })).state, "connected");
@@ -77,7 +78,32 @@ try {
   await call("disconnect", { connectionId: fixture.profile.id });
   await call("remove_connection", { connectionId: fixture.profile.id });
   assert.deepEqual(await call("connections"), []);
-  console.log("Magpie host: 8 tools registered; SSH authentication, c2s and s2c round trips, port release and profile removal passed.");
+  console.log("Magpie host: 10 tools registered; SSH authentication, c2s and s2c round trips, port release and profile removal passed.");
+  if (process.argv.includes("--ui")) {
+    const harness = await startUIHarness();
+    cleanup.unshift(() => harness.close());
+    console.log(JSON.stringify({ uiURL: harness.url, ssh: fixture.profile, testPassword: "local-test-secret", targetPort: echo.port }));
+    console.log("UI test is ready. Send check to verify active forwards, or close to finish.");
+    await new Promise((resolve) => {
+      const control = createInterface({ input: process.stdin });
+      control.on("line", (line) => {
+        if (line.trim() === "close") { control.close(); resolve(); }
+        if (line.trim() === "check") {
+          void (async () => {
+            const connections = await call("connections");
+            const results = [];
+            for (const row of connections) for (const forward of row.session.forwards) {
+              const payload = Buffer.from(`UI ${forward.direction} round trip`);
+              assert.deepEqual(await exchange(forward.bindPort, payload), payload);
+              results.push({ connection: row.connection.id, direction: forward.direction, port: forward.bindPort, passed: true });
+            }
+            console.log(JSON.stringify({ uiDataVerification: results }));
+          })().catch((error) => console.error(error.message));
+        }
+      });
+      control.once("close", resolve);
+    });
+  }
 } finally {
   if (child && child.exitCode === null) {
     await new Promise((resolve) => {

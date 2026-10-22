@@ -33,7 +33,7 @@ export class SessionManager {
     return ["connecting", "connected"].includes(this.#sessions.get(id)?.state);
   }
 
-  async connect(value, { signal } = {}) {
+  async connect(value, { signal, credentials } = {}) {
     aborted(signal);
     const profile = validateProfile(value);
     const previous = this.#sessions.get(profile.id);
@@ -44,11 +44,11 @@ export class SessionManager {
       host: profile.host, port: profile.port, username: profile.username,
     };
     this.#sessions.set(profile.id, session);
-    session.pending = this.#open(session, profile, signal);
+    session.pending = this.#open(session, profile, signal, credentials);
     return session.pending;
   }
 
-  async #open(session, profile, signal) {
+  async #open(session, profile, signal, credentials = {}) {
     const cancel = () => this.#fail(session, new Error("连接已取消"));
     signal?.addEventListener("abort", cancel, { once: true });
     try {
@@ -64,6 +64,7 @@ export class SessionManager {
       };
       if (profile.identityFile) config.privateKey = await readFile(expandPath(profile.identityFile));
       for (const [field, variable] of [["password", profile.passwordEnv], ["passphrase", profile.passphraseEnv]]) {
+        if (credentials[field]) { config[field] = credentials[field]; continue; }
         if (!variable) continue;
         if (!this.env[variable]) throw new Error(`环境变量 ${variable} 未设置`);
         config[field] = this.env[variable];

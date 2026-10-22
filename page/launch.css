@@ -1,0 +1,8 @@
+html, body { min-height: 100%; margin: 0; }
+body { background: var(--magpie-bg, #f7f9f8); color: var(--magpie-fg, #172b27); font: 14px/1.6 "Segoe UI", system-ui, sans-serif; }
+.launch { display: grid; justify-items: center; align-content: center; min-height: 75vh; padding: 32px; text-align: center; }
+h1 { font-size: 23px; font-weight: 650; margin: 20px 0 6px; }
+p { color: var(--magpie-muted, #697975); }
+button { margin: 14px 0; border: 0; padding: 9px 20px; border-radius: 8px; color: white; background: #16816b; cursor: pointer; font: inherit; }
+.hint { max-width: 420px; font-size: 12px; }
+[hidden] { display: none !important; }

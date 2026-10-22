@@ -1,7 +1,15 @@
 import { join } from "node:path";
-import { identifier, pluginOptions, validateProfile } from "./config.mjs";
+import { identifier, pluginOptions, validateForward, validateProfile } from "./config.mjs";
 import { ProfileStore } from "./store.mjs";
 import { SessionManager } from "./sessions.mjs";
+import { startManagementServer, publishEndpoint } from "./web-server.mjs";
+import { fileURLToPath } from "node:url";
+
+const runtimes = new WeakMap();
+export async function closePlugin(hooks) {
+  const runtime = runtimes.get(hooks);
+  if (runtime) { await runtime.web?.close(); await runtime.sessions.close(); runtimes.delete(hooks); }
+}
 
 const idSchema = { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$" };
 const stringSchema = { type: "string", minLength: 1 };
@@ -91,7 +99,7 @@ export function createTools(store, sessions) {
         pending.add(controller);
         pendingConnects.set(connectionId, pending);
         const signal = ctx.abort ? AbortSignal.any([ctx.abort, controller.signal]) : controller.signal;
-        return serial(connectionId, async () => sessions.connect(await store.get(connectionId), { signal })).finally(() => {
+        return serial(connectionId, async () => sessions.connect(await store.get(connectionId), { signal, credentials: ctx.credentials })).finally(() => {
           pending.delete(controller);
           if (!pending.size) pendingConnects.delete(connectionId);
         });
@@ -130,6 +138,39 @@ export function createTools(store, sessions) {
         return serial(connectionId, () => sessions.removeForward(connectionId, forwardId));
       },
     },
+    forward_save: {
+      description: "Create or replace a saved c2s/s2c forward preset without disconnecting SSH. Stop this particular forward before editing it. Saving does not start the forward.",
+      args: args({ connectionId: idSchema, forward: forwardSchema }),
+      execute({ connectionId, forward }) {
+        const spec = validateForward(forward);
+        return serial(connectionId, async () => {
+          if (sessions.status(connectionId).forwards.some((item) => item.id === spec.id)) {
+            throw new Error("请先停止这条转发，再修改预设");
+          }
+          const profile = await store.get(connectionId);
+          const forwards = profile.forwards.filter((item) => item.id !== spec.id);
+          forwards.push(spec);
+          await store.save({ ...profile, forwards });
+          return spec;
+        });
+      },
+    },
+    forward_delete: {
+      description: "Stop one forward if it is running, and remove its saved preset. Leaves the SSH connection established.",
+      args: args({ connectionId: idSchema, forwardId: idSchema }),
+      execute({ connectionId, forwardId }) {
+        identifier(forwardId);
+        return serial(connectionId, async () => {
+          const profile = await store.get(connectionId);
+          const running = sessions.status(connectionId).forwards.some((item) => item.id === forwardId);
+          const saved = profile.forwards.some((item) => item.id === forwardId);
+          if (!running && !saved) throw new Error(`转发 ${forwardId} 不存在`);
+          if (running) await sessions.removeForward(connectionId, forwardId);
+          if (saved) await store.save({ ...profile, forwards: profile.forwards.filter((item) => item.id !== forwardId) });
+          return { id: forwardId, removed: true };
+        });
+      },
+    },
   };
 }
 
@@ -137,5 +178,20 @@ export async function createPlugin(input = {}, options) {
   const config = pluginOptions(input, options);
   const store = new ProfileStore(join(config.dataDirectory, "connections.json"));
   const sessions = new SessionManager(config);
-  return { tool: createTools(store, sessions) };
+  const hooks = { tool: createTools(store, sessions) };
+  let web;
+  if (config.webUI) {
+    try {
+      web = await startManagementServer({ tools: hooks.tool, port: config.uiPort });
+      const file = fileURLToPath(new URL("../page/.runtime/endpoint.js", import.meta.url));
+      const unpublish = await publishEndpoint(file, web.url);
+      const close = web.close;
+      web.close = async () => { unpublish(); await close(); };
+    } catch (error) {
+      await web?.close();
+      throw error;
+    }
+  }
+  runtimes.set(hooks, { sessions, web });
+  return hooks;
 }

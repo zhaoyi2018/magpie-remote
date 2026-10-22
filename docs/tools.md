@@ -12,6 +12,8 @@
 | `migpie-remote_status` | 无；可选 `connectionId` | 单个会话或全部运行记录 |
 | `migpie-remote_forward_add` | `connectionId`, `forward` | 创建临时转发，返回实际绑定端口 |
 | `migpie-remote_forward_remove` | `connectionId`, `forwardId` | 停止单条转发和通道，返回 `stopped: true` |
+| `migpie-remote_forward_save` | `connectionId`, `forward` | 保存转发预设，不启动监听；可在 SSH 已连接时保存 |
+| `migpie-remote_forward_delete` | `connectionId`, `forwardId` | 停止指定转发并删除其预设，保持 SSH 连接 |
 
 ## 连接配置
 
@@ -50,6 +52,8 @@
 `id`、`direction`、`bindPort`、`targetPort` 必填。`direction` 为 `c2s` 或 `s2c`；绑定端口允许 0–65535，目标端口允许 1–65535。省略两个主机字段时均使用 `127.0.0.1`。同一连接不能存在重复转发 id，也不能重复占用相同方向的同一监听地址和非零端口。
 
 两侧地址的解释见[操作指南](usage.md)。该工具仅创建当前会话的转发；把同一对象放入连接的 `forwards` 数组才能持久保存。
+
+也可以使用 `forward_save` 单独保存预设。若同 id 转发正在运行，需先停止再编辑。管理页面使用这两个新工具维护预设，与 MCP 共用会话。
 
 ## 状态与错误
 

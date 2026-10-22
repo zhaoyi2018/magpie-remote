@@ -95,9 +95,12 @@ export function validateProfile(value) {
 
 export function pluginOptions(input = {}, options = {}) {
   object(options, "插件选项");
-  onlyKeys(options, ["dataDirectory", "connectTimeoutMs", "forwardTimeoutMs"], "插件选项");
+  onlyKeys(options, ["dataDirectory", "connectTimeoutMs", "forwardTimeoutMs", "webUI", "uiPort"], "插件选项");
+  if (options.webUI !== undefined && typeof options.webUI !== "boolean") throw new Error("webUI 必须是布尔值");
   const directory = input.directory ?? join(homedir(), ".config", "magpie");
   return {
+    webUI: options.webUI ?? true,
+    uiPort: integer(options.uiPort, "uiPort", 0, 0),
     dataDirectory: options.dataDirectory
       ? expandPath(text(options.dataDirectory, "dataDirectory"))
       : join(directory, "migpie-remote"),

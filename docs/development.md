@@ -27,7 +27,7 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 | 包入口可由 `exports["./server"]`、`main` 等定位 | 两者均指向根目录 `index.mjs` |
 | 入口支持 `export default { id, server }` | 仅导出该对象，辅助函数位于 `src/` |
 | 插件函数接收 `input, options`，返回 hooks | `createPlugin` 返回 `{ tool }` |
-| 工具参数支持 JSON Schema | 8 个工具声明 JSON Schema，内部另有运行校验 |
+| 工具参数支持 JSON Schema | 10 个工具声明 JSON Schema，内部另有运行校验 |
 | `ctx.abort` 是取消信号 | 连接和新增转发将其传入会话层 |
 | npm 安装不会运行依赖安装脚本 | 纯 JavaScript 路径已在禁用脚本、排除可选原生包的安装下测试 |
 | Git / 目录安装需要已存在的入口文件 | 全部运行源码随 Git 跟踪，无 `dist` 依赖 |
@@ -57,8 +57,8 @@ npm pack --dry-run
 
 `prepack` 会执行静态检查和测试。包文件白名单只包含运行源码、说明、示例和许可证；测试、脚本、安装依赖、私钥、环境文件与本地数据不随 npm 包发布。
 
-当前尚未指定远程仓库或 npm 发布身份。确定目的地后再添加真实的 `repository` 元数据、推送和发布；不要把占位 URL 当作远程仓库。若采用 Git 安装，保持 `package.json` 和运行源码位于仓库中。社区列表可使用 `kind: "tools"` 条目，但登记和发布需要单独执行。
+远程仓库为 `git@github.com:zhaoyi2018/migpie-remote.git`，尚未执行 npm 发布。Git 安装所需的 `package.json` 和运行源码保留在仓库中；社区列表登记和 npm 发布需单独执行。
 
-未来图形管理页需要先确认宿主提供受支持的后端调用能力，或设计明确的配套服务接口。当前公开页面桥接不足以直接执行 SSH 控制，不应通过页面禁用的网络请求伪装实现。
+可视化管理页由 `page/` 和 `src/web-server.mjs` 实现，服务与工具共用会话。开发时可给宿主验证脚本追加 `--ui`，它会提供带 Magpie iframe 沙箱策略的浏览器测试入口；输入 `check` 验证页面所创建转发的数据往返，输入 `close` 退出。启动信息 `page/.runtime/` 不应提交或发布。
 
 源码依据：[package.json](../package.json)、Git 仓库中的 `scripts/check.mjs` 和 `scripts/host-smoke.mjs`；这些开发脚本不随 npm 包发布。返回[文档导航](README.md)。

@@ -7,7 +7,10 @@ flowchart TD
   Agent[支持 MCP 的 Agent] --> Gateway[Magpie Plugin tools]
   Gateway --> Host[Bun 插件宿主]
   Host --> Entry[index.mjs / default server]
-  Entry --> Tools[src/plugin.mjs / 8 个工具]
+  Entry --> Tools[src/plugin.mjs / 10 个工具]
+  Page[Magpie 内嵌启动页] --> UI[本机管理服务与页面]
+  Entry --> UI
+  UI --> Tools
   Tools --> Config[src/config.mjs / 校验]
   Tools --> Store[src/store.mjs / 配置持久化]
   Tools --> Sessions[src/sessions.mjs / 会话与转发]
@@ -17,7 +20,7 @@ flowchart TD
   Store --> File[connections.json]
 ```
 
-插件只导出一个 OpenCode v1 对象，辅助函数放在 `src/`。`createPlugin` 本身不联网、不自动连接，也不会在加载时写配置。每个连接拥有自己的 SSH 客户端、转发映射和 TCP 资源集合。
+插件只导出一个 OpenCode v1 对象，辅助函数放在 `src/`。`createPlugin` 默认启动只监听回环地址的管理服务，并在 `page/.runtime/` 发布启动地址；不会自动建立 SSH 连接。每个连接拥有自己的 SSH 客户端、转发映射和 TCP 资源集合。
 
 ## 连接与预设转发
 
@@ -90,6 +93,6 @@ stateDiagram-v2
 
 配置和预设保存在文件中；会话、当前动态端口和临时转发仅保存在宿主内存中。宿主重载后需要重新连接。当前配置目录不具备跨进程写锁。
 
-Magpie 页面扩展的公开桥接只提供受限读取和插件选项操作，且其页面禁止直接联网，因此这一版通过工具接口提供实际 SSH 控制，没有声明无法调用后端的连接按钮。插件宿主具备网络和文件权限，主机信任由本插件显式校验。
+Magpie 公开页面桥接只提供受限读取和插件选项操作。启动页完成握手后，在当前 iframe 内导航到独立回环管理服务。服务通过自己的随机访问标识与 API 认证调用共用工具，不调用 Magpie 管理 API，也不修改其 iframe 沙箱。页面支持原生主题消息、配置管理、连接控制和转发操作。插件宿主具备网络和文件权限，主机信任由本插件显式校验。
 
 源码依据：[入口](../index.mjs)、[工具](../src/plugin.mjs)、[校验](../src/config.mjs)、[存储](../src/store.mjs)、[会话](../src/sessions.mjs)、[主机公钥](../src/host-keys.mjs)。官方运行边界见 [Magpie 插件文档](https://usemagpie.ai/docs/plugins)。返回[文档导航](README.md)。
