@@ -69,7 +69,13 @@ export class SessionManager {
         if (!this.env[variable]) throw new Error(`环境变量 ${variable} 未设置`);
         config[field] = this.env[variable];
       }
-      config.agent = profile.agent ?? this.env.SSH_AUTH_SOCK;
+      config.agent = profile.agent ?? this.env.SSH_AUTH_SOCK
+        ?? (profile.authMethod === "agent" && process.platform === "win32" ? "\\\\.\\pipe\\openssh-ssh-agent" : undefined);
+      if (profile.authMethod) {
+        const methods = profile.authMethod === "agent" ? ["agent", "publickey", "password"]
+          : profile.authMethod === "key" ? ["publickey", "password", "agent"] : ["password", "publickey", "agent"];
+        config.authHandler = ["none", ...methods.filter((method) => method === "agent" ? config.agent : method === "publickey" ? config.privateKey : config.password)];
+      }
       if (!config.agent && !config.privateKey && !config.password) {
         throw new Error("请配置 identityFile、agent 或 passwordEnv 以进行 SSH 认证");
       }
@@ -95,6 +101,8 @@ export class SessionManager {
         });
         session.client.on("error", (error) => {
           if (session.state === "disconnected") return;
+          // ssh2 emits agent errors before trying the next configured method.
+          if (error.level === "agent" && session.state === "connecting" && (config.privateKey || config.password)) return;
           const reason = session.hostRejected
             ? new Error("SSH 主机公钥未被信任或已变化；请核对 hostFingerprint / known_hosts")
             : error;
@@ -108,7 +116,9 @@ export class SessionManager {
         });
         session.client.connect(config);
       });
-      for (const forward of profile.forwards) await this.addForward(profile.id, forward, { signal });
+      if (profile.autoStartForwards !== false) {
+        for (const forward of profile.forwards) await this.addForward(profile.id, forward, { signal });
+      }
       aborted(signal);
       if (session.state !== "connected") throw new Error(session.lastError ?? "SSH 连接已关闭");
       return this.#view(session);

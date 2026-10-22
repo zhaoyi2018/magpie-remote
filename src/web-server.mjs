@@ -8,6 +8,8 @@ const assets = new Map([
   ["", ["manage.html", "text/html; charset=utf-8"]],
   ["app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["app.css", ["app.css", "text/css; charset=utf-8"]],
+  ["connection-editor.js", ["connection-editor.js", "text/javascript; charset=utf-8"]],
+  ["connection-editor.css", ["connection-editor.css", "text/css; charset=utf-8"]],
   ["theme.js", ["theme.js", "text/javascript; charset=utf-8"]],
   ["icon.png", ["icon.png", "image/png"]],
   ["icon-dark.png", ["icon-dark.png", "image/png"]],

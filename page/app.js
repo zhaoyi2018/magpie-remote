@@ -5,7 +5,6 @@
   const base = new URL("./", location.href);
   const token = base.pathname.split("/")[1];
   let refreshing = false;
-  let editingConnection = null;
   let editingForwardConnection = null;
   let toastTimer;
 
@@ -37,7 +36,7 @@
     return busy?.name === "connect" && row.session.state !== "connected" ? "connecting" : row.session.state;
   }
   function needsSessionSecret(connection) {
-    return !connection.identityFile && !connection.agent && !connection.passwordEnv;
+    return connection.authMethod !== "agent" && !connection.identityFile && !connection.agent && !connection.passwordEnv;
   }
   function preferredTab(row) {
     if (!row) return "connection";
@@ -235,13 +234,16 @@
   }
 
   function renderSettings({ connection, session }) {
-    const authentication = connection.identityFile ? "私钥文件" : connection.agent ? "SSH Agent" : connection.passwordEnv ? "密码环境变量" : "每次输入密码 / 宿主 SSH Agent";
+    const preferred = { agent: "SSH agent", key: "私钥文件", environment: connection.passwordEnv ? "密码环境变量" : "登录密码" };
+    const authentication = preferred[connection.authMethod] ?? (connection.identityFile ? "私钥文件" : connection.agent ? "SSH agent" : connection.passwordEnv ? "密码环境变量" : "每次输入密码 / 宿主 SSH Agent");
     const values = [
       ["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username],
       ["登录方式", authentication], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent],
       ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv],
       ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"],
       ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"],
+      ["连接后启动转发", connection.autoStartForwards !== false ? "已开启" : "已关闭"],
+      ["应用启动时重连", connection.autoConnect ? "已开启" : "已关闭"],
     ];
     $("settings-list").replaceChildren();
     for (const [label, value] of values) {
@@ -259,63 +261,32 @@
       $("panel-" + name).hidden = tab !== name;
     }
   }
-  function authFields() {
-    const mode = $("profile-auth").value;
-    for (const name of ["key", "agent", "password", "environment"]) $(name + "-fields").hidden = mode !== name;
-  }
-  function openConnection(connection) {
-    editingConnection = connection?.id ?? null;
-    $("connection-editor-title").textContent = connection ? "编辑 SSH 连接" : "新增 SSH 连接";
-    const fields = { name: "name", host: "host", port: "port", username: "username", identity: "identityFile", agent: "agent", "password-env": "passwordEnv", "passphrase-env": "passphraseEnv", fingerprint: "hostFingerprint", "known-hosts": "knownHostsFile", id: "id" };
-    for (const [field, key] of Object.entries(fields)) $("profile-" + field).value = connection?.[key] ?? (field === "port" ? 22 : field === "identity" && !connection ? "~/.ssh/id_ed25519" : "");
-    $("profile-id").readOnly = Boolean(connection);
-    $("profile-auth").value = !connection || connection.identityFile ? "key" : connection.agent ? "agent" : connection.passwordEnv ? "environment" : "password";
-    $("profile-error").hidden = true;
-    authFields();
-    $("connection-editor").showModal();
-  }
   function validateInputs(ids) {
     for (const id of ids) {
-      if (!$(id).checkValidity()) { $(id).reportValidity(); throw new Error("请检查必填字段和端口范围"); }
+      if (!$(id).checkValidity()) {
+        const details = $(id).closest("details"); if (details) details.open = true;
+        $(id).reportValidity(); throw new Error("请检查必填字段和端口范围");
+      }
     }
   }
-  async function saveConnection() {
-    const save = $("save-connection");
-    save.disabled = true;
-    $("profile-error").hidden = true;
-    try {
-      validateInputs(["profile-name", "profile-host", "profile-port", "profile-username", "profile-id"]);
-      const connection = {
-        id: $("profile-id").value.trim() || `server-${Date.now().toString(36)}`,
-        name: $("profile-name").value.trim(), host: $("profile-host").value.trim(),
-        port: Number($("profile-port").value), username: $("profile-username").value.trim(),
-        forwards: state.rows.find((row) => row.connection.id === editingConnection)?.connection.forwards ?? [],
-      };
-      const mode = $("profile-auth").value;
-      const optional = { hostFingerprint: "profile-fingerprint", knownHostsFile: "profile-known-hosts" };
-      if (mode === "key") {
-        if (!$("profile-identity").value.trim()) throw new Error("请填写私钥文件路径");
-        optional.identityFile = "profile-identity";
-        optional.passphraseEnv = "profile-passphrase-env";
-      } else if (mode === "agent") {
-        if (!$("profile-agent").value.trim()) throw new Error("请填写 SSH Agent 地址");
-        optional.agent = "profile-agent";
-      } else if (mode === "environment") {
-        if (!$("profile-password-env").value.trim()) throw new Error("请填写密码环境变量名称");
-        optional.passwordEnv = "profile-password-env";
+  const connectionEditor = window.createSSHConnectionEditor({
+    getRows: () => state.rows, isOnline: () => state.online, call,
+    async onSaved(connection, isNew) {
+      $("search").value = ""; state.selected = connection.id;
+      toast("连接配置已保存"); await refresh(); setTab("forwards");
+      if (!isNew) return;
+      const needsCredentials = connection.authMethod !== "agent" &&
+        (needsSessionSecret(connection) || (connection.identityFile && !connection.passphraseEnv));
+      if (needsCredentials) {
+        setTab("credentials");
+        $(connection.identityFile ? "login-passphrase" : "login-password").focus();
+      } else {
+        state.cancelled.delete(connection.id);
+        void run(connection.id, "connect", () => call("connect", { connectionId: connection.id }), "SSH 连接成功");
       }
-      for (const [key, id] of Object.entries(optional)) if ($(id).value.trim()) connection[key] = $(id).value.trim();
-      await call("save_connection", { connection });
-      state.selected = connection.id;
-      $("connection-editor").close();
-      toast("连接配置已保存");
-      await refresh();
-      setTab(preferredTab(selected()));
-    } catch (error) {
-      $("profile-error").textContent = error.message;
-      $("profile-error").hidden = false;
-    } finally { save.disabled = false; }
-  }
+    },
+  });
+  function openConnection(connection) { connectionEditor.open(connection); }
 
   function rulePreview() {
     const c2s = $("rule-direction").value === "c2s";
@@ -369,9 +340,7 @@
   for (const id of ["new-connection", "empty-add"]) $(id).addEventListener("click", () => openConnection());
   for (const id of ["new-forward", "empty-forward"]) $(id).addEventListener("click", () => openForward());
   $("edit-connection").addEventListener("click", () => openConnection(selected().connection));
-  $("save-connection").addEventListener("click", saveConnection);
   $("save-forward").addEventListener("click", saveForward);
-  $("profile-auth").addEventListener("change", authFields);
   $("rule-direction").addEventListener("change", rulePreview);
   $("search").addEventListener("input", render);
   $("refresh").addEventListener("click", refresh);

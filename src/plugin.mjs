@@ -8,7 +8,13 @@ import { fileURLToPath } from "node:url";
 const runtimes = new WeakMap();
 export async function closePlugin(hooks) {
   const runtime = runtimes.get(hooks);
-  if (runtime) { await runtime.web?.close(); await runtime.sessions.close(); runtimes.delete(hooks); }
+  if (runtime) {
+    runtime.startup.abort();
+    await runtime.startupTask;
+    await runtime.web?.close();
+    await runtime.sessions.close();
+    runtimes.delete(hooks);
+  }
 }
 
 const idSchema = { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$" };
@@ -32,6 +38,9 @@ const profileSchema = {
   properties: {
     id: idSchema, name: stringSchema, host: stringSchema, username: stringSchema,
     port: { ...portSchema, default: 22 },
+    authMethod: { type: "string", enum: ["agent", "key", "environment"], description: "Preferred authentication method; other configured credentials remain available as fallbacks" },
+    autoStartForwards: { type: "boolean", default: true, description: "Start saved forward presets after successful authentication" },
+    autoConnect: { type: "boolean", default: false, description: "Try connecting once when the plugin host starts; no session credentials are persisted" },
     identityFile: { ...stringSchema, description: "Absolute path or ~/ path to an SSH private key; never its contents" },
     agent: { ...stringSchema, description: "SSH agent socket or Windows named pipe" },
     passwordEnv: { ...stringSchema, description: "Environment variable name containing the password" },
@@ -90,7 +99,7 @@ export function createTools(store, sessions) {
       },
     },
     connect: {
-      description: "Authenticate a saved SSH connection, verify its host key, then start its saved c2s/s2c forwards. A failed saved forward rolls back the connection. No remote shell is executed.",
+      description: "Authenticate a saved SSH connection, verify its host key, then start its saved c2s/s2c forwards unless autoStartForwards is false. A failed saved forward rolls back the connection. No remote shell is executed.",
       args: args({ connectionId: idSchema }),
       execute({ connectionId }, ctx = {}) {
         identifier(connectionId);
@@ -192,6 +201,10 @@ export async function createPlugin(input = {}, options) {
       throw error;
     }
   }
-  runtimes.set(hooks, { sessions, web });
+  const startup = new AbortController();
+  const startupTask = store.list().then((profiles) => Promise.allSettled(profiles
+    .filter((profile) => profile.autoConnect)
+    .map((profile) => hooks.tool.connect.execute({ connectionId: profile.id }, { abort: startup.signal })))).catch(() => {});
+  runtimes.set(hooks, { sessions, web, startup, startupTask });
   return hooks;
 }

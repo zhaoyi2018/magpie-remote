@@ -1,0 +1,63 @@
+.connection-editor [data-icon] { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.connection-editor .icon { width: 20px; height: 20px; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.connection-editor { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); border-radius: 16px; overflow: hidden; }
+.connection-editor[open] { display: flex; flex-direction: column; }
+.connection-editor .dialog-heading { padding: 24px 28px 8px; border: 0; flex-shrink: 0; }
+.connection-editor .dialog-heading h2 { font-size: 22px; font-weight: 700; letter-spacing: -.4px; }
+.connection-editor .dialog-heading p { margin-top: 6px; font-size: 14px; }
+.connection-editor .dialog-heading .icon-button { margin: -4px -10px 0 0; }
+.connection-editor form { display: flex; flex-direction: column; min-height: 0; }
+.connection-editor .dialog-content { padding: 24px 28px 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.connection-section { padding-bottom: 24px; margin-bottom: 24px; border-bottom: 1px solid var(--line); }
+.connection-section h3 { margin: 0 0 18px; font-size: 16px; font-weight: 700; }
+.connection-editor .profile-row { display: grid; grid-template-columns: 116px minmax(0, 1fr); align-items: center; gap: 14px; margin: 0 0 18px; font-size: 14px; font-weight: 400; color: var(--muted); }
+.connection-editor .profile-row:last-child { margin-bottom: 0; }
+.connection-editor .profile-row input, .connection-editor .profile-port-row input { margin: 0; min-height: 42px; padding: 9px 12px; background: var(--surface); color: var(--fg); font-size: 14px; }
+.profile-host-row { display: grid; grid-template-columns: minmax(0, 1fr) 166px; gap: 22px; margin-bottom: 18px; }
+.connection-editor .profile-host-row .profile-row { margin: 0; }
+.connection-editor .profile-port-row { display: grid; grid-template-columns: auto 82px; gap: 14px; align-items: center; margin: 0; font-size: 14px; font-weight: 400; color: var(--muted); }
+.auth-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; }
+.auth-options button { position: relative; min-height: 46px; padding: 10px 8px; background: transparent; color: var(--muted); border: 0; font-size: 14px; font-weight: 600; }
+.auth-options button + button { border-left: 1px solid var(--line); }
+.auth-options button:hover { color: var(--accent); background: var(--accent-soft); }
+.auth-options button[aria-checked="true"] { z-index: 1; margin: -1px; border: 2px solid var(--accent); border-radius: 8px; color: var(--accent); background: var(--accent-soft); }
+.auth-options button[aria-checked="true"] + button { border-left-color: transparent; }
+.auth-hint { margin: 8px 0 20px; min-height: 21px; font-size: 12px; color: var(--muted); }
+.auth-advanced { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.auth-advanced summary, .profile-other-settings summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 600; }
+.auth-advanced summary::-webkit-details-marker, .profile-other-settings summary::-webkit-details-marker { display: none; }
+.auth-advanced summary { padding: 13px 16px; background: var(--surface-muted); }
+.auth-advanced summary [data-icon], .profile-other-settings summary [data-icon] { color: var(--muted); transition: transform .15s; }
+.auth-advanced[open] > summary [data-icon], .profile-other-settings[open] > summary [data-icon] { transform: rotate(180deg); }
+.auth-advanced-content { padding: 14px 16px; }
+.connection-editor .auth-advanced .profile-row { grid-template-columns: 154px minmax(0, 1fr); gap: 12px; margin-bottom: 14px; font-size: 13px; }
+.connection-editor .auth-advanced .profile-row:last-child { margin: 0; }
+.connection-behavior { padding-bottom: 0; margin-bottom: 18px; border: 0; }
+.connection-behavior h3 { margin-bottom: 14px; }
+.connection-behavior .check-label { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; color: var(--muted); font-size: 14px; font-weight: 400; cursor: pointer; }
+.connection-behavior .check-label input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); box-shadow: none; }
+.profile-storage-note { margin-top: 18px; font-size: 12px; color: var(--muted); }
+.profile-other-settings { margin-bottom: 16px; color: var(--muted); }
+.profile-other-settings summary { font-size: 12px; font-weight: 400; }
+.profile-other-content { padding-top: 18px; }
+.connection-editor .profile-other-content .profile-row { grid-template-columns: 154px minmax(0, 1fr); font-size: 13px; }
+.profile-security-note { padding-left: 168px; margin: -10px 0 18px; font-size: 11px; }
+.connection-editor .field-error { padding: 10px 12px; margin: 0 0 16px; background: color-mix(in srgb, var(--danger) 8%, var(--surface)); border-radius: 6px; }
+.connection-editor .dialog-actions { position: static; padding: 12px 28px 24px; gap: 12px; border: 0; flex-shrink: 0; background: var(--surface); }
+.connection-editor .dialog-actions .button { min-width: 104px; min-height: 42px; justify-content: center; font-size: 14px; border-radius: 7px; }
+.connection-editor .dialog-actions .primary { min-width: 148px; }
+
+@media (max-width: 560px) {
+  .connection-editor { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); border-radius: 12px; }
+  .connection-editor .dialog-heading { padding: 20px 20px 4px; }
+  .connection-editor .dialog-heading h2 { font-size: 20px; }
+  .connection-editor .dialog-heading p { font-size: 12px; }
+  .connection-editor .dialog-content { padding: 22px 20px 0; }
+  .connection-editor .profile-row { grid-template-columns: 1fr; gap: 7px; margin-bottom: 16px; }
+  .profile-host-row { grid-template-columns: minmax(0, 1fr) 86px; gap: 12px; margin-bottom: 16px; }
+  .connection-editor .profile-port-row { grid-template-columns: 1fr; gap: 7px; }
+  .connection-editor .auth-advanced .profile-row, .connection-editor .profile-other-content .profile-row { grid-template-columns: 1fr; gap: 7px; }
+  .auth-advanced-content { padding: 14px; }
+  .profile-security-note { padding-left: 0; }
+  .connection-editor .dialog-actions { padding: 12px 20px 20px; }
+}

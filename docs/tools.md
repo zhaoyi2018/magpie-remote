@@ -25,6 +25,9 @@
 | `host`, `username` | 必填；非空文本，不含控制字符 |
 | `name` | 默认等于 `id` |
 | `port` | 1–65535；默认 22 |
+| `authMethod` | 可选 `agent`、`key`、`environment`；优先尝试的认证来源，保留其他已配置来源作为回退 |
+| `autoStartForwards` | 可选布尔值，默认 true；认证成功后自动启动预设转发 |
+| `autoConnect` | 可选布尔值，默认 false；插件宿主启动或重载时尝试连接一次 |
 | `identityFile`, `knownHostsFile` | 可选绝对路径，或以 `~/` 开头 |
 | `agent` | 可选 socket 路径、Windows 命名管道或受 ssh2 支持的 agent 标识 |
 | `passwordEnv`, `passphraseEnv` | 可选环境变量名称，不能填写秘密原文 |
