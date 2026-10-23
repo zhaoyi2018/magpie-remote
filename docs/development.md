@@ -12,7 +12,11 @@ npm test
 
 `check` 检查 JavaScript 语法、入口导出和本地 Markdown 文件链接。测试临时启动仅监听本机随机端口的 SSH/TCP 服务，验证密码和私钥认证、真实双向数据流及异常清理。测试不会连接配置中的真实服务器。
 
+`check` 同时检查插件卡片和页面使用同一个 SVG、图标解码后的内容不超过 1 MB、`package.json` 不超过 GitHub 插件发现读取的 1 MB 上限。更新 `page/icon.png` 或 `page/icon-dark.png` 后运行 `npm run icons`；生成器会更新 `page/icon.svg` 和 `package.json` 中的 `magpie.icon`，无需手工粘贴图标数据。
+
 测试专用的固定 Ed25519 密钥保存在 `tests/fixtures.mjs`，包含未加密和加密样本，不能用于实际服务器。固定样本避免 ssh2 随机生成某些前导零公钥时出现的偶发解析失败；测试同时核对私钥解析结果与声明的公钥。这些样本与其他测试文件均不随 npm 包发布。
+
+`tests/passwords.test.mjs` 覆盖密码加密与重载、留空保留和显式替换、服务器信息重新绑定、切换认证移除密文、版本冲突、篡改或丢失密钥、并发密钥创建、加密备份恢复、管理页保存后无额外凭据登录，以及宿主启动和断网后的密码重连。所有密码和服务均为本地测试数据。
 
 Next 的 `tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `tests/network-proxy.mjs` 的双向丢包代理，验证显式断线、静默断网、恢复、退避上限、手动停止、临时凭据缺失和跨连接隔离。测试缩短保活与重试间隔，不修改系统网卡、防火墙或日常连接。`tests/backups.test.mjs` 验证快照轮换、无变化不轮换、损坏文件原样保留、过期预览、备份失败、并发恢复和连接停止；HTTP 测试覆盖主配置损坏时的已认证恢复入口。
 
@@ -47,8 +51,12 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 | npm 安装不会运行依赖安装脚本 | 纯 JavaScript 路径已在禁用脚本、排除可选原生包的安装下测试 |
 | Git / 目录安装需要已存在的入口文件 | 全部运行源码随 Git 跟踪，无 `dist` 依赖 |
 | 工具通过 `/mcp/magpie/tools` 暴露 | 由 Magpie 自身注册，本包无需另开 HTTP 服务 |
+| 工具插件无需注册模型供应商 | 仅返回 `{ tool }`；隔离宿主验证 `provides` 和供应商列表均为空 |
+| 页面与插件卡片的图标字段不同 | `magpie.page.icon` 使用包内路径，`magpie.icon` 使用内嵌 SVG data URI |
 
-规范来源：[用户提供的中文文档](https://usemagpie.ai/docs/zh/plugins)、[本次实际读取的官方英文文档](https://usemagpie.ai/docs/plugins)。SSH 接口来源：[ssh2 官方仓库](https://github.com/mscdex/ssh2)。规范核对日期为 2026-10-22，后续升级应复核宿主接口。
+规范来源：[官方中文文档](https://usemagpie.ai/docs/zh/plugins)、[官方英文文档](https://usemagpie.ai/docs/plugins)。SSH 接口来源：[ssh2 官方仓库](https://github.com/mscdex/ssh2)。类型与图标配置核对日期为 2026-10-23，后续升级应复核宿主接口。
+
+「页面＋工具」的类型由宿主实际发现的工具决定，无需添加未受支持的 `magpie.kind` 字段。Magpie 当前在插件停用、加载失败或 GitHub「发现」卡片尚未运行工具时，仍可能按通用服务端入口显示「供应商」标签；这是宿主的分类规则，不代表本插件注册了模型供应商。重新加载后应核对已启用插件的工具列表。不要为隐藏标签而删除 `main` / `exports`，否则纯页面路径会跳过宿主，SSH 后台也不会启动。
 
 ## 独立宿主验证
 

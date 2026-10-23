@@ -23,7 +23,7 @@ export class SessionManager {
 
   constructor({ connectTimeoutMs = 15000, forwardTimeoutMs = 10000, env = process.env,
     reconnectDelayMs = 1000, reconnectMaxDelayMs = 30000, reconnectStableMs = 30000, random = Math.random,
-    keepaliveIntervalMs = 15000, keepaliveCountMax = 3, connectTarget = connectTCP } = {}) {
+    keepaliveIntervalMs = 15000, keepaliveCountMax = 3, connectTarget = connectTCP, passwordVault } = {}) {
     this.connectTimeoutMs = connectTimeoutMs;
     this.forwardTimeoutMs = forwardTimeoutMs;
     this.env = env;
@@ -34,6 +34,7 @@ export class SessionManager {
     this.keepaliveIntervalMs = keepaliveIntervalMs;
     this.keepaliveCountMax = keepaliveCountMax;
     this.connectTarget = connectTarget;
+    this.passwordVault = passwordVault;
   }
 
   status(id) {
@@ -116,7 +117,7 @@ export class SessionManager {
           return !session.hostRejected;
         },
       };
-      const authentication = await prepareAuthentication(profile, this.env, credentials);
+      const authentication = await prepareAuthentication(profile, this.env, credentials, this.passwordVault);
       Object.assign(config, authentication.config);
       for (const issue of authentication.issues) this.#log(session, "warn", issue.message + "；将尝试其他可用认证方式");
       aborted(signal);

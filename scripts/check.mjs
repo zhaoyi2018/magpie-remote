@@ -32,9 +32,16 @@ for (const file of files.filter((file) => file.endsWith(".md"))) {
     links++;
   }
 }
-const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+const manifestSource = await readFile(resolve(root, "package.json"), "utf8");
+const manifest = JSON.parse(manifestSource);
 await readFile(resolve(root, manifest.magpie.page.file));
-await readFile(resolve(root, manifest.magpie.page.icon));
+const pageIcon = await readFile(resolve(root, manifest.magpie.page.icon), "utf8");
+const iconPrefix = "data:image/svg+xml,";
+assert.ok(manifest.magpie.icon?.startsWith(iconPrefix), "The plugin card needs an embedded SVG icon");
+const pluginIcon = decodeURIComponent(manifest.magpie.icon.slice(iconPrefix.length));
+assert.equal(pluginIcon, pageIcon, "Plugin card and page icons differ; run npm run icons");
+assert.ok(Buffer.byteLength(pluginIcon) <= 1 << 20, "Plugin icon exceeds Magpie's 1 MB image limit");
+assert.ok(Buffer.byteLength(manifestSource) <= 1 << 20, "Plugin manifest exceeds Magpie's 1 MB discovery limit");
 for (const file of files.filter((file) => file.endsWith(".html"))) {
   const contents = await readFile(file, "utf8");
   const ids = [...contents.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
@@ -48,4 +55,4 @@ const entry = await import(new URL(manifest.main, new URL("../", import.meta.url
 assert.deepEqual(Object.keys(entry), ["default"]);
 assert.equal(entry.default.id, manifest.name);
 assert.equal(typeof entry.default.server, "function");
-console.log(`Checked JavaScript syntax, plugin entry and ${links} local documentation links.`);
+console.log(`Checked JavaScript syntax, plugin entry, theme-aware plugin/page icons and ${links} local documentation links.`);

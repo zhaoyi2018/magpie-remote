@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { validateEncryptedPassword } from "./passwords.mjs";
 
 export function object(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -66,7 +67,7 @@ export function validateForward(value) {
 export function validateProfile(value) {
   object(value, "连接配置");
   const optional = ["identityFile", "agent", "passwordEnv", "passphraseEnv", "knownHostsFile", "hostFingerprint"];
-  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", "autoReconnect", "forwardFailurePolicy", ...optional], "连接配置");
+  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", "autoReconnect", "forwardFailurePolicy", "encryptedPassword", ...optional], "连接配置");
   if (value.forwards !== undefined && !Array.isArray(value.forwards)) throw new Error("forwards 必须是数组");
   const profile = {
     id: identifier(value.id, "连接 id"),
@@ -80,9 +81,10 @@ export function validateProfile(value) {
     if (value[key] !== undefined) profile[key] = text(value[key], key);
   }
   if (value.authMethod !== undefined) {
-    if (!["agent", "key", "environment"].includes(value.authMethod)) throw new Error("authMethod 必须是 agent、key 或 environment");
+    if (!["password", "agent", "key", "environment"].includes(value.authMethod)) throw new Error("authMethod 必须是 password、agent、key 或 environment");
     profile.authMethod = value.authMethod;
   }
+  if (value.encryptedPassword !== undefined) profile.encryptedPassword = validateEncryptedPassword(value.encryptedPassword);
   for (const key of ["autoStartForwards", "autoConnect", "autoReconnect"]) {
     if (value[key] !== undefined) {
       if (typeof value[key] !== "boolean") throw new Error(`${key} 必须是布尔值`);

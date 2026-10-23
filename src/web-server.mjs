@@ -106,8 +106,10 @@ export async function startManagementServer({ tools, port = 0 }) {
       if (!body.args || typeof body.args !== "object" || Array.isArray(body.args)) throw new Error("操作参数必须是对象");
       const credentials = body.credentials;
       if (credentials !== undefined) {
-        if (body.method !== "connect" || !credentials || typeof credentials !== "object" || Array.isArray(credentials)
-          || Object.entries(credentials).some(([key, value]) => !["password", "passphrase"].includes(key) || typeof value !== "string" || value.length > 4096)) {
+        const fields = body.method === "connect" ? ["password", "passphrase"] : body.method === "save_connection" ? ["password"] : [];
+        if (!fields.length || !credentials || typeof credentials !== "object" || Array.isArray(credentials)
+          || Object.entries(credentials).some(([key, value]) => !fields.includes(key) || typeof value !== "string" || value.length > 4096
+            || (body.method === "save_connection" && !value.length))) {
           throw new Error("本次登录凭据无效");
         }
       }

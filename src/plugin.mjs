@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { identifier, pluginOptions, validateForward, validateProfile } from "./config.mjs";
-import { ProfileStore, assertProfileRevision, profileRevision } from "./store.mjs";
+import { ProfileStore, assertProfileRevision, profileRevision, publicProfile } from "./store.mjs";
 import { SessionManager } from "./sessions.mjs";
 import { startManagementServer, publishEndpoint } from "./web-server.mjs";
 import { fileURLToPath } from "node:url";
@@ -42,9 +42,9 @@ const profileSchema = {
   properties: {
     id: idSchema, name: stringSchema, host: stringSchema, username: stringSchema,
     port: { ...portSchema, default: 22 },
-    authMethod: { type: "string", enum: ["agent", "key", "environment"], description: "Preferred authentication method; other configured credentials remain available as fallbacks" },
+    authMethod: { type: "string", enum: ["password", "agent", "key", "environment"], description: "Preferred authentication method; password uses the locally encrypted saved password" },
     autoStartForwards: { type: "boolean", default: true, description: "Start saved forward presets after successful authentication" },
-    autoConnect: { type: "boolean", default: false, description: "Try connecting once when the plugin host starts; no session credentials are persisted" },
+    autoConnect: { type: "boolean", default: false, description: "Try connecting once when the plugin host starts using available saved authentication sources" },
     autoReconnect: { type: "boolean", default: false, description: "Retry network failures with capped exponential backoff; manual disconnect cancels retries and temporary credentials are never retained" },
     forwardFailurePolicy: { type: "string", enum: ["rollback", "continue"], default: "rollback", description: "Whether a rejected preset rolls back the connection or allows other presets to continue; uncertain remote allocations always close SSH" },
     identityFile: { ...stringSchema, description: "Absolute path or ~/ path to an SSH private key; never its contents" },
@@ -62,6 +62,7 @@ function args(properties, required = Object.keys(properties)) {
 }
 
 export function createTools(store, sessions) {
+  sessions.passwordVault ??= store.passwordVault;
   // Serialize configuration and session mutations for each profile, while allowing
   // independent connections to proceed in parallel in Magpie's shared host.
   const operations = new Map();
@@ -90,7 +91,7 @@ export function createTools(store, sessions) {
       execute() { return store.listBackups(); },
     },
     config_backup: {
-      description: "Create a validated local configuration backup. Retains the latest five valid snapshots; stores only profile paths and environment-variable names.",
+      description: "Create a validated local configuration backup. Retains the latest five valid snapshots; saved passwords remain encrypted and the local encryption key is never included.",
       args: args({}),
       execute() { assertMutable(); return store.createBackup(); },
     },
@@ -146,21 +147,22 @@ export function createTools(store, sessions) {
       },
     },
     connections: {
-      description: "List saved SSH profiles as {connection, revision, session}. Use each profile's revision as expectedRevision when editing or deleting its configuration. Does not connect.",
+      description: "List saved SSH profiles as {connection, revision, hasSavedPassword, session}, without passwords or ciphertext. Use each profile's revision as expectedRevision when editing or deleting its configuration. Does not connect.",
       args: args({}),
       async execute() {
-        return (await store.list()).map((connection) => ({ connection, revision: profileRevision(connection), session: sessions.status(connection.id) }));
+        return (await store.list()).map((profile) => ({ connection: publicProfile(profile), revision: profileRevision(profile), hasSavedPassword: Boolean(profile.encryptedPassword), session: sessions.status(profile.id) }));
       },
     },
     save_connection: {
-      description: "Create or replace an SSH profile and return {connection, revision}. Existing profiles require expectedRevision from connections; omit it or use null only for create-only requests. Conflicts never overwrite newer edits. Stores paths and environment-variable names, never passwords or key contents. Disconnect before updating an active profile.",
+      description: "Create or replace an SSH profile and return {connection, revision, hasSavedPassword}. Existing profiles require expectedRevision. Password authentication preserves an existing encrypted password; new passwords are supplied by the local management page separately from profile fields. Never returns passwords or ciphertext. Disconnect before updating an active profile.",
       args: args({ connection: profileSchema, expectedRevision: { anyOf: [revisionSchema, { type: "null" }], description: "Use null for create-only; use the connections revision to replace an existing profile" } }, ["connection"]),
-      execute({ connection, expectedRevision }) {
+      execute({ connection, expectedRevision }, ctx = {}) {
         const profile = validateProfile(connection);
+        if (profile.encryptedPassword) throw new Error("密码密文由本机生成，请勿在连接参数中提交");
         return serial(profile.id, async () => {
           if (sessions.isActive(profile.id)) throw new Error("请先断开连接再修改配置");
-          const saved = await store.save(profile, { expectedRevision });
-          return { connection: saved, revision: profileRevision(saved) };
+          const saved = await store.save(profile, { expectedRevision, password: ctx.credentials?.password });
+          return { connection: publicProfile(saved), revision: profileRevision(saved), hasSavedPassword: Boolean(saved.encryptedPassword) };
         });
       },
     },

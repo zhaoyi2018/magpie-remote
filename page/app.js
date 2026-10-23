@@ -46,6 +46,7 @@ import { createBackupManager } from "./backups.js";
   function endpoint(host, port) { return (host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host) + ":" + port; }
   function address(connection) { return connection.username + "@" + endpoint(connection.host, connection.port); }
   function auth(connection) {
+    if (connection.authMethod === "password") return "密码";
     if (connection.authMethod === "agent") return "SSH agent";
     if (connection.authMethod === "key") return "私钥文件";
     if (connection.authMethod === "environment") return connection.passwordEnv ? "密码环境变量" : "登录密码";

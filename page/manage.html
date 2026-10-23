@@ -33,7 +33,7 @@
         <label class="search"><span class="sr-only">搜索连接名称或主机</span><span data-icon="search"></span><input id="search" type="search" placeholder="搜索名称或主机" autocomplete="off"></label>
         <div class="filters" role="group" aria-label="按连接状态筛选"><button type="button" data-filter="all" aria-pressed="true">全部</button><button type="button" data-filter="connected" aria-pressed="false">已连接</button><button type="button" data-filter="disconnected" aria-pressed="false">未连接</button></div>
         <div id="connection-list" class="connection-list" aria-label="服务器列表"></div>
-        <div class="sidebar-foot"><div class="service-row"><span id="service-state" class="service-state">正在同步</span><button class="icon-button" id="refresh" type="button" aria-label="刷新状态" title="刷新状态"><span data-icon="refresh"></span></button></div><p><span data-icon="shield"></span>配置保存在本机，登录凭据不保存</p></div>
+        <div class="sidebar-foot"><div class="service-row"><span id="service-state" class="service-state">正在同步</span><button class="icon-button" id="refresh" type="button" aria-label="刷新状态" title="刷新状态"><span data-icon="refresh"></span></button></div><p><span data-icon="shield"></span>配置保存在本机，密码支持加密保存</p></div>
       </aside>
       <main class="workspace">
         <div class="narrow-bar" id="narrow-bar" hidden><button id="toggle-list" class="button small" type="button" aria-controls="server-pane" aria-expanded="true">收起列表</button><span id="narrow-current" class="narrow-current"></span></div>
@@ -96,9 +96,10 @@
         <h3 id="profile-auth-title">认证方式</h3>
         <input id="profile-auth" type="hidden" value="agent">
         <div class="auth-options" role="radiogroup" aria-labelledby="profile-auth-title" aria-describedby="profile-auth-hint">
-          <button type="button" role="radio" data-auth="agent" aria-checked="true">SSH agent</button><button type="button" role="radio" data-auth="key" aria-checked="false" tabindex="-1">私钥文件</button><button type="button" role="radio" data-auth="environment" aria-checked="false" tabindex="-1">环境变量</button>
+          <button type="button" role="radio" data-auth="password" aria-checked="false" tabindex="-1">密码</button><button type="button" role="radio" data-auth="agent" aria-checked="true">SSH agent</button><button type="button" role="radio" data-auth="key" aria-checked="false" tabindex="-1">私钥文件</button><button type="button" role="radio" data-auth="environment" aria-checked="false" tabindex="-1">环境变量</button>
         </div>
         <p id="profile-auth-hint" class="auth-hint">优先使用当前系统的 SSH agent 身份凭证</p>
+        <label id="profile-password-row" class="profile-row" for="profile-password" hidden><span>登录密码</span><input id="profile-password" type="password" maxlength="4096" autocomplete="off" placeholder="输入服务器登录密码"></label>
         <details id="profile-auth-advanced" class="auth-advanced" open>
           <summary>高级认证设置<span data-icon="chevron" aria-hidden="true"></span></summary>
           <div class="auth-advanced-content">
@@ -114,7 +115,7 @@
         <label class="check-label"><input id="profile-continue-forwards" type="checkbox">个别预设启动失败时保留连接，继续启动其他预设</label>
         <label class="check-label"><input id="profile-auto-connect" type="checkbox">应用启动时尝试重新连接</label>
         <label class="check-label"><input id="profile-auto-reconnect" type="checkbox">网络中断后自动重连</label>
-        <p class="profile-storage-note">仅网络故障会重试；手动断开后停止。需要本次登录凭据时暂停，等待重新填写。</p>
+        <p class="profile-storage-note">仅网络故障会重试；手动断开后停止。已保存的密码可用于自动重连，临时凭据需要重新填写。</p>
         <p class="profile-storage-note">仅保存配置与转发预设；当前 SSH 会话不写入磁盘。</p>
       </section>
       <details id="profile-host-advanced" class="profile-other-settings">
@@ -170,7 +171,7 @@
   </dialog>
 
   <dialog id="backup-dialog" aria-labelledby="backup-title" aria-describedby="backup-description">
-    <div class="dialog-heading"><div><h2 id="backup-title">备份与恢复</h2><p id="backup-description">保存配置前自动备份，保留最近 5 份有效快照。备份不包含登录密码或私钥内容。</p></div><button class="icon-button close-dialog" type="button" aria-label="关闭"><span data-icon="close"></span></button></div>
+    <div class="dialog-heading"><div><h2 id="backup-title">备份与恢复</h2><p id="backup-description">保存配置前自动备份，保留最近 5 份有效快照。密码保持加密，备份不包含解密密钥或私钥内容。</p></div><button class="icon-button close-dialog" type="button" aria-label="关闭"><span data-icon="close"></span></button></div>
     <div class="dialog-content"><p class="field-note">恢复前可预览连接清单。确认恢复会停止所有连接与自动重连，并保留恢复前的配置。</p><div id="backup-list" class="backup-list" aria-live="polite"></div><p id="backup-error" class="field-error" role="alert" hidden></p></div>
     <div class="dialog-actions"><button class="button close-dialog" type="button">关闭</button><button id="refresh-backups" class="button" type="button">刷新列表</button><button id="create-backup" class="button primary" type="button">立即备份</button></div>
   </dialog>

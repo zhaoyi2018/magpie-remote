@@ -3,11 +3,16 @@ import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { identifier, validateProfile } from "./config.mjs";
 import { OperationError } from "./errors.mjs";
+import { PasswordVault, passwordContext, validatePassword } from "./passwords.mjs";
 
 const backupID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const serialize = (profiles) => `${JSON.stringify({ version: 1, connections: profiles }, null, 2)}\n`;
 export const profileRevision = (profile) => hash(JSON.stringify(validateProfile(profile)));
+export function publicProfile(profile) {
+  const { encryptedPassword, ...connection } = profile;
+  return connection;
+}
 
 export function assertProfileRevision(current, expectedRevision) {
   if (expectedRevision !== undefined && expectedRevision !== null
@@ -40,6 +45,7 @@ export class ProfileStore {
 
   constructor(file, { backupLimit = 5 } = {}) {
     this.file = file;
+    this.passwordVault = new PasswordVault(file + ".key");
     this.backupDirectory = file + ".backups";
     if (!Number.isInteger(backupLimit) || backupLimit < 1 || backupLimit > 50) throw new Error("backupLimit 必须为 1–50");
     this.backupLimit = backupLimit;
@@ -62,11 +68,21 @@ export class ProfileStore {
     return profile;
   }
 
-  save(value, { expectedRevision } = {}) {
+  save(value, { expectedRevision, password } = {}) {
     const profile = validateProfile(value);
+    if (password !== undefined) validatePassword(password);
     return this.#change(async (profiles) => {
       const index = profiles.findIndex((item) => item.id === profile.id);
-      assertProfileRevision(profiles[index], expectedRevision);
+      const current = profiles[index];
+      assertProfileRevision(current, expectedRevision);
+      delete profile.encryptedPassword;
+      if (profile.authMethod === "password") {
+        if (password !== undefined) profile.encryptedPassword = await this.passwordVault.encrypt(password, profile);
+        else if (current?.encryptedPassword) {
+          profile.encryptedPassword = passwordContext(current) === passwordContext(profile) ? current.encryptedPassword
+            : await this.passwordVault.encrypt(await this.passwordVault.decrypt(current), profile);
+        } else throw new OperationError("CREDENTIALS_REQUIRED", "请填写需要加密保存的登录密码", { credentialFields: ["password"] });
+      } else if (password !== undefined) throw new Error("只有密码认证方式可以保存登录密码");
       if (index === -1) profiles.push(profile);
       else profiles[index] = profile;
       return profile;

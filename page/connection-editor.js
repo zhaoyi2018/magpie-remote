@@ -3,6 +3,7 @@
   const $ = (id) => document.getElementById(id);
   let editingConnection = null;
   let editingRevision = null, editingForwards = [];
+  let hasSavedPassword = false;
   let connectionSaving = false;
   const uniqueId = (prefix) => prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
   for (const node of document.querySelectorAll("#connection-editor [data-icon]")) {
@@ -22,12 +23,17 @@
       option.tabIndex = option.dataset.auth === mode ? 0 : -1;
     }
     $("agent-fields").hidden = mode !== "agent";
+    $("profile-password-row").hidden = mode !== "password";
+    $("profile-password").required = mode === "password" && !hasSavedPassword;
+    if (mode !== "password") $("profile-password").value = "";
     $("profile-identity").required = mode === "key";
     $("profile-identity-label").textContent = mode === "key" ? "私钥路径" : "私钥路径（可选）";
-    $("profile-auth-hint").textContent = mode === "agent" ? "优先使用当前系统的 SSH agent 身份凭证"
+    $("profile-auth-hint").textContent = mode === "password" ? (hasSavedPassword ? "密码已加密保存，留空保留；填写新密码可替换" : "密码加密保存在本机，下次连接时自动使用")
+      : mode === "agent" ? "优先使用当前系统的 SSH agent 身份凭证"
       : mode === "key" ? "使用本机私钥文件认证，无需上传私钥"
       : "从应用启动环境读取密码；留空可在连接时输入密码";
-    if (mode !== "agent") $("profile-auth-advanced").open = true;
+    if (["key", "environment"].includes(mode)) $("profile-auth-advanced").open = true;
+    if (mode === "password") $("profile-auth-advanced").open = false;
   }
   function openConnection(connection) {
     if (connectionSaving) return;
@@ -35,8 +41,11 @@
     connection = row?.connection ?? connection;
     editingConnection = connection?.id ?? null;
     editingRevision = row?.revision ?? null;
+    hasSavedPassword = row?.hasSavedPassword === true;
     editingForwards = structuredClone(connection?.forwards ?? []);
     $("connection-form").reset();
+    $("profile-password").value = "";
+    $("profile-password").placeholder = hasSavedPassword ? "留空保留已保存密码" : "输入服务器登录密码";
     $("connection-editor-title").textContent = connection ? "编辑 SSH 连接" : "新建 SSH 连接";
     $("connection-editor-description").textContent = connection ? "更新连接配置，下次连接时生效" : "保存连接配置，认证成功后建立独立会话";
     $("save-connection").textContent = connection ? "保存修改" : "保存并连接";
@@ -73,7 +82,7 @@
     try {
       if (!isOnline()) throw new Error("管理服务已离线，请重新打开页面");
       if (!isNew && !editingRevision) throw new Error("连接已不存在或配置版本不可用，请关闭弹窗后重新读取配置");
-      validateInputs(["profile-name", "profile-host", "profile-port", "profile-username", "profile-id", "profile-identity", "profile-passphrase-env", "profile-password-env"]);
+      validateInputs(["profile-name", "profile-host", "profile-port", "profile-username", "profile-id", "profile-identity", "profile-passphrase-env", "profile-password-env", "profile-password"]);
       const connection = { id: $("profile-id").value.trim() || uniqueId("server"), name: $("profile-name").value.trim(), host: $("profile-host").value.trim(), port: Number($("profile-port").value), username: $("profile-username").value.trim(), forwards: editingForwards };
       connection.authMethod = $("profile-auth").value;
       connection.autoStartForwards = $("profile-auto-forwards").checked;
@@ -89,7 +98,9 @@
         optional.agent = "profile-agent";
       }
       for (const [key, id] of Object.entries(optional)) if ($(id).value.trim()) connection[key] = $(id).value.trim();
-      const saved = await call("save_connection", { connection, expectedRevision: editingRevision });
+      const password = mode === "password" ? $("profile-password").value : "";
+      const saved = await call("save_connection", { connection, expectedRevision: editingRevision }, password ? { password } : undefined);
+      $("profile-password").value = "";
       $("connection-editor").close();
       await onSaved(saved.connection, isNew);
     } catch (error) {
@@ -130,6 +141,8 @@
     });
   });
   $("connection-editor").addEventListener("cancel", (event) => { if (connectionSaving) event.preventDefault(); });
+  $("connection-editor").addEventListener("close", () => { if (!$("connection-editor").open) $("profile-password").value = ""; });
+  addEventListener("pagehide", () => { $("profile-password").value = ""; }, { once: true });
 
   return { open: openConnection };
   };

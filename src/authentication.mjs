@@ -18,12 +18,17 @@ export function credentialRequest(issues) {
 
 // Prepare each source independently: an unavailable fallback must not prevent a
 // usable agent, key or password from reaching SSH authentication.
-export async function prepareAuthentication(profile, env, credentials = {}) {
+export async function prepareAuthentication(profile, env, credentials = {}, passwordVault) {
   const config = {}, issues = [];
   config.agent = profile.agent ?? env.SSH_AUTH_SOCK
     ?? (profile.authMethod === "agent" && process.platform === "win32" ? "\\\\.\\pipe\\openssh-ssh-agent" : undefined);
-  config.password = credentials.password || (profile.passwordEnv && env[profile.passwordEnv]) || undefined;
-  if (!config.password && (profile.passwordEnv || profile.authMethod === "environment")) {
+  config.password = credentials.password || undefined;
+  if (!config.password && profile.encryptedPassword) {
+    try { config.password = await passwordVault?.decrypt(profile); }
+    catch (error) { issues.push(error); }
+  }
+  config.password ||= (profile.passwordEnv && env[profile.passwordEnv]) || undefined;
+  if (!config.password && (profile.passwordEnv || ["password", "environment"].includes(profile.authMethod))) {
     issues.push(new OperationError("CREDENTIALS_REQUIRED", profile.passwordEnv
       ? `环境变量 ${profile.passwordEnv} 未设置，请提供该变量或输入本次登录密码`
       : "请输入本次登录密码", { credentialFields: ["password"] }));

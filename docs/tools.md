@@ -37,7 +37,7 @@
 | `host`, `username` | 必填；非空文本，不含控制字符 |
 | `name` | 默认等于 `id` |
 | `port` | 1–65535；默认 22 |
-| `authMethod` | 可选 `agent`、`key`、`environment`；优先尝试的认证来源，保留其他已配置来源作为回退 |
+| `authMethod` | 可选 `password`、`agent`、`key`、`environment`；`password` 使用本机加密保存的密码，其他已配置来源可作为回退 |
 | `autoStartForwards` | 可选布尔值，默认 true；认证成功后自动启动预设转发 |
 | `forwardFailurePolicy` | 可选 `rollback`（默认）或 `continue`；预设发生可恢复错误时，全部回滚或保留连接并继续其余预设；远程分配状态不明时仍关闭 SSH |
 | `autoConnect` | 可选布尔值，默认 false；插件宿主启动或重载时尝试连接一次 |
@@ -48,7 +48,9 @@
 | `hostFingerprint` | 可选 `SHA256:…` 公钥指纹，43 位 Base64，无末尾 `=` |
 | `forwards` | 可选预设转发数组，默认 `[]`；其中的 id 不能重复 |
 
-至少配置一种可用认证来源。未知连接字段会被拒绝。`save_connection` 为完整替换，不会与旧字段合并，因此更新时需带上要保留的配置。
+至少配置一种可用认证来源。未知连接字段会被拒绝。`save_connection` 为完整替换，因此更新时需带上要保留的公开配置；密码密文由后端保留和管理，不接收调用方提交的 `encryptedPassword`。管理页通过独立的 `credentials.password` 请求字段提交要加密保存的新密码，不把密码放入 `connection` 或工具参数。MCP 可以连接和编辑已有密码连接；首次设置或更换密码在管理页完成。密码认证下省略新密码会保留原密码，切换到其他认证方式会移除当前密文。
+
+`connections` 和 `save_connection` 返回的连接配置均去除密码密文，通过同级 `hasSavedPassword` 布尔值表示是否已保存密码。明文和密文均不进入页面快照或工具结果。配置备份保留密文，不包含本机的 `connections.json.key`；恢复到其他机器时需另行安全迁移密钥或重新填写密码。
 
 ### 并发修改与版本校验
 

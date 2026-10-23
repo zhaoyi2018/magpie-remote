@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
 
 // Embed both originals so the sidebar icon also works when loaded as a data URI.
 const directory = new URL("../page/", import.meta.url);
@@ -20,4 +21,21 @@ const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" view
 </svg>
 `;
 await writeFile(new URL("icon.svg", directory), svg);
-console.log("Generated the theme-aware sidebar and launch icon from both original PNG logos.");
+// The plugin card requires an HTTPS URL or a data URI; page.icon is a local path.
+// Percent encoding keeps this theme-aware SVG below the manifest's 1 MB limit.
+const icon = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+assert.ok(Buffer.byteLength(svg) <= 1 << 20, "Plugin icon exceeds Magpie's 1 MB image limit");
+const manifestFile = new URL("../package.json", import.meta.url);
+const contents = await readFile(manifestFile, "utf8");
+const manifest = JSON.parse(contents);
+assert.ok(manifest.magpie?.page, "Expected a Magpie page manifest");
+let updated;
+if (Object.hasOwn(manifest.magpie, "icon")) {
+  updated = contents.replace(/("magpie"\s*:\s*\{\s*"icon"\s*:\s*)"(?:[^"\\]|\\.)*"/, (_, prefix) => prefix + JSON.stringify(icon));
+  assert.equal(JSON.parse(updated).magpie.icon, icon, "Expected magpie.icon at the start of the manifest");
+} else {
+  updated = contents.replace(/("magpie"\s*:\s*\{)/, `$1\n    "icon": ${JSON.stringify(icon)},`);
+}
+assert.ok(Buffer.byteLength(updated) <= 1 << 20, "Plugin manifest exceeds Magpie's 1 MB discovery limit");
+await writeFile(manifestFile, updated);
+console.log("Generated the theme-aware plugin card, sidebar and launch icons from both original PNG logos.");

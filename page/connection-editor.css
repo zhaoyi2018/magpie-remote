@@ -16,7 +16,7 @@
 .profile-host-row { display: grid; grid-template-columns: minmax(0, 1fr) 166px; gap: 22px; margin-bottom: 18px; }
 .connection-editor .profile-host-row .profile-row { margin: 0; }
 .connection-editor .profile-port-row { display: grid; grid-template-columns: auto 82px; gap: 14px; align-items: center; margin: 0; font-size: 14px; font-weight: 400; color: var(--muted); }
-.auth-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; }
+.auth-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; }
 .auth-options button { position: relative; min-height: 46px; padding: 10px 8px; background: transparent; color: var(--muted); border: 0; font-size: 14px; font-weight: 500; }
 .auth-options button + button { border-left: 1px solid var(--line); }
 .auth-options button:hover { color: var(--accent); background: var(--accent-soft); }
@@ -48,6 +48,11 @@
 .connection-editor .dialog-actions .primary { min-width: 148px; }
 
 @media (max-width: 560px) {
+  .auth-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .auth-options button { white-space: nowrap; }
+  .auth-options button:nth-child(3) { border-left: 0; }
+  .auth-options button:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .auth-options button[aria-checked="true"] { border: 2px solid var(--accent); }
   .connection-editor { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); border-radius: 12px; }
   .connection-editor .dialog-heading { padding: 20px 20px 4px; }
   .connection-editor .dialog-heading h2 { font-size: 20px; }
