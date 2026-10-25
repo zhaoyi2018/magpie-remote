@@ -7,7 +7,7 @@ flowchart TD
   Agent[支持 MCP 的 Agent] --> Gateway[Magpie Plugin tools]
   Gateway --> Host[Bun 插件宿主]
   Host --> Entry[index.mjs / default server]
-  Entry --> Tools[src/plugin.mjs / 16 个工具]
+  Entry --> Tools[src/plugin.mjs / 21 个工具]
   Page[Magpie 内嵌启动页] --> UI[本机管理服务与页面]
   Entry --> UI
   UI --> Tools
@@ -16,6 +16,12 @@ flowchart TD
   Tools --> Import[src/ssh-config.mjs / SSH 配置预览]
   Import --> Source[用户与系统 SSH 配置 / 只读]
   Tools --> Sessions[src/sessions.mjs / 会话与转发]
+  Tools --> Remote[src/remote.mjs / 固定生命周期与任务]
+  Remote --> Scripts[src/remote-scripts.mjs / POSIX 操作]
+  Remote --> RemoteState[connections.json.remote.json]
+  Remote --> Sessions
+  Sessions --> Exec[src/remote-exec.mjs / 受控 exec 通道]
+  Exec --> SSH
   Sessions --> Authentication[src/authentication.mjs / 认证来源与凭据缺口]
   Sessions --> Trust[src/host-keys.mjs / 主机公钥]
   Sessions --> SSH[ssh2 Client]
@@ -85,6 +91,14 @@ sequenceDiagram
 预览工具读取用户与系统配置及 Include 文件，计算有效的主机候选和 revision，并附加现有连接 id 的冲突标记。导入工具重新读取并核对 revision，只把用户所选且受支持的连接交给 `ProfileStore.importProfiles`。它与其他配置写入共用串行队列，在同一次原子替换中新增连接并跳过已有 id，不覆盖旧配置。源文件和当前 SSH 会话不参与写入；读取阶段不执行命令。
 
 完整映射、限制及管理页接入说明见 [SSH 配置导入](ssh-import.md)。
+
+## 远程 Magpie 生命周期
+
+`RemoteManager` 复用已认证 SSH 会话，只允许预定义的安装、更新、服务启停、启用 Web 和卸载动作。预览探测当前用户环境并固定连接版本、程序和服务文件哈希；提交先持久化任务，再异步复核和执行。管理 HTTP 请求结束不取消已提交任务，页面通过同一工具读取进度。
+
+`remote-exec.mjs` 为每次请求独立处理标准输入、UTF-8 双输出、大小上限、超时、退出状态与通道清理。更新口令仅经标准输入交给官方加密备份命令，不存入脚本或任务记录。远端脚本用原子目录创建实现操作互斥，并保存完成记录；超时、断线或缺退出码的任务保持 `unknown`，只有明确完成记录及已释放的锁能核实终态。插件重启同样将原运行任务标为待核实，禁止自动重放。
+
+本地独立状态文件保存每连接的最近环境和最新任务，损坏时拒绝覆盖。运行或待核实任务阻止删除连接、全局恢复和改指向其他服务器；待核实任务允许修复同一服务器的认证配置。官方 Web 链接仅显式读取，通过临时回环 c2s 转发访问，密钥不进入本地记录；供应商与 Agent 由官方页面管理。具体范围见[远程 Magpie 管理](remote.md)。
 
 ## TCP 数据路径
 

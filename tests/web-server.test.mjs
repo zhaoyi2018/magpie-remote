@@ -56,6 +56,8 @@ test("the management page is self-contained and only serves its declared assets"
   assert.match(response.headers.get("content-security-policy"), /sandbox allow-scripts/);
   assert.equal((await fetch(new URL("app.js", web.url))).status, 200);
   assert.equal((await fetch(new URL("backups.js", web.url))).status, 200);
+  assert.equal((await fetch(new URL("remote.js", web.url))).status, 200);
+  assert.equal((await fetch(new URL("remote.css", web.url))).status, 200);
   assert.equal((await fetch(new URL("src/store.mjs", web.url))).status, 404);
   assert.equal((await fetch(new URL("../package.json", web.url))).status, 404);
   assert.equal((await fetch(new URL("api/call", web.url), { method: "POST", headers: web.headers, body: "not JSON" })).status, 400);
@@ -161,6 +163,36 @@ test("HTTP edits and MCP edits share revisions and conflicts preserve the newer 
   assert.notEqual(saved.revision, updated.revision);
   await web.call("remove_connection", { connectionId: original.id, expectedRevision: saved.revision });
   assert.deepEqual(web.sessions.status(), []);
+});
+
+test("remote update credentials stay in the dedicated authenticated context and other methods reject them", async (t) => {
+  const received = [];
+  const result = { id: "fixture-operation", state: "running" };
+  const remote = { async apply(id, action, revision, credentials) { received.push({ id, action, revision, credentials }); return result; } };
+  const tools = createTools({}, {}, remote);
+  const web = await startManagementServer({ tools });
+  t.after(() => web.close());
+  const args = { connectionId: "server", action: "update", revision: "a".repeat(64) };
+  const credentials = { backupPassphrase: "fixture-backup-passphrase" };
+  assert.deepEqual(await tools.remote_apply.execute(args, { credentials }), result);
+  const request = (method, fields) => fetch(new URL("api/call", web.url), {
+    method: "POST", headers: { Authorization: `Bearer ${web.token}`, "Content-Type": "application/json", Origin: "null" },
+    body: JSON.stringify({ method, args, credentials: fields }),
+  });
+  const response = await request("remote_apply", credentials);
+  assert.equal(response.status, 200);
+  const body = await response.text();
+  assert.deepEqual(JSON.parse(body), { result });
+  assert.ok(!body.includes(credentials.backupPassphrase));
+  assert.equal(received.length, 2);
+  assert.deepEqual(received[0], received[1]);
+  assert.deepEqual(received[1].credentials, credentials);
+  for (const fields of [{ password: "wrong-field" }, { backupPassphrase: 123 }, { backupPassphrase: "x".repeat(4097) }]) {
+    assert.equal((await request("remote_apply", fields)).status, 400);
+  }
+  assert.equal((await request("remote_preview", credentials)).status, 400);
+  assert.equal((await request("remote_status", credentials)).status, 400);
+  assert.equal(received.length, 2);
 });
 
 test("the endpoint launcher is removed only by the host that published it", async (t) => {

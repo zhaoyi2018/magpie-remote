@@ -24,6 +24,10 @@ Next 的 `tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `t
 
 `tests/consistency.test.mjs` 验证旧版本写入与删除保护、同连接排队冲突、独立连接互不冲突、无变化版本稳定，以及删除失败保护和运行记录清理。`tests/forward-diagnostics.test.mjs` 使用本机 SSH 服务、迟到通道回调及可注入的本地目标连接，验证双向目标超时、真实拒绝与恢复、旧请求不覆盖新结果和快照隔离；不使用外部不可达地址模拟超时。HTTP 测试还覆盖页面和 MCP 共用版本保护。
 
+`tests/remote-exec.test.mjs` 使用本机真实 SSH 通道验证标准输入、双输出、退出状态、输出上限、超时与断线。`tests/remote.test.mjs` 使用隔离状态文件和注入的远端响应验证生命周期预览、去重、环境变化、备份口令隔离、未知结果恢复、卸载范围和 Web 转发冲突。`npm run test:remote` 在真实 POSIX shell 中执行生成的脚本，使用临时 HOME 和假的 Magpie / systemd 命令；Windows 自动定位 Git Bash，也可用 `MIGPIE_BASH` 指定。它验证脚本行为，不下载程序或改变真实服务。
+
+`npm run test:ui:remote` 通过真实管理服务、受控 SSH 测试服务和 `allow-scripts` iframe，验证远程面板的检测、预览确认、后台任务、未知结果、备份口令清空、敏感链接清理和 390px 布局。SSH 测试服务仅识别固定脚本并返回测试响应，不执行部署。截图默认保存到 `.local/remote-ui-regression/`。
+
 如需使用与宿主一致的 Bun：
 
 ```powershell
@@ -48,7 +52,7 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 | 包入口可由 `exports["./server"]`、`main` 等定位 | 两者均指向根目录 `index.mjs` |
 | 入口支持 `export default { id, server }` | 仅导出该对象，辅助函数位于 `src/` |
 | 插件函数接收 `input, options`，返回 hooks | `createPlugin` 返回 `{ tool }` |
-| 工具参数支持 JSON Schema | 16 个工具声明 JSON Schema，内部另有运行校验 |
+| 工具参数支持 JSON Schema | 21 个工具声明 JSON Schema，内部另有运行校验 |
 | `ctx.abort` 是取消信号 | 连接和新增转发将其传入会话层 |
 | npm 安装不会运行依赖安装脚本 | 纯 JavaScript 路径已在禁用脚本、排除可选原生包的安装下测试 |
 | Git / 目录安装需要已存在的入口文件 | 全部运行源码随 Git 跟踪，无 `dist` 依赖 |
@@ -68,7 +72,7 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 node scripts/host-smoke.mjs 'C:/path/to/bun.exe' 'C:/path/to/host-current.js'
 ```
 
-脚本自动把入口、src、page 和清单复制到临时源码目录，排除原目录的 `page/.runtime/`，通过目录链接复用已安装依赖。子进程使用独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入该隔离副本。随后通过宿主 RPC 检查 16 个工具、保存测试配置、SSH 认证、双向转发数据往返、断线自动重连、备份预览恢复、取消重连意图、释放端口与删除配置。测试结束后关闭该子进程并清理其临时目录及依赖链接，不删除源依赖。该脚本只用于开发验证，内部宿主协议变化时需要复核。
+脚本自动把入口、src、page 和清单复制到临时源码目录，排除原目录的 `page/.runtime/`，通过目录链接复用已安装依赖。子进程使用独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入该隔离副本。随后通过宿主 RPC 检查 21 个工具、保存测试配置、SSH 认证、双向转发数据往返、断线自动重连、备份预览恢复、取消重连意图、释放端口与删除配置。测试结束后关闭该子进程并清理其临时目录及依赖链接，不删除源依赖。该脚本只用于开发验证，内部宿主协议变化时需要复核。
 
 宿主只向临时副本的 `page/.runtime/` 发布启动地址，日常源码的启动文件不会被覆盖；无需事先手动复制源码。`--ui` 通过 `getEndpoint` 回调读取该副本的地址；纯页面验证同样通过 `startUIHarness({getEndpoint})` 使用隔离管理服务。`tests/host-sandbox.test.mjs` 验证发布与清理前后源启动文件、源码和依赖均保持不变。
 

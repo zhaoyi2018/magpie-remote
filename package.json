@@ -29,7 +29,9 @@
     "test": "node --test --test-concurrency=1",
     "test:host": "node scripts/host-smoke.mjs",
     "test:ui": "node scripts/ui-smoke.mjs",
-    "check:release": "npm run check && npm test && npm run test:ui",
+    "test:ui:remote": "node scripts/remote-ui-smoke.mjs",
+    "test:remote": "node scripts/remote-script-smoke.mjs",
+    "check:release": "npm run check && npm test && npm run test:remote && npm run test:ui && npm run test:ui:remote",
     "check": "node scripts/check.mjs",
     "prepack": "npm run check && npm test"
   },

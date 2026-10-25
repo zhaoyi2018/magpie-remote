@@ -10,6 +10,8 @@ const assets = new Map([
   ["app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["recovery.js", ["recovery.js", "text/javascript; charset=utf-8"]],
   ["backups.js", ["backups.js", "text/javascript; charset=utf-8"]],
+  ["remote.js", ["remote.js", "text/javascript; charset=utf-8"]],
+  ["remote.css", ["remote.css", "text/css; charset=utf-8"]],
   ["icons.js", ["icons.js", "text/javascript; charset=utf-8"]],
   ["app.css", ["app.css", "text/css; charset=utf-8"]],
   ["connection-editor.js", ["connection-editor.js", "text/javascript; charset=utf-8"]],
@@ -106,7 +108,7 @@ export async function startManagementServer({ tools, port = 0 }) {
       if (!body.args || typeof body.args !== "object" || Array.isArray(body.args)) throw new Error("操作参数必须是对象");
       const credentials = body.credentials;
       if (credentials !== undefined) {
-        const fields = body.method === "connect" ? ["password", "passphrase"] : body.method === "save_connection" ? ["password"] : [];
+        const fields = body.method === "connect" ? ["password", "passphrase"] : body.method === "save_connection" ? ["password"] : body.method === "remote_apply" ? ["backupPassphrase"] : [];
         if (!fields.length || !credentials || typeof credentials !== "object" || Array.isArray(credentials)
           || Object.entries(credentials).some(([key, value]) => !fields.includes(key) || typeof value !== "string" || value.length > 4096
             || (body.method === "save_connection" && !value.length))) {

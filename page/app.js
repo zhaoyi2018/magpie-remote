@@ -1,10 +1,11 @@
 import { icon, renderIcons, setIcon } from "./icons.js";
 import { launcherURL, managementFailure, readResponse } from "./recovery.js";
 import { createBackupManager } from "./backups.js";
+import { createRemoteManager } from "./remote.js";
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const tabs = ["forwards", "connection", "logs"];
+  const tabs = ["forwards", "remote", "connection", "logs"];
   const state = { rows: [], selected: null, online: false, filter: "all", tab: "forwards", busy: new Map(), errors: new Map(), cancelled: new Set() };
   const base = new URL("./", location.href);
   const token = base.pathname.split("/")[1];
@@ -174,6 +175,7 @@ import { createBackupManager } from "./backups.js";
     $("empty-directions").hidden = Boolean(state.rows.length);
     $("last-connected").textContent = "尚未建立连接";
     applyLayout();
+    remote.render(row ?? null, { online: state.online, active: state.tab === "remote" });
     if (!row) return;
     const { connection, session } = row;
     const busy = state.busy.get(connection.id);
@@ -345,6 +347,7 @@ import { createBackupManager } from "./backups.js";
       $("tab-" + name).tabIndex = tab === name ? 0 : -1;
       $("panel-" + name).hidden = tab !== name;
     }
+    remote.render(selected() ?? null, { online: state.online, active: tab === "remote" });
     if (focus) $("tab-" + tab).focus();
   }
   function hideMenu(restoreFocus = false) {
@@ -619,7 +622,7 @@ import { createBackupManager } from "./backups.js";
   for (const direction of ["c2s", "s2c"]) $("rule-direction-" + direction).addEventListener("change", rulePreview);
   $("search").addEventListener("input", () => { reconcileSelection(); render(); });
   document.querySelectorAll("[data-filter]").forEach((node) => node.addEventListener("click", () => { state.filter = node.dataset.filter; reconcileSelection(); render(); }));
-  $("refresh").addEventListener("click", () => void refresh());
+  $("refresh").addEventListener("click", async () => { await refresh(); void remote.refresh({ force: true }); });
   for (const tab of tabs) {
     $("tab-" + tab).addEventListener("click", () => setTab(tab));
     $("tab-" + tab).addEventListener("keydown", (event) => {
@@ -663,6 +666,7 @@ import { createBackupManager } from "./backups.js";
   $("delete-connection").addEventListener("click", () => void deleteConnection());
   $("import-config").addEventListener("click", () => { $("import-dialog").showModal(); if (!importPreview) void previewImport(); });
   const backups = createBackupManager({ call, refresh, toast, confirmAction });
+  const remote = createRemoteManager({ call, confirmAction, toast });
   $("open-backups").addEventListener("click", () => backups.open());
   $("preview-import").addEventListener("click", () => void previewImport());
   $("import-path").addEventListener("input", invalidatePreview);
@@ -682,5 +686,5 @@ import { createBackupManager } from "./backups.js";
   const polling = setInterval(() => { if (!document.hidden) void refresh(); }, 2000);
   const clock = setInterval(updateDuration, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
-  addEventListener("pagehide", () => { clearInterval(polling); clearInterval(clock); $("login-password").value = $("login-passphrase").value = ""; }, { once: true });
+  addEventListener("pagehide", () => { clearInterval(polling); clearInterval(clock); remote.close(); $("login-password").value = $("login-passphrase").value = ""; }, { once: true });
 })();

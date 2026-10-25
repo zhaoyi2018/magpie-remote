@@ -4,6 +4,7 @@ import { validateForward, validateProfile } from "./config.mjs";
 import { fingerprint, hostVerifier } from "./host-keys.mjs";
 import { prepareAuthentication, credentialRequest } from "./authentication.mjs";
 import { OperationError, errorDetails, sshFailure } from "./errors.mjs";
+import { executeRemote } from "./remote-exec.mjs";
 
 const { Client } = ssh2;
 
@@ -182,6 +183,14 @@ export class SessionManager {
     } finally {
       signal?.removeEventListener("abort", cancel);
     }
+  }
+
+  execute(id, command, options) {
+    const session = this.#sessions.get(id);
+    if (session?.state !== "connected" || session.intent.phase === "connecting") {
+      throw new OperationError("REMOTE_NOT_CONNECTED", "请先建立 SSH 连接，再管理远程 Magpie");
+    }
+    return executeRemote(session.client, command, options);
   }
 
   async addForward(id, value, { signal, internal = false } = {}) {

@@ -6,6 +6,8 @@ import { startManagementServer, publishEndpoint } from "./web-server.mjs";
 import { fileURLToPath } from "node:url";
 import { readSSHConfig } from "./ssh-config.mjs";
 import { OperationError } from "./errors.mjs";
+import { RemoteManager } from "./remote.mjs";
+import { remoteActions } from "./remote-scripts.mjs";
 
 const runtimes = new WeakMap();
 export async function closePlugin(hooks) {
@@ -15,6 +17,7 @@ export async function closePlugin(hooks) {
     await runtime.startupTask;
     await runtime.web?.close();
     await runtime.sessions.close();
+    await runtime.remote.close();
     runtimes.delete(hooks);
   }
 }
@@ -61,12 +64,13 @@ function args(properties, required = Object.keys(properties)) {
   return { type: "object", properties, required, additionalProperties: false };
 }
 
-export function createTools(store, sessions) {
+export function createTools(store, sessions, remote = new RemoteManager({ store, sessions })) {
   sessions.passwordVault ??= store.passwordVault;
   // Serialize configuration and session mutations for each profile, while allowing
   // independent connections to proceed in parallel in Magpie's shared host.
   const operations = new Map();
   const pendingConnects = new Map();
+  const remoteSubmissions = new Set();
   let restoring = false;
   const assertMutable = () => {
     if (restoring) throw new OperationError("CONFIG_RESTORE_BUSY", "正在恢复配置，请稍后重试");
@@ -85,6 +89,42 @@ export function createTools(store, sessions) {
     return operation;
   };
   return {
+    remote_status: {
+      description: "Read remote Magpie state and the latest operation. refresh=true explicitly probes the connected remote user; it never installs or changes Magpie. Cached state is marked stale when SSH disconnects.",
+      args: args({ connectionId: idSchema, refresh: { type: "boolean", default: false } }, ["connectionId"]),
+      execute({ connectionId, refresh = false }, ctx = {}) {
+        if (typeof refresh !== "boolean") throw new Error("refresh 必须是布尔值");
+        const read = () => remote.status(connectionId, { refresh, signal: ctx.abort });
+        return refresh ? serial(connectionId, read) : read();
+      },
+    },
+    remote_preview: {
+      description: "Probe and preview a named remote Magpie lifecycle action. Returns a short-lived revision and exact changes/warnings. Does not modify the remote machine. Linux only.",
+      args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions } }),
+      execute({ connectionId, action }, ctx = {}) { return serial(connectionId, () => remote.preview(connectionId, action, { signal: ctx.abort })); },
+    },
+    remote_apply: {
+      description: "Start a previously previewed remote Magpie action using its revision and return a background operation immediately. Query remote_status for progress; never retry an unknown result. Updates require a backup passphrase entered separately on the management page.",
+      args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, revision: { ...revisionSchema, description: "The short-lived revision returned by remote_preview for this action" } }),
+      execute({ connectionId, action, revision }, ctx = {}) {
+        return serial(connectionId, async () => {
+          const submission = remote.apply(connectionId, action, revision, ctx.credentials);
+          remoteSubmissions.add(submission);
+          try { return await submission; }
+          finally { remoteSubmissions.delete(submission); }
+        });
+      },
+    },
+    remote_operation: {
+      description: "Read the latest remote operation for this connection, including failed or unknown results. Never returns credentials or raw command output.",
+      args: args({ connectionId: idSchema, operationId: stringSchema }, ["connectionId"]),
+      execute({ connectionId, operationId }) { return remote.operation(connectionId, operationId); },
+    },
+    remote_web: {
+      description: "Explicitly obtain a remote Magpie Web sign-in link through a loopback SSH forward. The returned link grants remote management access: do not log or share it. SSH must stay connected.",
+      args: args({ connectionId: idSchema, port: portSchema }, ["connectionId"]),
+      execute({ connectionId, port }) { return serial(connectionId, () => remote.web(connectionId, { port })); },
+    },
     config_backups: {
       description: "List local configuration backup metadata, even when the current configuration is damaged. Never returns credentials or backup contents.",
       args: args({}),
@@ -108,6 +148,10 @@ export function createTools(store, sessions) {
         if (typeof stopConnections !== "boolean") throw new Error("stopConnections 必须是布尔值");
         restoring = true;
         try {
+          // An accepted submission must publish its task before restore decides
+          // whether it may disconnect SSH. Queued connects still cancel below.
+          await Promise.allSettled([...remoteSubmissions]);
+          await remote.assertAllIdle();
           const preview = await store.previewRestore(backupId);
           if (revision !== preview.revision) throw new OperationError("CONFIG_RESTORE_STALE", "配置或备份已变化，请重新预览后恢复");
           if (!stopConnections && (pendingConnects.size || sessions.status().some((session) => sessions.isActive(session.id)))) throw new OperationError("CONFIG_RESTORE_ACTIVE", "请先断开所有连接并停止自动重连，或明确选择停止连接后恢复");
@@ -161,6 +205,7 @@ export function createTools(store, sessions) {
         if (profile.encryptedPassword) throw new Error("密码密文由本机生成，请勿在连接参数中提交");
         return serial(profile.id, async () => {
           if (sessions.isActive(profile.id)) throw new Error("请先断开连接再修改配置");
+          await remote.assertProfileChange(profile);
           const saved = await store.save(profile, { expectedRevision, password: ctx.credentials?.password });
           return { connection: publicProfile(saved), revision: profileRevision(saved), hasSavedPassword: Boolean(saved.encryptedPassword) };
         });
@@ -172,8 +217,11 @@ export function createTools(store, sessions) {
       execute({ connectionId, expectedRevision }) {
         return serial(connectionId, async () => {
           if (sessions.isActive(connectionId)) throw new Error("请先断开连接再删除配置");
+          await remote.assertIdle(connectionId);
           const result = await store.remove(connectionId, { expectedRevision });
           await sessions.forgetConnection(connectionId);
+          try { await remote.forget(connectionId); }
+          catch (cause) { throw new OperationError("REMOTE_CLEANUP_FAILED", "连接配置与 SSH 运行记录已删除，但远程管理缓存清理失败，请重新读取连接列表并检查本地记录文件", { cause }); }
           return result;
         });
       },
@@ -283,7 +331,8 @@ export async function createPlugin(input = {}, options) {
   const config = pluginOptions(input, options);
   const store = new ProfileStore(join(config.dataDirectory, "connections.json"));
   const sessions = new SessionManager(config);
-  const hooks = { tool: createTools(store, sessions) };
+  const remote = new RemoteManager({ store, sessions });
+  const hooks = { tool: createTools(store, sessions, remote) };
   let web;
   if (config.webUI) {
     try {
@@ -301,6 +350,6 @@ export async function createPlugin(input = {}, options) {
   const startupTask = store.list().then((profiles) => Promise.allSettled(profiles
     .filter((profile) => profile.autoConnect)
     .map((profile) => hooks.tool.connect.execute({ connectionId: profile.id }, { abort: startup.signal })))).catch(() => {});
-  runtimes.set(hooks, { sessions, web, startup, startupTask });
+  runtimes.set(hooks, { sessions, remote, web, startup, startupTask });
   return hooks;
 }

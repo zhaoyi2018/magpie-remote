@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="app.css">
   <link rel="stylesheet" href="connection-editor.css">
   <link rel="stylesheet" href="forward-editor.css">
+  <link rel="stylesheet" href="remote.css">
   <script src="theme.js" defer></script>
   <script src="connection-editor.js" defer></script>
   <script src="app.js" type="module"></script>
@@ -56,6 +57,7 @@
           <p id="reconnect-status" class="reconnect-status" role="status" hidden></p>
           <div class="detail-tabs" role="tablist" aria-label="连接详情">
             <button id="tab-forwards" type="button" role="tab" aria-selected="true" aria-controls="panel-forwards"><span data-icon="forward"></span>端口转发 <span id="forward-count">0</span></button>
+            <button id="tab-remote" type="button" role="tab" aria-selected="false" aria-controls="panel-remote" tabindex="-1"><span data-icon="server"></span>远程 Magpie</button>
             <button id="tab-connection" type="button" role="tab" aria-selected="false" aria-controls="panel-connection" tabindex="-1"><span data-icon="settings"></span>连接设置</button>
             <button id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" tabindex="-1"><span data-icon="logs"></span>运行日志</button>
           </div>
@@ -64,6 +66,42 @@
             <div class="table-wrap"><table class="forward-table"><caption class="sr-only">端口转发规则及运行状态</caption><thead><tr><th scope="col">规则名称 / 方向</th><th scope="col">转发路径</th><th scope="col">状态</th><th scope="col" class="actions-heading">操作</th></tr></thead><tbody id="forward-list"></tbody></table></div>
             <div id="forward-empty" class="forward-empty"><span data-icon="forward"></span><h4>还没有端口转发</h4><p>添加一条规则，将需要的服务通过 SSH 安全连接。</p><button id="empty-forward" class="button" type="button">添加转发规则</button></div>
             <div class="info-note"><span data-icon="info"></span><p>连接认证成功后启动预设转发；SSH 断开时会自动释放监听端口。</p></div>
+          </section>
+          <section id="panel-remote" class="tab-panel remote-workbench" role="tabpanel" aria-labelledby="tab-remote" tabindex="0" hidden>
+            <div class="section-heading remote-heading"><div><h3>远程 Magpie</h3><p>在当前 SSH 用户的环境中安装、更新并管理 Magpie。</p></div><button id="remote-detect" class="button" type="button"><span data-icon="refresh"></span><span id="remote-detect-label">检测环境</span></button></div>
+            <div class="remote-status-line"><strong id="remote-install-state">尚未检测远端环境</strong><span id="remote-ssh-state" class="badge">SSH 通道：未连接</span><span id="remote-observed">检测后显示程序与服务信息</span></div>
+            <p id="remote-notice" class="remote-notice" role="status">先检测环境，确认安装位置、版本与用户服务状态。</p>
+            <p id="remote-error" class="field-error" role="alert" hidden></p>
+            <dl id="remote-environment" class="remote-environment" hidden>
+              <div><dt>操作系统 / 架构</dt><dd id="remote-platform"></dd></div>
+              <div><dt>远端用户 / 主目录</dt><dd id="remote-user"></dd></div>
+              <div><dt>Magpie 程序</dt><dd><span id="remote-binary" class="remote-path"></span><span id="remote-version" class="remote-secondary"></span></dd></div>
+              <div><dt>配置目录</dt><dd id="remote-config" class="remote-path"></dd></div>
+              <div><dt>用户服务</dt><dd><span id="remote-service" class="badge"></span></dd></div>
+              <div><dt>官方 Web</dt><dd id="remote-web-state"></dd></div>
+            </dl>
+            <section class="remote-command-section" aria-labelledby="remote-program-title">
+              <div class="remote-command-copy"><h4 id="remote-program-title">程序</h4><p id="remote-action-hint">检测后可安装或更新，每次变更前先预览。</p></div>
+              <div class="remote-actions"><button id="remote-action-install" class="button primary" type="button" disabled>安装 Magpie</button><button id="remote-action-update" class="button" type="button" disabled>更新 Magpie</button></div>
+            </section>
+            <section class="remote-command-section" aria-labelledby="remote-service-title">
+              <div class="remote-command-copy"><h4 id="remote-service-title">用户服务</h4><p id="remote-service-hint">启用 Web 会配置用户服务；服务启停不会断开 SSH 连接。</p></div>
+              <div class="remote-actions"><button id="remote-action-start" class="button" type="button" disabled>启动服务</button><button id="remote-action-stop" class="button" type="button" disabled>停止服务</button><button id="remote-action-restart" class="button" type="button" disabled>重启服务</button><button id="remote-action-enable_web" class="button" type="button" disabled>启用 Web</button></div>
+            </section>
+            <section id="remote-operation" class="remote-operation" aria-labelledby="remote-operation-title" hidden>
+              <div class="remote-operation-heading"><h4 id="remote-operation-title">远端任务</h4><span id="remote-operation-state" class="badge"></span></div>
+              <div role="status" aria-live="polite"><p id="remote-operation-step" class="remote-operation-step"></p><p id="remote-operation-message"></p><p id="remote-operation-error" class="field-error" hidden></p><p id="remote-operation-unknown" class="remote-unknown" hidden>请先检测环境核实；若结果仍未知，请在服务器确认任务与服务状态，避免重复执行。</p></div>
+              <p id="remote-operation-backup" class="remote-operation-backup" hidden></p>
+              <p id="remote-operation-time" class="remote-secondary"></p>
+            </section>
+            <section class="remote-web-section" aria-labelledby="remote-web-title">
+              <div class="remote-command-copy"><h4 id="remote-web-title">访问官方 Web</h4><p>供应商与 Agent 可在 Magpie 官方 Web 中管理。</p></div>
+              <div class="remote-web-controls"><label for="remote-web-port">远端 Web 端口<input id="remote-web-port" type="number" min="1" max="65535" step="1" value="3430" required inputmode="numeric" aria-describedby="remote-web-hint"></label><button id="remote-open-web" class="button" type="button" disabled>获取 Web 地址</button></div>
+              <p id="remote-web-hint" class="remote-secondary">远端 Web 默认使用 3430 端口，仅通过本机回环 SSH 通道访问。</p>
+              <p id="remote-web-error" class="field-error" role="alert" hidden></p>
+              <div id="remote-web-result" class="remote-web-result" hidden><label for="remote-web-url">本次访问地址<input id="remote-web-url" type="text" readonly autocomplete="off" spellcheck="false" aria-describedby="remote-web-secret-note"></label><p id="remote-web-secret-note">地址包含管理密钥，请复制到浏览器地址栏访问并妥善保管。切换服务器、SSH 断开或离开页面后会清空。</p><div class="remote-web-result-foot"><span id="remote-web-address"></span><button id="remote-hide-web" class="text-button" type="button">清空地址</button></div></div>
+            </section>
+            <section class="remote-command-section remote-uninstall" aria-labelledby="remote-uninstall-title"><div class="remote-command-copy"><h4 id="remote-uninstall-title">卸载 Magpie</h4><p>仅移除当前用户默认位置的程序与用户服务，保留配置和备份。请先处理 Agent 接入；具体影响会在预览中说明。</p></div><div class="remote-actions"><button id="remote-action-uninstall" class="button danger" type="button" disabled>卸载 Magpie</button></div></section>
           </section>
           <section id="panel-connection" class="tab-panel" role="tabpanel" aria-labelledby="tab-connection" tabindex="0" hidden>
             <div class="section-heading"><div><h3>连接设置</h3><p>修改服务器配置前请先断开连接。</p></div><button id="edit-connection" class="button" type="button"><span data-icon="edit"></span>编辑配置</button></div>
@@ -180,6 +218,18 @@
     <div class="dialog-heading"><div><h2 id="import-title">导入 SSH 配置</h2><p>读取本机 OpenSSH 配置，预览后选择需要导入的连接。</p></div><button class="icon-button close-dialog" type="button" aria-label="关闭"><span data-icon="close"></span></button></div>
     <div class="dialog-content"><div class="import-path"><label>配置文件路径（可选）<input id="import-path" placeholder="默认读取 ~/.ssh/config 与系统配置"></label><button id="preview-import" class="button" type="button">预览配置</button></div><p class="field-note">只导入选中的配置，不会自动连接；已有连接会跳过。代理跳转等不支持的配置会在预览中标出。</p><div id="import-sources" class="import-sources"></div><div id="import-selection" class="import-selection" hidden><label class="checkbox-label"><input id="import-all" type="checkbox">全选可导入连接</label><span id="import-count" class="muted"></span></div><div id="import-list" class="import-list"><p class="no-matches">点击「预览配置」读取可用连接。</p></div><label class="checkbox-label import-forwards"><input id="import-forwards" type="checkbox" checked>同时导入 LocalForward / RemoteForward 转发预设</label><p id="import-error" class="field-error" role="alert" hidden></p><p id="import-result" class="field-note" role="status" hidden></p></div>
     <div class="dialog-actions"><button class="button close-dialog" type="button">关闭</button><button id="confirm-import" class="button primary" type="button" disabled>导入选中连接</button></div>
+  </dialog>
+
+  <dialog id="remote-preview" class="remote-preview" aria-labelledby="remote-preview-title" aria-describedby="remote-preview-summary">
+    <div class="dialog-heading"><div><h2 id="remote-preview-title">操作预览</h2><p id="remote-preview-connection"></p></div><button class="icon-button remote-close-preview" type="button" aria-label="关闭操作预览"><span data-icon="close"></span></button></div>
+    <form id="remote-preview-form"><div class="dialog-content">
+      <p id="remote-preview-summary" class="remote-preview-summary"></p>
+      <section class="remote-preview-list" hidden><h3>将进行的变更</h3><ul id="remote-preview-changes"></ul></section>
+      <section class="remote-preview-list remote-preview-warnings" hidden><h3>执行前请确认</h3><ul id="remote-preview-warnings"></ul></section>
+      <div id="remote-passphrase-field" class="remote-passphrase-field" hidden><label for="remote-backup-passphrase">更新前备份口令<span class="remote-passphrase-controls"><input id="remote-backup-passphrase" type="password" minlength="12" maxlength="1024" autocomplete="new-password" aria-describedby="remote-passphrase-note"><button id="remote-show-passphrase" class="button small" type="button" aria-pressed="false" aria-controls="remote-backup-passphrase">显示口令</button></span></label><p id="remote-passphrase-note">至少 12 个字符，仅用于本次更新前的加密备份，不会保存。请自行妥善保管，恢复备份时需要此口令。</p></div>
+      <p id="remote-preview-background" class="remote-preview-background" role="status" hidden>正在提交任务。可关闭此窗口，提交后在页面查看后台进度。</p>
+      <p id="remote-preview-error" class="field-error" role="alert" hidden></p>
+    </div><div class="dialog-actions"><button class="button remote-close-preview" type="button">关闭</button><button id="remote-apply" class="button primary" type="submit" disabled>确认执行</button></div></form>
   </dialog>
 
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-actions"><button id="confirm-cancel" class="button" type="button">取消</button><button id="confirm-accept" class="button danger" type="button">确认删除</button></div></dialog>
