@@ -2,7 +2,7 @@
 
 ## 开发命令
 
-代码是标准 ESM JavaScript，没有编译步骤。开发依赖仅使用 Node 内置测试库，运行依赖锁定为 `ssh2@1.17.0`。
+代码是标准 ESM JavaScript，没有编译步骤。后端测试使用 Node 内置测试库，浏览器回归使用开发依赖 `playwright@1.64.0`；运行依赖锁定为 `ssh2@1.17.0`。
 
 ```powershell
 npm ci --ignore-scripts --omit=optional
@@ -11,6 +11,8 @@ npm test
 ```
 
 `check` 检查 JavaScript 语法、入口导出和本地 Markdown 文件链接。测试临时启动仅监听本机随机端口的 SSH/TCP 服务，验证密码和私钥认证、真实双向数据流及异常清理。测试不会连接配置中的真实服务器。
+
+`npm run test:ui` 启动临时管理服务和 `allow-scripts` iframe，实际操作密码保存与编辑、取消清空、Enter 单次提交、并发配置冲突和转发保存 / 启动期间的关闭保护，并验证转发数据往返及桌面 / 窄屏布局。首次可运行 `npx playwright install chromium`；Windows 未安装 Playwright Chromium 时会使用已有 Edge，也可通过 `MIGPIE_UI_BROWSER` 指定 Chromium 可执行文件。截图默认保存到不入库的 `.local/ui-regression/`，可用 `MIGPIE_UI_ARTIFACTS` 指定目录。浏览器检查独立于 `npm test`；发布前运行 `npm run check:release`，一次完成静态、Node 和页面回归，不需要日常 Magpie 或生产凭据。
 
 `check` 同时检查插件卡片和页面使用同一个 SVG、图标解码后的内容不超过 1 MB、`package.json` 不超过 GitHub 插件发现读取的 1 MB 上限。更新 `page/icon.png` 或 `page/icon-dark.png` 后运行 `npm run icons`；生成器会更新 `page/icon.svg` 和 `package.json` 中的 `magpie.icon`，无需手工粘贴图标数据。
 
@@ -66,9 +68,9 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 node scripts/host-smoke.mjs 'C:/path/to/bun.exe' 'C:/path/to/host-current.js'
 ```
 
-脚本给子进程配置独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入当前项目。随后通过宿主 RPC 检查 16 个工具、保存测试配置、SSH 认证、双向转发数据往返、断线自动重连、备份预览恢复、取消重连意图、释放端口与删除配置。测试结束后关闭该子进程并清理其临时目录。该脚本只用于开发验证，内部宿主协议变化时需要复核。
+脚本自动把入口、src、page 和清单复制到临时源码目录，排除原目录的 `page/.runtime/`，通过目录链接复用已安装依赖。子进程使用独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入该隔离副本。随后通过宿主 RPC 检查 16 个工具、保存测试配置、SSH 认证、双向转发数据往返、断线自动重连、备份预览恢复、取消重连意图、释放端口与删除配置。测试结束后关闭该子进程并清理其临时目录及依赖链接，不删除源依赖。该脚本只用于开发验证，内部宿主协议变化时需要复核。
 
-宿主会向脚本所在项目的 `page/.runtime/` 发布启动地址。如果日常 Magpie 正在加载这个源码目录，应在不包含 `.runtime` 的隔离源码副本中执行宿主验证，避免覆盖日常页面的启动地址。纯页面验证也可给 `startUIHarness` 传入 `getEndpoint` 回调，直接使用隔离管理服务的地址。
+宿主只向临时副本的 `page/.runtime/` 发布启动地址，日常源码的启动文件不会被覆盖；无需事先手动复制源码。`--ui` 通过 `getEndpoint` 回调读取该副本的地址；纯页面验证同样通过 `startUIHarness({getEndpoint})` 使用隔离管理服务。`tests/host-sandbox.test.mjs` 验证发布与清理前后源启动文件、源码和依赖均保持不变。
 
 若通过完整 Magpie CLI 做隔离测试，也需为子进程设置独立的 HOME、USERPROFILE、XDG_CONFIG_HOME、XDG_CACHE_HOME 和未占用的 MAGPIE_ADDR，避免读写日常配置。Windows 自动化使用 PowerShell 7 的 `pwsh -NoProfile`。
 

@@ -19,7 +19,7 @@
 | `migpie-remote_forward_add` | `connectionId`, `forward` | 创建临时转发，返回实际绑定端口 |
 | `migpie-remote_forward_remove` | `connectionId`, `forwardId` | 停止单条转发和通道，返回 `stopped: true` |
 | `migpie-remote_forward_save` | `connectionId`, `forward`, `expectedRevision` | 保存转发预设，返回 `{forward, revision}`，不启动监听；可在 SSH 已连接时保存 |
-| `migpie-remote_forward_delete` | `connectionId`, `forwardId`, `expectedRevision` | 停止指定转发并删除其预设，保持 SSH 连接；旧版本请求不停止转发 |
+| `migpie-remote_forward_delete` | `connectionId`, `forwardId`, `expectedRevision` | 先删除预设再停止转发；版本冲突或配置写入失败保留原隧道，停止失败明确报告部分结果 |
 
 ## SSH 配置的选择导入
 
@@ -104,6 +104,8 @@ const saved = await call("save_connection", {
 每条运行转发另外返回 `targetConnection: {state, lastAttemptAt?, lastSuccessAt?, lastFailureAt?, error?}`。`state` 为 `unknown`、`connecting`、`succeeded` 或 `failed`，描述最近发起的目标连接；旧请求的迟到结果不覆盖新请求的状态。`succeeded` 仅证明目标 TCP 连接及 SSH 通道建立，不证明应用协议或业务健康。连接失败保留监听和 SSH 会话，成功重试后清除当前 `lastError` / `error`，保留失败时间和历史日志，并记录恢复事件。停止再启动转发时重新开始统计。
 
 目标建立超时返回 `FORWARD_TARGET_TIMEOUT`，连接失败为 `FORWARD_TARGET_FAILED`，传输异常为 `FORWARD_STREAM_FAILED`，建立前请求关闭为 `FORWARD_TARGET_CANCELLED`；这些是转发快照中的错误，不触发 SSH 自动重连。它们与远程监听分配超时 `FORWARD_TIMEOUT` 不同，后者仍关闭会话。删除连接成功后清除该连接的会话、重连意图和日志，全局 `status` 不再返回它；普通断开继续保留运行历史。删除写入失败时保留原配置与运行记录。
+
+`forward_delete` 先提交预设删除，再移除重连意图并停止运行转发。配置版本冲突、备份或主文件写入失败均不停止现有隧道。若提交后停止失败，返回 `FORWARD_STOP_FAILED`，消息明确说明预设已删除；重新读取状态，重试停止或断开 SSH 以释放监听。远程清理结果不明时仍沿用关闭 SSH 的规则。临时转发没有预设写入步骤。
 
 当 SSH 公钥尚未通过信任校验时，可能已经取得其指纹；只有 `state: connected` 才表示该会话已通过校验和认证。
 

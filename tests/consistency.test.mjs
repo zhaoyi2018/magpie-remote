@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { ProfileStore } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { createTools } from "../src/plugin.mjs";
-import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
+import { echoServer, exchange, sshServer, temporary, until } from "./helpers.mjs";
 
 const profile = { id: "shared", host: "host.example", username: "dev" };
 async function setup(t, options = {}) {
@@ -72,6 +72,51 @@ test("stale preset edits and deletions leave a live tunnel and its saved configu
   await tools.remove_connection.execute({ connectionId: fixture.profile.id, expectedRevision: current.revision });
   await assert.rejects(tools.save_connection.execute({ connection: current.connection, expectedRevision: current.revision }), { code: "CONFIG_CONFLICT" });
   assert.deepEqual(await tools.status.execute(), []);
+});
+
+test("failed preset deletion preserves its running tunnels until configuration is committed", async (t) => {
+  const fixture = await sshServer(t), echo = await echoServer(t);
+  const { tools, store } = await setup(t, { env: { MIGPIE_TEST_PASSWORD: "local-test-secret" } });
+  const forwards = ["c2s", "s2c"].map((direction) => ({ id: direction, direction, bindPort: 0, targetPort: echo.port }));
+  await tools.save_connection.execute({ connection: { ...fixture.profile, forwards } });
+  await tools.connect.execute({ connectionId: fixture.profile.id });
+  const current = await row(tools, fixture.profile.id), before = await readFile(store.file);
+  // Leave an unusable backup path after the first configuration has been saved.
+  await writeFile(store.backupDirectory, "blocked");
+  for (const forward of current.session.forwards) {
+    await assert.rejects(tools.forward_delete.execute({ connectionId: fixture.profile.id, forwardId: forward.id, expectedRevision: current.revision }), { code: "CONFIG_BACKUP_FAILED" });
+    assert.ok((await exchange(forward.bindPort)).length);
+  }
+  assert.deepEqual(await readFile(store.file), before);
+  await rm(store.backupDirectory);
+  for (const forward of current.session.forwards) {
+    const latest = await row(tools, fixture.profile.id);
+    await tools.forward_delete.execute({ connectionId: fixture.profile.id, forwardId: forward.id, expectedRevision: latest.revision });
+    await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
+  }
+  assert.deepEqual((await store.get(fixture.profile.id)).forwards, []);
+});
+
+test("a committed preset deletion reports a subsequent runtime stop failure and forgets reconnect intent", async (t) => {
+  const fixture = await sshServer(t), echo = await echoServer(t);
+  const { tools, store, sessions } = await setup(t, { env: { MIGPIE_TEST_PASSWORD: "local-test-secret" } });
+  const forward = { id: "partial", direction: "c2s", bindPort: 0, targetPort: echo.port };
+  await tools.save_connection.execute({ connection: { ...fixture.profile, forwards: [forward], autoReconnect: true } });
+  await tools.connect.execute({ connectionId: fixture.profile.id });
+  const current = await row(tools, fixture.profile.id);
+  const remove = sessions.removeForward.bind(sessions);
+  sessions.removeForward = async () => { throw new Error("Stop request rejected"); };
+  await assert.rejects(tools.forward_delete.execute({ connectionId: fixture.profile.id, forwardId: forward.id, expectedRevision: current.revision }), (error) => {
+    assert.equal(error.code, "FORWARD_STOP_FAILED");
+    assert.match(error.message, /预设已删除/);
+    return true;
+  });
+  assert.deepEqual((await store.get(fixture.profile.id)).forwards, []);
+  assert.ok((await exchange(current.session.forwards[0].bindPort)).length);
+  sessions.removeForward = remove;
+  for (const client of fixture.clients) client.end();
+  await until(() => sessions.status(fixture.profile.id).state === "connected" && sessions.status(fixture.profile.id).connectedAt !== current.session.connectedAt);
+  assert.deepEqual(sessions.status(fixture.profile.id).forwards, []);
 });
 
 test("deleting failed profiles releases their runtime records while preserving an independent session", async (t) => {

@@ -43,8 +43,11 @@ export class ProfileStore {
   #pending = Promise.resolve();
   #lastBackupTime = 0;
 
-  constructor(file, { backupLimit = 5 } = {}) {
+  constructor(file, { backupLimit = 5, renameFile = rename, removeFile = rm, onWarning = (warning) => console.warn(warning.message) } = {}) {
     this.file = file;
+    this.renameFile = renameFile;
+    this.removeFile = removeFile;
+    this.onWarning = onWarning;
     this.passwordVault = new PasswordVault(file + ".key");
     this.backupDirectory = file + ".backups";
     if (!Number.isInteger(backupLimit) || backupLimit < 1 || backupLimit > 50) throw new Error("backupLimit 必须为 1–50");
@@ -135,7 +138,9 @@ export class ProfileStore {
     return this.#enqueue(async () => {
       const source = await this.#readCurrent();
       if (source === undefined) throw new OperationError("CONFIG_BACKUP_EMPTY", "尚无连接配置可备份");
-      return this.#writeBackup(decode(source), "manual");
+      const backup = await this.#writeBackup(decode(source), "manual");
+      await this.#pruneBackups();
+      return backup;
     });
   }
 
@@ -158,7 +163,7 @@ export class ProfileStore {
           preserved = { recoveryFile };
         }
       }
-      await this.#atomicWrite(this.file, serialize(profiles));
+      await this.#commit(profiles, preserved?.backupId);
       return { restored: true, connectionCount: profiles.length, preserved };
     });
   }
@@ -206,10 +211,32 @@ export class ProfileStore {
     const createdAt = new Date(this.#lastBackupTime).toISOString();
     try {
       await this.#atomicWrite(join(this.backupDirectory, id + ".json"), JSON.stringify({ version: 1, createdAt, reason, connections: profiles }, null, 2) + "\n");
-      const valid = (await this.listBackups()).filter((item) => item.valid);
-      for (const old of valid.slice(this.backupLimit)) await rm(join(this.backupDirectory, old.id + ".json"));
     } catch (cause) { throw new OperationError("CONFIG_BACKUP_FAILED", "配置备份失败，原配置未被替换，请检查目录权限和空间", { cause }); }
     return { id, createdAt, reason, connectionCount: profiles.length, valid: true };
+  }
+
+  #warn(cause) {
+    const warning = new OperationError("CONFIG_BACKUP_CLEANUP_FAILED", "配置与备份已保留，但多余备份未能清理，将在下次成功写入后重试", { cause });
+    try { this.onWarning(warning); } catch { /* A warning must not turn a committed write into a failure. */ }
+  }
+
+  async #pruneBackups() {
+    try {
+      const valid = (await this.listBackups()).filter((item) => item.valid);
+      for (const old of valid.slice(this.backupLimit)) await this.removeFile(join(this.backupDirectory, old.id + ".json"));
+    } catch (cause) { this.#warn(cause); }
+  }
+
+  async #commit(profiles, backupId) {
+    try { await this.#atomicWrite(this.file, serialize(profiles)); }
+    catch (error) {
+      if (backupId) {
+        try { await this.removeFile(join(this.backupDirectory, backupId + ".json"), { force: true }); }
+        catch (cause) { this.#warn(cause); }
+      }
+      throw error;
+    }
+    await this.#pruneBackups();
   }
 
   async #atomicWrite(file, contents) {
@@ -217,7 +244,7 @@ export class ProfileStore {
     try {
       await mkdir(dirname(file), { recursive: true, mode: 0o700 });
       await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
-      await rename(temporary, file);
+      await this.renameFile(temporary, file);
     } catch (cause) { throw new OperationError("CONFIG_WRITE_FAILED", "无法保存连接配置，请检查目录权限和空间", { cause }); }
     finally { await rm(temporary, { force: true }).catch(() => {}); }
   }
@@ -229,8 +256,8 @@ export class ProfileStore {
       const before = structuredClone(profiles);
       const result = await update(profiles);
       if (source !== undefined && JSON.stringify(before) === JSON.stringify(profiles)) return result;
-      if (source !== undefined) await this.#writeBackup(before, "automatic");
-      await this.#atomicWrite(this.file, serialize(profiles));
+      const backup = source === undefined ? undefined : await this.#writeBackup(before, "automatic");
+      await this.#commit(profiles, backup?.id);
       return result;
     });
   }

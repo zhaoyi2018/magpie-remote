@@ -440,6 +440,8 @@ import { createBackupManager } from "./backups.js";
     $("rule-hint").textContent = local ? "本地转发 (-L)：本机监听端口，流量经 SSH 转发至服务器侧目标。" : "远程转发 (-R)：服务器监听端口，流量经 SSH 转发至本机侧目标。";
   }
   function syncForwardAction() {
+    $("forward-editor").setAttribute("aria-busy", String(forwardSaving));
+    $("forward-editor").querySelectorAll(".close-dialog").forEach((node) => { node.disabled = forwardSaving; });
     const row = state.rows.find((item) => item.connection.id === editingForwardConnection);
     const connected = row?.session.state === "connected";
     if (!connected || editingForwardSaved) $("rule-save-preset").checked = true;
@@ -606,6 +608,7 @@ import { createBackupManager } from "./backups.js";
       if (!action.disabled) action.click();
     });
   }
+  $("forward-editor").addEventListener("cancel", (event) => { if (forwardSaving) event.preventDefault(); });
   $("forward-form").addEventListener("submit", saveForward);
   $("save-forward").addEventListener("click", saveForward);
   $("forward-form").addEventListener("keydown", (event) => {

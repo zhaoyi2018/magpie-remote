@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, writeFile, rm, readdir } from "node:fs/promises";
+import { readFile, writeFile, rm, readdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
@@ -120,6 +120,51 @@ test("backup storage failure leaves current config intact and the write queue ca
   await store.save({ ...profile, name: "recovered" }, { expectedRevision: profileRevision(await store.get(profile.id)) });
   assert.equal((await store.get(profile.id)).name, "recovered");
   assert.ok(!(await readdir(join(store.file, ".."))).some((file) => file.endsWith(".tmp")));
+});
+
+test("failed main-file commits preserve every historical backup across repeated saves and restores", async (t) => {
+  const directory = await temporary(t), file = join(directory, "connections.json");
+  let blocked = false;
+  const store = new ProfileStore(file, { renameFile: async (from, to) => {
+    if (blocked && to === file) throw Object.assign(new Error("Main configuration is locked"), { code: "EPERM" });
+    return rename(from, to);
+  } });
+  await store.save(profile);
+  for (let i = 1; i <= 5; i++) await store.save({ ...profile, name: `revision-${i}` }, { expectedRevision: profileRevision(await store.get(profile.id)) });
+  const before = await readFile(file), backups = await store.listBackups();
+  const sources = await Promise.all(backups.map((backup) => readFile(join(store.backupDirectory, backup.id + ".json"))));
+  const preview = await store.previewRestore(backups.at(-1).id);
+  blocked = true;
+  for (let i = 0; i < 6; i++) {
+    await assert.rejects(store.save({ ...profile, name: "uncommitted" }, { expectedRevision: profileRevision(await store.get(profile.id)) }), { code: "CONFIG_WRITE_FAILED" });
+    await assert.rejects(store.restore(preview.backupId, preview.revision), { code: "CONFIG_WRITE_FAILED" });
+    assert.deepEqual(await readFile(file), before);
+    assert.deepEqual(await store.listBackups(), backups);
+  }
+  for (let i = 0; i < backups.length; i++) assert.deepEqual(await readFile(join(store.backupDirectory, backups[i].id + ".json")), sources[i]);
+  blocked = false;
+  await store.save({ ...profile, name: "recovered" }, { expectedRevision: profileRevision(await store.get(profile.id)) });
+  assert.equal((await store.get(profile.id)).name, "recovered");
+  assert.equal((await store.listBackups()).length, store.backupLimit);
+});
+
+test("backup pruning failure is a warning after a successful commit and a later write retries cleanup", async (t) => {
+  const file = join(await temporary(t), "connections.json"), warnings = [];
+  let blocked = false;
+  const store = new ProfileStore(file, { backupLimit: 2, removeFile: async (path, options) => {
+    if (blocked && path.startsWith(file + ".backups")) throw new Error("Backup cleanup is unavailable");
+    return rm(path, options);
+  }, onWarning: (warning) => warnings.push(warning) });
+  await store.save(profile);
+  for (let i = 1; i <= 2; i++) await store.save({ ...profile, name: `revision-${i}` }, { expectedRevision: profileRevision(await store.get(profile.id)) });
+  blocked = true;
+  await store.save({ ...profile, name: "committed" }, { expectedRevision: profileRevision(await store.get(profile.id)) });
+  assert.equal((await store.get(profile.id)).name, "committed");
+  assert.equal((await store.listBackups()).length, 3);
+  assert.equal(warnings.at(-1).code, "CONFIG_BACKUP_CLEANUP_FAILED");
+  blocked = false;
+  await store.createBackup();
+  assert.equal((await store.listBackups()).length, 2);
 });
 
 test("restore requires an explicit stop, releases tunnels and leaves restored auto-connect profiles stopped", async (t) => {

@@ -251,7 +251,7 @@ export function createTools(store, sessions) {
       },
     },
     forward_delete: {
-      description: "Stop one forward if it is running, and remove its saved preset using the profile's expectedRevision from connections. Leaves the SSH connection established. Stale requests do not stop running tunnels.",
+      description: "Delete a saved forward preset using its profile's expectedRevision, then stop the running forward. Configuration failures leave tunnels running; a subsequent stop failure reports that the preset was already deleted. Leaves SSH connected unless remote cleanup is uncertain.",
       args: args({ connectionId: idSchema, forwardId: idSchema, expectedRevision: revisionSchema }),
       execute({ connectionId, forwardId, expectedRevision }) {
         identifier(forwardId);
@@ -264,9 +264,14 @@ export function createTools(store, sessions) {
           const running = sessions.status(connectionId).forwards.some((item) => item.id === forwardId);
           const saved = profile.forwards.some((item) => item.id === forwardId);
           if (!running && !saved) throw new Error(`转发 ${forwardId} 不存在`);
-          if (running) await sessions.removeForward(connectionId, forwardId);
           if (saved) await store.save({ ...profile, forwards: profile.forwards.filter((item) => item.id !== forwardId) }, { expectedRevision });
           sessions.forgetForward(connectionId, forwardId);
+          if (running) {
+            try { await sessions.removeForward(connectionId, forwardId); }
+            catch (cause) {
+              throw new OperationError("FORWARD_STOP_FAILED", (saved ? "转发预设已删除，但停止运行中的转发失败：" : "停止临时转发失败：") + cause.message + "。请检查运行状态，必要时断开 SSH 连接以释放监听", { cause });
+            }
+          }
           return { id: forwardId, removed: true };
         });
       },

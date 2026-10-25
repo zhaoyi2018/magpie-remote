@@ -2,16 +2,15 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { basename, dirname, join, resolve } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { echoServer, exchange, sshServer, until } from "../tests/helpers.mjs";
+import { createHostSandbox } from "./host-sandbox.mjs";
 import { startUIHarness } from "./ui-harness.mjs";
 
 const [bunPath, hostPath] = process.argv.slice(2);
 assert.ok(bunPath && hostPath, "Usage: node scripts/host-smoke.mjs <bun executable> <Magpie host.js>");
-const root = fileURLToPath(new URL("../", import.meta.url));
-const directory = await mkdtemp(join(tmpdir(), "migpie-host-smoke-"));
+const sandbox = await createHostSandbox(fileURLToPath(new URL("../", import.meta.url)));
+const { directory, root } = sandbox;
 const cleanup = [];
 const context = { after(fn) { cleanup.unshift(fn); } };
 let child;
@@ -106,7 +105,7 @@ try {
   assert.deepEqual(await call("status"), []);
   console.log("Magpie host: 16 tools and no model providers registered; versioned edits and stale rejection, SSH authentication, c2s/s2c diagnostics/recovery and data round trips, backup/restore, retry cancellation, port release and runtime deletion passed.");
   if (process.argv.includes("--ui")) {
-    const harness = await startUIHarness();
+    const harness = await startUIHarness({ getEndpoint: sandbox.getEndpoint });
     cleanup.unshift(() => harness.close());
     console.log(JSON.stringify({ uiURL: harness.url, ssh: fixture.profile, testPassword: "local-test-secret", targetPort: echo.port }));
     console.log("UI test is ready. Send check to verify active forwards, or close to finish.");
@@ -139,8 +138,5 @@ try {
     });
   }
   for (const fn of cleanup) await fn();
-  const absolute = resolve(directory);
-  assert.equal(dirname(absolute), resolve(tmpdir()));
-  assert.ok(basename(absolute).startsWith("migpie-host-smoke-"));
-  await rm(absolute, { recursive: true, force: true });
+  await sandbox.cleanup();
 }
