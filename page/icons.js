@@ -7,7 +7,7 @@ const definitions = {
   plus: { paths: ["M12 5v14M5 12h14"] },
   upload: { paths: ["M12 16V3m-4 4 4-4 4 4M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"] },
   search: { paths: ["M21 21l-5-5", "M18 10.5a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"] },
-  refresh: { paths: ["M20 7v5h-5M4 17v-5h5", "M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 18 17"] },
+  refresh: { paths: ["M20 13a8 8 0 1 1-2.34-6.66L20 9", "M20 4.5V9h-4.5"] },
   disconnect: { paths: ["M9 4H5v16h4M10 12h11m-4-4 4 4-4 4"] },
   close: { paths: ["M6 6l12 12M6 18 18 6"] },
   more: { strokeWidth: 3, paths: ["M12 4h.01M12 12h.01M12 20h.01"] },
