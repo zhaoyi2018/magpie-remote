@@ -302,9 +302,30 @@ export function createRemoteManager({ call, toast }) {
     backupRefreshDue = false; void refreshBackups();
   }
 
+  function downloadProgress() {
+    const progress = operation?.progress;
+    if (!["install", "update"].includes(operation?.action) || !["downloading", "updating"].includes(operation?.step) || !progress) return "";
+    const { downloadedBytes, totalBytes, bytesPerSecond } = progress;
+    if (!Number.isSafeInteger(downloadedBytes) || downloadedBytes < 0 || !Number.isSafeInteger(totalBytes) || totalBytes < 0 || !Number.isFinite(bytesPerSecond) || bytesPerSecond < 0) return "";
+    let detail = "已下载 " + size(downloadedBytes);
+    if (totalBytes > 0) detail += " / " + size(totalBytes) + "（" + Math.min(100, downloadedBytes / totalBytes * 100).toLocaleString("zh-CN", { maximumFractionDigits: 1 }) + "%）";
+    return detail + " · " + size(bytesPerSecond) + "/s";
+  }
   function drawTaskSummary() {
     const state = operation?.state;
-    text("remote-task-state", submitting ? "远端任务正在提交…" : submissionUncertain ? "远端任务提交结果待核实，请检测环境。" : operation ? (actionLabels[operation.action] ?? "远端任务") + "：" + (operationLabels[state] ?? "结果待核实") + (running() && operation.step ? "，" + (stepLabels[operation.step] ?? "处理远端任务") : "") : "远程操作的进度与结果会记录在运行日志中。");
+    const live = running() && sshReady() && !uncertain() && !readError && !status?.stale;
+    let message = "远程操作的进度与结果会记录在运行日志中。";
+    if (submitting) message = "远端任务正在提交…";
+    else if (submissionUncertain) message = "远端任务提交结果待核实，请检测环境。";
+    else if (operation) {
+      message = (actionLabels[operation.action] ?? "远端任务") + "：" + (running() && !live ? "进度待同步，请连接后检测环境。" : operationLabels[state] ?? "结果待核实");
+      if (live) {
+        if (operation.step) message += "，" + (stepLabels[operation.step] ?? "处理远端任务");
+        const progress = downloadProgress();
+        if (progress) message += " · " + progress;
+      }
+    }
+    text("remote-task-state", message);
     $("remote-task-summary").classList.toggle("is-warning", uncertain() || state === "failed");
   }
 

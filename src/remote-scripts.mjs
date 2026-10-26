@@ -95,6 +95,7 @@ finish() {
   code=$?
   trap - EXIT
   set +e
+  rm -f "$job/output"
   if [ -n "$stage" ]; then rm -f "$stage/magpie"; rmdir "$stage"; fi
 ${restoreCleanup}  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
   if [ -f "$job/reason" ]; then reason=$(cat "$job/reason"); fi
@@ -112,11 +113,39 @@ ${restoreCleanup}  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
 trap finish EXIT
 mkdir -p "$job"
 printf running > "$job/state"
-set_step() { step=$1; printf '%s' "$step" > "$job/step"; }
+emit_progress() { printf 'MIGPIE_PROGRESS_V1\\t%s\\t%s\\t%s\\t%s\\n' '${operationId}' "$1" "$2" "$3"; }
+set_step() { step=$1; printf '%s' "$step" > "$job/step"; emit_progress "$step" 0 0; }
+sample_download() {
+  current_bytes=''
+  if [ "$step" = downloading ]; then
+    if [ -f "$stage/magpie" ] && [ ! -L "$stage/magpie" ]; then current_bytes=$(stat -c %s "$stage/magpie" 2>/dev/null || true); fi
+  else
+    for candidate in "$download_bin.new" "$(dirname "$download_bin")/.magpie-update/$download_name.new" "\${XDG_CACHE_HOME:-$HOME/.cache}/magpie/update/$download_name.new" "$(dirname "$download_bin")/data/cache/update/$download_name.new"; do
+      if [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ "$candidate" -nt "$job/download-start" ]; then
+        current_bytes=$(stat -c %s "$candidate" 2>/dev/null || true)
+        break
+      fi
+    done
+  fi
+  case "$current_bytes" in ''|*[!0-9]*) return ;; esac
+  emit_progress "$step" "$current_bytes" "$download_total"
+}
 run_step() {
   set_step "$1"
   shift
-  if output=$("$@" 2>&1); then return 0; else code=$?; fi
+  if [ "$step" = downloading ] || [ "$step" = updating ]; then
+    download_total=${action === "install" && Number.isSafeInteger(release?.size) && release.size > 0 ? release.size : 0}
+    download_bin=$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")
+    download_name=\${download_bin##*/}
+    : > "$job/download-start"
+    "$@" > "$job/output" 2>&1 &
+    command_pid=$!
+    while kill -0 "$command_pid" 2>/dev/null; do sample_download; sleep 1; done
+    sample_download
+    if wait "$command_pid"; then rm -f "$job/output"; return 0; else code=$?; fi
+    output=$(tail -c 16384 "$job/output")
+    rm -f "$job/output"
+  elif output=$("$@" 2>&1); then return 0; else code=$?; fi
   reason=command_failed
   if printf '%s' "$output" | grep -Eiq 'permission denied|operation not permitted|read-only file system|access is denied'; then reason=permission;
   elif printf '%s' "$output" | grep -Eiq 'no space left|disk (is )?full|disk quota exceeded'; then reason=disk_full;

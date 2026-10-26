@@ -2,7 +2,7 @@ import { StringDecoder } from "node:string_decoder";
 import { OperationError } from "./errors.mjs";
 
 // Internal transport only; public tools accept named Magpie actions, never shell text.
-export function executeRemote(client, command, { input = "", signal, timeoutMs = 30000, maxBytes = 262144 } = {}) {
+export function executeRemote(client, command, { input = "", signal, timeoutMs = 30000, maxBytes = 262144, onStdout } = {}) {
   return new Promise((resolve, reject) => {
     let stream, finished = false, size = 0, stdout = "", stderr = "";
     const out = new StringDecoder("utf8"), err = new StringDecoder("utf8");
@@ -22,10 +22,15 @@ export function executeRemote(client, command, { input = "", signal, timeoutMs =
     client.once("close", disconnected);
     if (signal?.aborted) { cancel(); return; }
     const collect = (chunk, decoder, destination) => {
+      if (finished) return;
       size += chunk.length;
       if (size > maxBytes) return finish(new OperationError("REMOTE_OUTPUT_LIMIT", "远端响应超过大小限制，结果需重新检测"));
-      if (destination === "out") stdout += decoder.write(chunk);
-      else stderr += decoder.write(chunk);
+      const text = decoder.write(chunk);
+      if (destination === "out") {
+        stdout += text;
+        try { onStdout?.(text); }
+        catch { finish(new OperationError("REMOTE_RESULT_UNKNOWN", "远端进度读取中断，请重新检测实际状态")); }
+      } else stderr += text;
     };
     client.exec(command, { pty: false }, (error, channel) => {
       if (finished) { channel?.on("error", () => {}); channel?.destroy(); return; }

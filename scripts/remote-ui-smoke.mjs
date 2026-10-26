@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
 import { ProfileStore } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
@@ -80,7 +81,10 @@ async function remoteFixture(context) {
           assert.ok(action, "Fixture rejected an unexpected exec request");
           executions.push({ kind: "action", action, command, script });
           const gate = actionGate; actionGate = null;
-          if (gate) await gate.promise;
+          if (gate) {
+            gate.entered.resolve({ channel, operationId: script.match(/operations\/([a-f0-9-]{36})/)?.[1] });
+            await gate.promise;
+          }
           if (state.nextFailure) {
             const { step, reason, backupReady } = state.nextFailure; state.nextFailure = null;
             const operationId = script.match(/operations\/([a-f0-9-]{36})/)?.[1];
@@ -103,7 +107,20 @@ async function remoteFixture(context) {
       });
     }));
   });
-  return { ...fixture, state, executions, holdAction() { const gate = deferred(); actionGate = gate; return gate; } };
+  return { ...fixture, state, executions, holdAction() {
+    const gate = { ...deferred(), entered: deferred() };
+    actionGate = gate;
+    return { ...gate, async progress(step, downloadedBytes, totalBytes = 0) {
+      const { channel, operationId } = await gate.entered.promise;
+      assert.ok(operationId, "Progress requires the current operation UUID");
+      const marker = `MIGPIE_PROGRESS_V1\t${operationId}\t${step}\t${downloadedBytes}\t${totalBytes}\n`;
+      channel.write(marker.slice(0, 10));
+      await delay(20);
+      channel.write(marker.slice(10, marker.length - 2));
+      await delay(20);
+      channel.write(marker.slice(-2));
+    } };
+  } };
 }
 
 const cleanup = [], releases = [];
@@ -169,12 +186,27 @@ try {
   await waitOperation("执行中");
   assert.equal(count("remote_apply"), applyBefore + 1);
   assert.equal(await field("remote-detect").isDisabled(), true, "Forced detection must not issue REMOTE_BUSY during execution");
+  await installGate.progress("downloading", 1048576, 4194304);
+  await delay(320);
+  await installGate.progress("downloading", 2097152, 4194304);
+  await waitOperation("已下载 2 MB / 4 MB（50%）");
+  assert.match(await field("remote-task-state").textContent(), /下载程序.*[\d.,]+ [KM]?B\/s/);
+  assert.ok(!(await field("remote-task-state").textContent()).includes("· 0 B/s"), "A measured download must display nonzero speed");
+  assert.ok((await remote.operation("remote-alpha")).progress.bytesPerSecond > 0);
+  assert.equal(await field("remote-task-summary").evaluate((node) => Boolean(node.compareDocumentPosition(document.getElementById("remote-action-install")) & Node.DOCUMENT_POSITION_FOLLOWING)), true, "Task summary must precede program actions");
+  const heldProgressStatus = gateTool("remote_status"); await heldProgressStatus.entered;
+  await selectedRow("测试服务器").click(); await openRemote(); heldProgressStatus.release();
+  await page.waitForTimeout(150);
+  assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"), "Late progress responses must stay with their connection");
+  await selectedRow("生产服务器").click(); await openRemote(); await waitOperation("已下载 2 MB / 4 MB（50%）");
   await page.reload(); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor(); await openRemote();
-  await waitOperation("执行中");
+  await waitOperation("已下载 2 MB / 4 MB（50%）");
+  assert.equal(await field("remote-operation").count(), 0);
   installGate.resolve(); await waitOperation("已完成");
+  assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"));
   await field("remote-install-state").filter({ hasText: "已安装" }).waitFor();
   assert.equal(fixture.executions.filter((item) => item.action === "install").length, 1);
-  console.log("Remote UI: explicit detection, real preview/apply HTTP, single submission and background task restoration passed.");
+  console.log("Remote UI: explicit detection, one submission, fragmented SSH download bytes/speed/percentage, reload and late connection response handling passed.");
 
   fixture.state.version = releasedVersion; await detect();
   assert.equal(await field("remote-action-update").isVisible(), false);
@@ -190,18 +222,40 @@ try {
   await field("remote-apply").evaluate((node) => { node.click(); node.click(); }); await heldApply.entered;
   assert.equal(await field("remote-apply").isDisabled(), true); await closePreview();
   assert.equal(await field("remote-preview").evaluate((node) => node.open), false);
-  heldApply.release(); updateGate.resolve();
+  heldApply.release();
+  await updateGate.progress("updating", 5242880);
+  await delay(320);
+  await updateGate.progress("updating", 10485760);
+  await waitOperation("已下载 10 MB");
+  const updateProgress = await field("remote-task-state").textContent();
+  assert.match(updateProgress, /执行官方更新.*已下载 10 MB · [\d.,]+ [KM]?B\/s/);
+  assert.ok(!updateProgress.includes("%"), "An unknown total must not invent a percentage");
+  assert.ok(!updateProgress.includes("· 0 B/s"), "Measured update speed must reach the summary");
+  assert.ok((await remote.operation("remote-alpha")).progress.bytesPerSecond > 0);
+  await updateGate.progress("restarting", 0);
+  await waitOperation("重启用户服务");
+  assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"), "Changing stage must clear active download text");
+  updateGate.resolve();
   await waitOperation("已完成");
+  assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"));
   await until(() => fixture.executions.some((item) => item.action === "update"));
   const updateExecution = fixture.executions.find((item) => item.action === "update");
   assert.equal(updateExecution.command, "sh -s");
   assert.ok(updateExecution.script.includes("tar -czf"));
   assert.ok(!updateExecution.script.includes('"$bin" backup'));
   assert.ok(requests.filter((item) => item.method === "remote_apply").every((item) => !Object.hasOwn(item, "credentials")));
-  console.log("Remote UI: unencrypted archive preview, no passphrase fields or credentials, single submission and close-during-submit passed.");
+  console.log("Remote UI: archive preview without credentials, measured update bytes/speed without a fabricated percentage, stage cleanup and close-during-submit passed.");
 
   fixture.state.nextFailure = { step: "updating", reason: "network", backupReady: true };
-  await preview("update"); await field("remote-apply").click(); await waitOperation("失败");
+  await preview("update");
+  const failedDownload = fixture.holdAction(); releases.push(failedDownload.resolve);
+  await field("remote-apply").click();
+  await failedDownload.progress("updating", 3145728);
+  await delay(320);
+  await failedDownload.progress("updating", 6291456);
+  await waitOperation("已下载 6 MB");
+  failedDownload.resolve(); await waitOperation("失败");
+  assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"), "Failed downloads must not keep active progress");
   const failedOperation = await remote.operation("remote-alpha");
   const failureLog = () => ui.locator("#log-list .log-message").filter({ hasText: "执行官方更新失败" });
   await field("remote-view-logs").click();
@@ -220,8 +274,12 @@ try {
   console.log("Remote UI: classified update failure and backup path appear once in shared logs and survive page reload.");
 
   await openRemote();
-  fixture.state.nextUnknown = true; await preview("update"); await field("remote-apply").click();
-  await waitOperation("结果未知");
+  fixture.state.nextUnknown = true; await preview("update");
+  const unknownDownload = fixture.holdAction(); releases.push(unknownDownload.resolve);
+  await field("remote-apply").click(); await unknownDownload.progress("updating", 7340032);
+  await waitOperation("已下载 7 MB");
+  unknownDownload.resolve(); await waitOperation("结果未知");
+  assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"), "Unknown results must not keep active progress");
   await detect(); assert.equal(await field("remote-action-update").isDisabled(), true);
   assert.equal((await remote.operation("remote-alpha")).state, "unknown");
   fixture.state.reconcile = "succeeded"; await detect(); await waitOperation("已完成");
@@ -321,7 +379,15 @@ try {
   await selectedRow("测试服务器").click(); await openRemote(); heldWeb.release();
   await page.waitForTimeout(150); assert.equal(await field("remote-web-url").inputValue(), "");
   await detect(); await showWeb();
+  await preview("update");
+  const disconnectedDownload = fixture.holdAction(); releases.push(disconnectedDownload.resolve);
+  await field("remote-apply").click(); await disconnectedDownload.progress("updating", 8388608);
+  await waitOperation("已下载 8 MB");
   await field("disconnect").click(); await field("detail-state").filter({ hasText: "未连接" }).waitFor();
+  assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"), "Disconnected sessions must hide cached active progress");
+  disconnectedDownload.resolve();
+  await until(async () => (await remote.operation("remote-beta")).state !== "running", "Disconnected task did not settle");
+  fixture.state.reconcile = "succeeded";
   assert.equal(await field("remote-web-url").inputValue(), ""); assert.equal(await field("remote-action-update").isDisabled(), true);
   await field("connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor(); await detect(); await showWeb();
   await field("panel-remote").evaluate(() => dispatchEvent(new Event("pagehide")));
@@ -377,6 +443,13 @@ try {
   assert.equal(await field("remote-preview").evaluate((node) => node.scrollWidth > node.clientWidth + 1), false);
   await page.screenshot({ path: join(screenshots, "preview-390.png"), fullPage: true }); await closePreview();
   assert.ok((await stat(join(screenshots, "desktop.png"))).size > 1000);
+  await field("remote-view-logs").click();
+  const sharedLogs = await field("log-list").textContent();
+  assert.ok(!/MIGPIE_PROGRESS_V1|fixture-management-key|local-test-secret/.test(sharedLogs), "Shared logs must not expose progress transport records or credentials");
+  assert.ok(!/fixture-management-key|local-test-secret/.test(await field("remote-task-state").textContent()));
+  assert.ok(!/fixture-management-key|local-test-secret/.test(JSON.stringify(requests.filter((item) => ["remote_apply", "remote_preview"].includes(item.method)))));
+  assert.equal(await field("remote-task-summary").count(), 1);
+  assert.equal(await field("remote-operation").count(), 0);
   assert.deepEqual(errors, [], "Browser script errors");
   console.log(`Remote UI: 390px iframe and preview layout passed. Screenshots: ${screenshots}`);
 } finally {

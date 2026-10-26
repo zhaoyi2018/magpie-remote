@@ -95,7 +95,7 @@ export async function latestRelease(architecture) {
   if (!/^v?\d+\.\d+\.\d+$/.test(data.version ?? "") || !/^[a-f0-9]{64}$/i.test(asset?.sha256 ?? "") || url?.protocol !== "https:" || url.hostname !== "github.com" || !url.pathname.startsWith("/yetone/magpie-releases/releases/download/") || !url.pathname.endsWith("/" + name) || url.search || url.hash || url.username || url.password) {
     throw new OperationError("REMOTE_RELEASE_INVALID", "官方版本清单结构不受支持，未执行安装");
   }
-  return { version: data.version, url: url.href, sha256: asset.sha256.toLowerCase() };
+  return { version: data.version, url: url.href, sha256: asset.sha256.toLowerCase(), ...(Number.isSafeInteger(asset.size) && asset.size > 0 && asset.size <= 1e12 && { size: asset.size }) };
 }
 
 export class RemoteManager {
@@ -132,6 +132,7 @@ export class RemoteManager {
         }
         if (record.operation?.state === "running") {
           record.operation.state = "unknown";
+          delete record.operation.progress;
           record.operation.message = "插件已重启，请连接后检测远端操作结果";
         }
         this.#records.set(record.connectionId, record);
@@ -195,9 +196,43 @@ export class RemoteManager {
     } catch (error) { return { state: "unknown", checkedAt, error: errorDetails(error) }; }
   }
 
+  #progressReader(id, operation) {
+    let pending = "", skipping = false, sample;
+    return (chunk) => {
+      if (operation.state !== "running") return;
+      const lines = (pending + chunk).split("\n");
+      pending = lines.pop();
+      for (const line of lines) {
+        if (skipping) { skipping = false; continue; }
+        if (line.length > 256) continue;
+        const [marker, operationId, step, done, total, extra] = line.replace(/\r$/, "").split("\t");
+        if (marker !== "MIGPIE_PROGRESS_V1" || operationId !== operation.id || !Object.hasOwn(steps, step) || step === "completed" || extra !== undefined
+          || !/^\d{1,13}$/.test(done ?? "") || !/^\d{1,13}$/.test(total ?? "")) continue;
+        const downloadedBytes = Number(done), totalBytes = Number(total);
+        if (downloadedBytes > 1e12 || totalBytes > 1e12 || (totalBytes > 0 && downloadedBytes > totalBytes)) continue;
+        const downloading = ["downloading", "updating"].includes(step);
+        if (!downloading && (downloadedBytes || totalBytes)) continue;
+        const changed = operation.step !== step, now = Date.now();
+        operation.step = step; operation.updatedAt = new Date(now).toISOString();
+        operation.message = steps[step] + "中";
+        if (downloading) {
+          let bytesPerSecond = changed || (sample && downloadedBytes < sample.bytes) ? 0 : operation.progress?.bytesPerSecond ?? 0;
+          if (sample && sample.step === step && downloadedBytes >= sample.bytes && now > sample.time) bytesPerSecond = Math.round((downloadedBytes - sample.bytes) * 1000 / (now - sample.time));
+          operation.progress = { downloadedBytes, totalBytes, bytesPerSecond, updatedAt: operation.updatedAt };
+          sample = { step, bytes: downloadedBytes, time: now };
+        } else { delete operation.progress; sample = undefined; }
+        if (changed) {
+          this.#logOperation(id, operation);
+          void this.#save().catch(() => {});
+        }
+      }
+      if (pending.length > 256) { pending = ""; skipping = true; }
+    };
+  }
+
   #logOperation(id, operation, reconciled = false) {
     const level = operation.state === "failed" ? "error" : operation.state === "unknown" ? "warn" : "info";
-    const message = operation.state === "running" ? operation.step === "checking" ? "已提交，正在复核环境" : "正在执行"
+    const message = operation.state === "running" ? operation.step === "checking" ? "已提交，正在复核环境" : steps[operation.step] ? steps[operation.step] + "中" : "正在执行"
       : operation.state === "succeeded" ? "已完成" : operation.state === "unknown" ? "结果未知，请检测环境核实，避免重复执行"
         : operation.diagnostic ? actionFailure(operation.action, operation.diagnostic.exitCode, operation.diagnostic).message : "执行失败，请查看任务详情";
     const backup = operation.result?.backupDirectory ? "；远端备份目录：" + operation.result.backupDirectory : "";
@@ -393,6 +428,7 @@ export class RemoteManager {
 
   async #run(id, record, preview) {
     const operation = record.operation;
+    let dispatched = false;
     try {
       const instance = await this.#probe(id);
       if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭，未执行变更");
@@ -402,7 +438,9 @@ export class RemoteManager {
       await this.#save();
       this.#logOperation(id, operation);
       const script = actionScript(operation.action, instance, operation.id, preview.release, preview.selectedBackup);
-      const response = await this.sessions.execute(id, "sh -s", { input: script, timeoutMs: 600000, maxBytes: 65536 });
+      dispatched = true;
+      const response = await this.sessions.execute(id, "sh -s", { input: script, timeoutMs: 600000, maxBytes: 262144, onStdout: this.#progressReader(id, operation) });
+      delete operation.progress;
       const result = parseActionResult(response.stdout, operation.id, response.code);
       if (result) {
         operation.diagnostic = { step: result.step, exitCode: result.exitCode, reason: result.reason };
@@ -424,10 +462,11 @@ export class RemoteManager {
       } catch { operation.message += "，当前环境尚未刷新，请重新检测"; }
       operation.state = "succeeded"; operation.step = "completed";
     } catch (error) {
-      operation.state = operation.step === "executing" && uncertain.has(error.code) ? "unknown" : "failed";
+      operation.state = dispatched && uncertain.has(error.code) ? "unknown" : "failed";
       operation.step = operation.state === "failed" ? operation.diagnostic?.step ?? "failed" : operation.state;
       operation.error = errorDetails(error); operation.message = error.message;
     } finally {
+      delete operation.progress;
       operation.updatedAt = new Date().toISOString();
       try { await this.#save(); }
       catch { operation.state = "unknown"; operation.message = "远端操作已返回，但本地记录保存失败，请重新检测结果"; }

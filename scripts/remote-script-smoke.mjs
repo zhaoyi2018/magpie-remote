@@ -16,15 +16,15 @@ const bundledBash = git && join(dirname(dirname(git)), "bin", "bash.exe");
 const bash = process.env.MIGPIE_BASH || (bundledBash && existsSync(bundledBash) ? bundledBash : "bash");
 const directory = await mkdtemp(join(tmpdir(), "migpie-script-smoke-"));
 const home = join(directory, "home"), tools = join(directory, "tools");
-const run = (script, input = "") => new Promise((resolveRun, reject) => {
+const run = (script, onStdout) => new Promise((resolveRun, reject) => {
   const setup = `export HOME="$(cd ${shellQuote(home.replaceAll("\\", "/"))} && pwd -P)"\nexport XDG_CONFIG_HOME="$HOME/.config"\nexport PATH="$(cd ${shellQuote(tools.replaceAll("\\", "/"))} && pwd -P):$PATH"\n`;
-  const child = spawn(bash, ["-c", setup + script], { env: { ...process.env, MSYS_NO_PATHCONV: "1" }, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(bash, ["-s"], { env: { ...process.env, MSYS_NO_PATHCONV: "1" }, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   const timer = setTimeout(() => { child.kill(); reject(new Error("Script smoke timed out: " + (script.match(/job=[^\n]+/)?.[0] ?? script.slice(-160)))); }, 20000);
-  child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.stdout.on("data", (chunk) => { stdout += chunk; onStdout?.(chunk.toString()); }); child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.once("error", (error) => { clearTimeout(timer); reject(error); });
   child.once("close", (code) => { clearTimeout(timer); resolveRun({ code, stdout, stderr }); });
-  child.stdin.end(input);
+  child.stdin.end(setup + script);
 });
 const id = "c2be46f1-cf7c-4e27-a5ef-c0786bb4fb05";
 try {
@@ -36,7 +36,15 @@ case "$1" in
   --version) printf 'magpie 0.1.1327\\n' ;;
   --help) if [ -f "$HOME/limited-help" ]; then cat "$HOME/limited-help"; else printf '%s\\n' 'magpie update [check]' 'magpie backup [--no-keys] [file]' 'magpie restore [file]' 'magpie healthcheck' 'magpie daemon [install|uninstall|start|stop|restart|status]' 'magpie daemon install [--web] [--addr host:port]' 'magpie daemon web [on|off]'; fi ;;
   backup|restore) printf 'Official encrypted backup commands must not run\\n' >&2; exit 99 ;;
-  update) if [ -e "$HOME/fail-update" ]; then printf 'download failed: dial tcp: no such host; isolated-private-output\\n' >&2; exit 1; fi; printf updated > "$HOME/updated" ;;
+  update) if [ -e "$HOME/fail-update" ]; then printf 'download failed: dial tcp: no such host; isolated-private-output\\n' >&2; exit 1; fi
+    if [ -e "$HOME/slow-update" ]; then
+      dd if=/dev/zero of="$0.new" bs=1024 count=1 2>/dev/null
+      sleep 2
+      dd if=/dev/zero bs=1024 count=1 2>/dev/null >> "$0.new"
+      sleep 2
+      rm -f "$0.new"
+    fi
+    printf updated > "$HOME/updated" ;;
   healthcheck) if [ -e "$HOME/fail-healthcheck" ]; then printf 'gateway not healthy\\n' >&2; exit 1; fi; [ "$(cat "$state" 2>/dev/null)" = running ] ;;
   daemon) printf '%s\\n' "$2" >> "$HOME/service-actions"; if [ "$2" = restart ] && [ -e "$HOME/fail-restart" ]; then printf 'permission denied: isolated-private-output\\n' >&2; exit 1; fi; case "$2" in
     install|restart|start) printf running > "$state" ;;
@@ -86,6 +94,19 @@ esac
   assert.equal(contents.code, 0, contents.stderr); assert.equal(contents.stdout, "isolated-config-secret");
   await assert.rejects(access(backupPath(id, "config.magpie")));
   await rm(join(home, "updated"));
+  await writeFile(join(home, "slow-update"), "enabled");
+  let liveOutput = "", receivedLiveBytes = false;
+  const progressId = randomUUID();
+  const slow = await run(canonical + actionScript("update", instance, progressId), (chunk) => {
+    liveOutput += chunk;
+    if (new RegExp(`MIGPIE_PROGRESS_V1\\t${progressId}\\tupdating\\t(?:1024|2048)\\t0`).test(liveOutput) && !liveOutput.includes("MIGPIE_DONE")) receivedLiveBytes = true;
+  });
+  assert.equal(slow.code, 0, slow.stderr + slow.stdout);
+  assert.equal(receivedLiveBytes, true, "Download size must stream before the update exits");
+  assert.ok(slow.stdout.includes(`MIGPIE_PROGRESS_V1\t${progressId}\tupdating\t2048\t0`));
+  assert.match(slow.stdout, /\tbacking_up\t0\t0/);
+  assert.match(slow.stdout, /\trestarting\t0\t0/);
+  await rm(join(home, "slow-update")); await rm(join(home, "updated"));
   await writeFile(join(tools, "tar"), "#!/bin/sh\nprintf 'no space left: isolated-private-output\\n' >&2\nexit 42\n", { mode: 0o755 });
   const failureId = randomUUID(), failed = await execute("update", failureId);
   assert.equal(failed.code, 42); await assert.rejects(access(join(home, "updated")));
@@ -103,7 +124,8 @@ esac
     assert.equal(result.code, 1);
     assert.ok(result.stdout.includes(`MIGPIE_RESULT_V1\t${operationId}\t${step}\t1\t${reason}\ttrue`), result.stdout);
     assert.ok(!(result.stdout + result.stderr).includes("isolated-private-output"));
-    assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", operationId, "result"), "utf8"), result.stdout);
+    assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", operationId, "result"), "utf8"), result.stdout.split("\n").find((line) => line.startsWith("MIGPIE_RESULT_V1")) + "\n");
+    await assert.rejects(access(join(home, ".config", "magpie-remote", "operations", operationId, "output")));
     assert.ok((await readFile(backupPath(operationId, "magpie"))).length);
     if (updatedBeforeFailure) await rm(join(home, "updated"));
     else await assert.rejects(access(join(home, "updated")));

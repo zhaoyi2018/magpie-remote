@@ -78,6 +78,29 @@ test("real SSH exec preserves binary stdin, split UTF-8 on both streams, and a n
   assert.deepEqual(fixture.requests, [{ type: "exec", command: "fixture-byte-exchange" }]);
 });
 
+test("real SSH stdout is delivered while the command is still running, without streaming stderr", async (t) => {
+  const release = deferred(), output = deferred(), chunks = [];
+  t.after(() => release.resolve());
+  const fixture = await executableServer(t, ({ accept }) => {
+    const channel = accept(); channel.on("error", () => {}); channel.resume();
+    void (async () => {
+      for (const byte of Buffer.from("下载 𠮷\n")) channel.write(Buffer.from([byte]));
+      channel.stderr.write("private-diagnostic");
+      await release.promise;
+      channel.exit(0); channel.end("complete\n");
+    })();
+  });
+  const client = await connectedClient(t, fixture);
+  let completed = false;
+  const task = executeRemote(client, "stream-progress", { onStdout(text) { chunks.push(text); if (chunks.join("").includes("下载 𠮷\n")) output.resolve(); } }).then((value) => { completed = true; return value; });
+  await output.promise;
+  assert.equal(completed, false);
+  assert.equal(chunks.join(""), "下载 𠮷\n");
+  release.resolve();
+  assert.deepEqual(await task, { code: 0, stdout: "下载 𠮷\ncomplete\n", stderr: "private-diagnostic" });
+  assert.equal(chunks.join(""), "下载 𠮷\ncomplete\n");
+});
+
 test("a real server refusing exec returns a transport error and leaves the SSH connection usable", async (t) => {
   const fixture = await executableServer(t, ({ accept, reject, command }) => {
     if (command === "refused") reject();

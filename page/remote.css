@@ -64,7 +64,7 @@
 .remote-backup-meta > span { overflow-wrap: anywhere; }
 .remote-backup-note { font-size: 11px; margin-top: 5px; color: var(--muted); overflow-wrap: anywhere; }
 .remote-backup-actions { justify-content: flex-end; flex: 0 0 auto; gap: 4px 12px; }
-.remote-task-link { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 3px 18px; margin-top: 20px; padding: 12px 0; }
+.remote-task-link { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 3px 18px; padding: 0 0 14px; }
 .remote-task-link p { flex: 1 1 200px; }
 .remote-uninstall { border-top: 1px solid var(--line); padding-top: 20px; padding-bottom: 8px; }
 .remote-uninstall .remote-command-copy p { max-width: 70ch; }

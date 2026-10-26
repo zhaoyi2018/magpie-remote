@@ -72,6 +72,7 @@
             <div class="remote-status-line"><strong id="remote-install-state">尚未检测远端环境</strong><span id="remote-ssh-state" class="badge">SSH 通道：未连接</span><span id="remote-observed">检测后显示程序与服务信息</span></div>
             <p id="remote-notice" class="remote-notice" role="status">先检测环境，确认安装位置、版本与用户服务状态。</p>
             <p id="remote-error" class="field-error" role="alert" hidden></p>
+            <div class="remote-task-link"><p id="remote-task-summary" class="remote-secondary" role="status"><span id="remote-task-state">远程操作的进度与结果会记录在运行日志中。</span></p><button id="remote-view-logs" class="text-button" type="button">查看运行日志</button></div>
             <div class="remote-layout">
               <div class="remote-controls">
                 <section class="remote-program-section" aria-labelledby="remote-program-title">
@@ -110,7 +111,6 @@
               <p id="remote-backups-error" class="field-error" role="alert" hidden></p>
               <div id="remote-backup-list" class="remote-backup-list" aria-label="远端配置备份列表"></div>
             </section>
-            <div class="remote-task-link"><p id="remote-task-summary" class="remote-secondary" role="status"><span id="remote-task-state">远程操作的进度与结果会记录在运行日志中。</span></p><button id="remote-view-logs" class="text-button" type="button">查看运行日志</button></div>
             <section class="remote-command-section remote-uninstall" aria-labelledby="remote-uninstall-title"><div class="remote-command-copy"><h4 id="remote-uninstall-title">卸载 Magpie</h4><p>仅移除默认位置的程序与用户服务，保留配置和备份。请先处理 Agent 接入；具体影响会在预览中说明。</p></div><div class="remote-actions"><button id="remote-action-uninstall" class="button danger" type="button" disabled>卸载 Magpie</button></div></section>
           </section>
           <section id="panel-connection" class="tab-panel" role="tabpanel" aria-labelledby="tab-connection" tabindex="0" hidden>

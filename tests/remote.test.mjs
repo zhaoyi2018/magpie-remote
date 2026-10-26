@@ -331,7 +331,7 @@ test("update always archives configuration without a passphrase even when offici
   assert.ok(!action.input.includes('"$bin" backup'));
   assert.ok(!action.input.includes("read -r passphrase"));
   assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf('"$bin" update'));
-  assert.equal(action.maxBytes, 65536);
+  assert.equal(action.maxBytes, 262144);
   assert.match(operation.result.backupDirectory, /\/magpie-remote\/backups\/[a-f0-9-]+$/);
 });
 
@@ -410,6 +410,80 @@ test("invalid or unrelated result markers cannot add remote text to a failure", 
     assert.equal(operation.result, undefined);
     assert.ok(!JSON.stringify(operation).includes("secret-"));
   }
+});
+
+test("fragmented live progress reports download bytes and stages without completing or flooding logs", async (t) => {
+  const h = await fixture(t), entered = deferred(), finish = deferred();
+  t.after(() => finish.resolve());
+  let stream;
+  h.sessions.onAction = async ({ onStdout }) => { stream = onStdout; entered.resolve(); await finish.promise; return success(); };
+  const { operation } = await start(h, "update"); await entered.promise;
+  const progress = (step, done, total = 0) => `MIGPIE_PROGRESS_V1\t${operation.id}\t${step}\t${done}\t${total}\n`;
+  const first = progress("updating", 1048576);
+  stream(first.slice(0, 13));
+  assert.equal((await h.remote.operation(h.profile.id)).progress, undefined);
+  stream(first.slice(13));
+  let live = await h.remote.status(h.profile.id);
+  assert.equal(live.operation.state, "running");
+  assert.equal(live.operation.step, "updating");
+  assert.equal(live.operation.progress.downloadedBytes, 1048576);
+  assert.equal(live.operation.progress.totalBytes, 0);
+  const logCount = h.sessions.logs.length;
+  stream(progress("updating", 2097152));
+  assert.equal(h.sessions.logs.length, logCount);
+  assert.equal((await h.remote.status(h.profile.id)).operation.progress.downloadedBytes, 2097152);
+  stream(progress("restarting", 0));
+  live = await h.remote.status(h.profile.id);
+  assert.equal(live.operation.step, "restarting");
+  assert.equal(live.operation.progress, undefined);
+  assert.equal(h.sessions.logs.length, logCount + 1);
+  assert.match(h.sessions.logs.at(-1).message, /重启用户服务中/);
+  finish.resolve();
+  assert.equal((await completed(h)).state, "succeeded");
+  stream(progress("updating", 999999));
+  assert.equal((await h.remote.operation(h.profile.id)).progress, undefined);
+});
+
+test("untrusted, oversized and mismatched progress frames cannot add raw output or corrupt a running task", async (t) => {
+  const h = await fixture(t), entered = deferred(), finish = deferred();
+  t.after(() => finish.resolve());
+  let stream;
+  h.sessions.onAction = async ({ onStdout }) => { stream = onStdout; entered.resolve(); await finish.promise; return success(); };
+  const { operation } = await start(h, "update"); await entered.promise;
+  const progress = (id, step, done, total) => `MIGPIE_PROGRESS_V1\t${id}\t${step}\t${done}\t${total}\n`;
+  stream(progress(operation.id, "updating", 100, 200));
+  for (const frame of [
+    progress("00000000-0000-0000-0000-000000000000", "updating", 150, 200),
+    progress(operation.id, "raw-private-stage", 150, 200),
+    progress(operation.id, "completed", 150, 200),
+    progress(operation.id, "updating", -1, 200),
+    progress(operation.id, "updating", 300, 200),
+    progress(operation.id, "updating", 1000000000001, 0),
+    progress(operation.id, "restarting", 1, 0),
+    progress(operation.id, "updating", 150, 200).replace("\n", "\textra-private-output\n"),
+    "raw-private-output\n" + "x".repeat(300),
+  ]) stream(frame);
+  stream("\n");
+  assert.equal((await h.remote.operation(h.profile.id)).progress.downloadedBytes, 100);
+  stream(progress(operation.id, "updating", 50, 200));
+  assert.equal((await h.remote.operation(h.profile.id)).progress.bytesPerSecond, 0, "retry must reset speed after file truncation");
+  assert.ok(!JSON.stringify(h.sessions.logs).includes("private"));
+  finish.resolve(); await completed(h);
+  assert.ok(!(await readFile(h.remote.file, "utf8")).includes("private"));
+});
+
+test("connection loss after a streamed stage stays unknown and clears active download statistics", async (t) => {
+  const h = await fixture(t);
+  h.sessions.onAction = async ({ onStdout }) => {
+    const operation = await h.remote.operation(h.profile.id);
+    onStdout(`MIGPIE_PROGRESS_V1\t${operation.id}\tupdating\t1048576\t0\n`);
+    throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection");
+  };
+  await start(h, "update");
+  const operation = await completed(h);
+  assert.equal(operation.state, "unknown");
+  assert.equal(operation.progress, undefined);
+  await assert.rejects(h.remote.preview(h.profile.id, "update"), { code: "REMOTE_BUSY" });
 });
 
 test("a success exit with contradictory structured evidence remains unknown", async (t) => {

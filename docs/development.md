@@ -24,9 +24,9 @@ Next 的 `tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `t
 
 `tests/consistency.test.mjs` 验证旧版本写入与删除保护、同连接排队冲突、独立连接互不冲突、无变化版本稳定，以及删除失败保护和运行记录清理。`tests/forward-diagnostics.test.mjs` 使用本机 SSH 服务、迟到通道回调及可注入的本地目标连接，验证双向目标超时、真实拒绝与恢复、旧请求不覆盖新结果和快照隔离；不使用外部不可达地址模拟超时。HTTP 测试还覆盖页面和 MCP 共用版本保护。
 
-`tests/remote-exec.test.mjs` 使用本机真实 SSH 通道验证标准输入、双输出、退出状态、输出上限、超时与断线。`tests/remote.test.mjs` 使用隔离状态文件和注入的远端响应验证生命周期预览、去重、环境变化、普通配置归档、恢复预览绑定、未知结果恢复、卸载范围和 Web 转发冲突。`npm run test:remote` 在真实 POSIX shell 中执行生成的脚本，使用临时 HOME 和假的 Magpie / systemd 命令；Windows 自动定位 Git Bash，也可用 `MIGPIE_BASH` 指定。它验证脚本行为，不下载程序或改变真实服务。
+`tests/remote-exec.test.mjs` 使用本机真实 SSH 通道验证标准输入、双输出、分片 UTF-8 实时标准输出、退出状态、输出上限、超时与断线。`tests/remote.test.mjs` 使用隔离状态文件和注入的远端响应验证生命周期预览、去重、环境变化、普通配置归档、恢复预览绑定、分片进度校验、下载阶段断线后的未知结果、卸载范围和 Web 转发冲突。`npm run test:remote` 通过标准输入向真实 POSIX shell 传入生成脚本，使用临时 HOME 和假的 Magpie / systemd 命令，并用逐步写入的临时文件验证下载字节在任务结束前输出；Windows 自动定位 Git Bash，也可用 `MIGPIE_BASH` 指定。它验证脚本行为，不下载程序或改变真实服务。
 
-`npm run test:ui:remote` 通过真实管理服务、受控 SSH 测试服务和 `allow-scripts` iframe，验证远程面板的检测、预览确认、后台任务、未知结果、无口令备份与恢复、统一日志去重、敏感链接清理和 390px 布局。SSH 测试服务仅识别固定脚本并返回测试响应，不执行部署。截图默认保存到 `.local/remote-ui-regression/`。
+`npm run test:ui:remote` 通过真实管理服务、受控 SSH 测试服务和 `allow-scripts` iframe，验证远程面板的检测、预览确认、后台任务、下载字节与速度、可信总量下的百分比、阶段切换与终态清理、刷新和跨连接响应隔离，以及未知结果、无口令备份与恢复、统一日志去重、敏感链接清理和 390px 布局。SSH 测试服务仅识别固定脚本并返回测试响应，不执行部署。截图默认保存到 `.local/remote-ui-regression/`。
 
 如需使用与宿主一致的 Bun：
 
