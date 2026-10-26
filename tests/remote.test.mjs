@@ -15,7 +15,8 @@ const baseProbe = {
   unit: "/home/tester/.config/systemd/user/magpie.service", unitHash: "b".repeat(64),
   installed: "true", systemd: "true", serviceInstalled: "true", serviceActive: "active",
   webEnabled: "true", webPort: "3430", webTLS: "false", linger: "yes", locked: "false",
-  tools: "curl sha256sum base64 mktemp install readlink",
+  tools: "curl sha256sum base64 mktemp install readlink tar",
+  capabilities: "update backup healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
 };
 const managementKey = "fixture-management-key-123456789";
 const release = {
@@ -140,8 +141,8 @@ test("an unreachable systemd user session is unavailable rather than a stopped s
 for (const [name, fields, code] of [
   ["non-Linux server", { platform: "Darwin" }, "REMOTE_UNSUPPORTED"],
   ["container deployment", { container: "true" }, "REMOTE_UNSUPPORTED"],
-  ["old CLI version", { version: "magpie 0.1.1471" }, "REMOTE_VERSION_UNSUPPORTED"],
-  ["unrecognized CLI version", { version: "development build" }, "REMOTE_VERSION_UNSUPPORTED"],
+  ["missing restart command", { capabilities: "update backup healthcheck" }, "REMOTE_CAPABILITY_UNSUPPORTED"],
+  ["missing health check", { capabilities: "daemon_restart" }, "REMOTE_CAPABILITY_UNSUPPORTED"],
   ["missing checksum tool", { tools: "curl base64 mktemp install" }, "REMOTE_PREREQUISITE"],
   ["inaccessible user service", { systemd: "false" }, "REMOTE_NO_SYSTEMD"],
   ["transitioning user service", { serviceActive: "activating" }, "REMOTE_SERVICE_UNKNOWN"],
@@ -153,6 +154,56 @@ for (const [name, fields, code] of [
     assert.equal(await h.remote.operation(h.profile.id), null);
   });
 }
+
+test("version 0.1.1327 can update and enable its first service when its help advertises the required commands", async (t) => {
+  const h = await fixture(t, { version: "magpie 0.1.1327", serviceInstalled: "false", serviceActive: "inactive", unitHash: "", webEnabled: "false" });
+  const status = await h.remote.status(h.profile.id, { refresh: true });
+  assert.equal(status.actions.update.enabled, true);
+  assert.equal(status.actions.enable_web.enabled, true);
+  assert.equal(status.actions.start.enabled, false);
+  assert.equal(status.actions.start.code, "REMOTE_NO_SERVICE");
+  await assert.rejects(h.remote.preview(h.profile.id, "start"), { code: "REMOTE_NO_SERVICE" });
+  assert.equal((await h.remote.preview(h.profile.id, "enable_web")).action, "enable_web");
+  await start(h, "update", { backupPassphrase: "fixture-backup-passphrase" });
+  assert.equal((await completed(h)).state, "succeeded");
+});
+
+test("an unrecognized version string does not disable commands confirmed by help", async (t) => {
+  const h = await fixture(t, { version: "development build" });
+  assert.equal((await h.remote.preview(h.profile.id, "restart")).action, "restart");
+});
+
+test("missing capabilities disable only dependent actions and explain the required command", async (t) => {
+  const h = await fixture(t, { version: "magpie 0.1.1327", capabilities: "daemon_stop daemon_uninstall" });
+  const status = await h.remote.status(h.profile.id, { refresh: true });
+  assert.equal(status.actions.stop.enabled, true);
+  assert.equal(status.actions.uninstall.enabled, true);
+  assert.equal(status.actions.update.enabled, false);
+  assert.match(status.actions.update.reason, /magpie update/);
+  assert.equal(status.actions.enable_web.enabled, false);
+  assert.equal(h.sessions.actions().length, 0);
+});
+
+test("legacy update without the official backup command uses an explicit archive preview and needs no passphrase", async (t) => {
+  const h = await fixture(t, { version: "magpie 0.1.1327", capabilities: "update", serviceInstalled: "false", serviceActive: "inactive", unitHash: "" });
+  const preview = await h.remote.preview(h.profile.id, "update");
+  assert.equal(preview.backupMode, "archive");
+  assert.equal(preview.requiresBackupPassphrase, false);
+  assert.ok(preview.warnings.some((warning) => warning.includes("未加密")));
+  await h.remote.apply(h.profile.id, "update", preview.revision);
+  assert.equal((await completed(h)).state, "succeeded");
+  const action = h.sessions.actions()[0];
+  assert.equal(action.command, "sh -s");
+  assert.match(action.input, /config\.tar\.gz/);
+  assert.ok(!action.input.includes("read -r passphrase"));
+  assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf('"$bin" update'));
+});
+
+test("legacy update refuses to proceed without a usable backup mechanism", async (t) => {
+  const h = await fixture(t, { capabilities: "update", tools: "sha256sum", serviceInstalled: "false", serviceActive: "inactive", unitHash: "" });
+  await assert.rejects(h.remote.preview(h.profile.id, "update"), { code: "REMOTE_PREREQUISITE" });
+  assert.equal(h.sessions.actions().length, 0);
+});
 
 test("install preview resolves the injected release but does not download, execute an action or read a management key", async (t) => {
   const h = await fixture(t, { installed: "false", binary: "", version: "", binaryHash: "", serviceInstalled: "false", unitHash: "", webEnabled: "false" });

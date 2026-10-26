@@ -27,6 +27,21 @@ if [ -n "$bin" ] && [ -x "$bin" ]; then
   emit installed true
   emit version "$("$bin" --version 2>/dev/null | head -c 120)"
   emit binaryHash "$(sha256sum "$bin" 2>/dev/null | cut -d ' ' -f 1 || true)"
+  help=$("$bin" --help 2>/dev/null) || help=''
+  commands=$(printf '%s\\n' "$help" | sed -n 's/^[[:space:]]*magpie[[:space:]][[:space:]]*//p')
+  daemon=$(printf '%s\\n' "$commands" | sed -n 's/^daemon[[:space:]][[:space:]]*//p')
+  has_command() { printf '%s\\n' "$commands" | grep -Eq "^$1([[:space:]]|$)"; }
+  has_daemon() { printf '%s\\n' "$daemon" | tr '[]|' '   ' | grep -Eq "(^|[[:space:]])$1([[:space:]]|$)"; }
+  capabilities=''
+  for command in update backup healthcheck; do
+    if has_command "$command"; then capabilities="$capabilities $command"; fi
+  done
+  for action in install uninstall start stop restart web; do
+    if has_daemon "$action"; then capabilities="$capabilities daemon_$action"; fi
+  done
+  install_help=$(printf '%s\\n' "$daemon" | grep -E '^install([[:space:]]|$)' | tr '[]=' '   ' || true)
+  if printf '%s\\n' "$install_help" | grep -Eq -- '(^|[[:space:]])--web([[:space:]]|$)' && printf '%s\\n' "$install_help" | grep -Eq -- '(^|[[:space:]])--addr([[:space:]]|$)'; then capabilities="$capabilities daemon_install_web"; fi
+  emit capabilities "$capabilities"
 else emit installed false; fi
 systemd=false
 if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then systemd=true; fi
@@ -42,7 +57,7 @@ if [ "$systemd" = true ]; then
   emit serviceActive "$(systemctl --user show magpie.service --property=ActiveState --value 2>/dev/null || true)"
 fi
 emit linger "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)"
-emit tools "$(for tool in curl sha256sum base64 mktemp install readlink; do command -v "$tool" >/dev/null && printf '%s ' "$tool"; done)"
+emit tools "$(for tool in curl sha256sum base64 mktemp install readlink tar; do command -v "$tool" >/dev/null && printf '%s ' "$tool"; done)"
 emit locked "$(if [ -d "\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote/operation.lock" ]; then printf true; else printf false; fi)"
 `;
 
@@ -81,15 +96,23 @@ printf 'MIGPIE_DONE\\n'
 `;
   }
   if (action === "update") {
-    // The passphrase is the first line of stdin, before this script is parsed.
-    return prefix + `command -v sha256sum >/dev/null
-backup="$base/backups/${operationId}"
-mkdir -p "$backup"
-IFS= read -r passphrase
+    const backup = instance.capabilities?.includes("backup") ? `IFS= read -r passphrase
 printf '%s\\n' "$passphrase" | "$bin" backup "$backup/config.magpie" >/dev/null 2>&1
 unset passphrase
 [ -s "$backup/config.magpie" ] || exit 77
-cp -p "$bin" "$backup/magpie"
+` : `command -v tar >/dev/null
+config=${shellQuote(instance.configDirectory)}
+if [ -d "$config" ]; then
+  tar -czf "$backup/config.tar.gz" -C "$config" . >/dev/null 2>&1
+  [ -s "$backup/config.tar.gz" ] || exit 77
+elif [ -e "$config" ] || [ -L "$config" ]; then exit 77
+else printf 'Configuration directory did not exist before update.\\n' > "$backup/config.absent"; fi
+`;
+    return prefix + `command -v sha256sum >/dev/null
+mkdir -p "$base/backups"
+backup="$base/backups/${operationId}"
+mkdir -m 700 "$backup"
+${backup}cp -p "$bin" "$backup/magpie"
 "$bin" update >/dev/null 2>&1
 ${instance.service.state === "running" ? '"$bin" daemon restart >/dev/null 2>&1\n' : ""}"$bin" --version >/dev/null
 ${instance.service.state === "running" ? '"$bin" healthcheck >/dev/null 2>&1\n' : ""}printf 'MIGPIE_DONE\\n'

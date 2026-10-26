@@ -20,8 +20,8 @@
 | `migpie-remote_forward_remove` | `connectionId`, `forwardId` | 停止单条转发和通道，返回 `stopped: true` |
 | `migpie-remote_forward_save` | `connectionId`, `forward`, `expectedRevision` | 保存转发预设，返回 `{forward, revision}`，不启动监听；可在 SSH 已连接时保存 |
 | `migpie-remote_forward_delete` | `connectionId`, `forwardId`, `expectedRevision` | 先删除预设再停止转发；版本冲突或配置写入失败保留原隧道，停止失败明确报告部分结果 |
-| `migpie-remote_remote_status` | `connectionId`；可选 `refresh` | 读取环境缓存与最新远端任务；显式刷新会探测并核实未知结果 |
-| `migpie-remote_remote_preview` | `connectionId`, `action` | 返回变更清单、提示和短时 revision，不执行变更 |
+| `migpie-remote_remote_status` | `connectionId`；可选 `refresh` | 读取环境缓存、最新任务及各操作可用性与原因；显式刷新探测命令能力并核实未知结果 |
+| `migpie-remote_remote_preview` | `connectionId`, `action` | 返回变更清单、提示和短时 revision；更新含备份方式及是否需要口令，不执行变更 |
 | `migpie-remote_remote_apply` | `connectionId`, `action`, `revision` | 提交预览的固定操作，立即返回后台任务；更新口令仅从管理页独立提交 |
 | `migpie-remote_remote_operation` | `connectionId`；可选 `operationId` | 返回此连接最新任务，不包含原始命令输出或凭据 |
 | `migpie-remote_remote_web` | `connectionId`；可选 `port` | 显式读取官方管理链接并建立临时回环 SSH 转发；返回的链接含管理密钥 |

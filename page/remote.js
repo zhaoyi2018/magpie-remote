@@ -65,14 +65,15 @@ export function createRemoteManager({ call, toast }) {
     if (status.instance.container) return "容器环境请通过镜像管理部署，此处暂不支持变更。";
     if (status.instance.locked) return "远端仍有管理操作锁，请先在服务器核实任务状态。";
     if (status.instance.service?.installed && status.instance.service.state === "unknown") return "用户服务状态待核实，请先检测环境或在服务器检查。";
-    const version = status.instance.version?.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
-    if (status.instance.installed && (!version || !(Number(version[1]) > 0 || Number(version[2]) > 1 || Number(version[2]) === 1 && Number(version[3]) >= 1472))) return "此安装版本尚未支持，请先在服务器升级到 0.1.1472 或更新版本。";
     return "";
   }
   function actionReason(action) {
     const reason = baseReason();
     if (reason) return reason;
     const instance = status.instance;
+    const availability = status.actions?.[action];
+    if (!availability) return "请重新检测环境，读取可用操作。";
+    if (!availability.enabled) return availability.reason || "当前环境不支持此操作，请重新检测。";
     if (action === "install") return instance.installed || instance.service?.installed ? "已检测到 Magpie 程序或用户服务，请使用已有安装。" : "";
     if (!instance.installed) return "请先安装 Magpie。";
     if (["update", "uninstall"].includes(action) && instance.service?.installed && !instance.systemd) return "无法访问已有用户服务，请先修复 systemd 用户会话。";
@@ -91,6 +92,7 @@ export function createRemoteManager({ call, toast }) {
     if (!status.instance.installed) return "请先安装 Magpie。";
     if (status.instance.web?.tls) return "已有 Web 配置了 TLS，请使用服务器原有访问方式。";
     if (!status.instance.web?.enabled) return "请先启用 Web。";
+    if (!status.instance.capabilities?.includes("daemon_web")) return "当前程序未提供管理链接命令，请先更新 Magpie。";
     if (status.instance.service?.state !== "running") return "请先启动远端服务。";
     return "";
   }
@@ -131,8 +133,8 @@ export function createRemoteManager({ call, toast }) {
       const button = $("remote-action-" + action), reason = actionReason(action);
       button.disabled = Boolean(reason); button.title = reason || "预览变更后确认执行";
     }
-    text("remote-action-hint", baseReason() || (instance?.installed ? "每次变更前会先展示操作预览，确认后交给远端后台执行。" : "安装到当前 SSH 用户的默认位置；安装程序后，可再启用 Web 与用户服务。"));
-    text("remote-service-hint", instance && !instance.systemd ? "未检测到 systemd，启停、重启和启用 Web 不可用；程序安装、更新和卸载仍可使用。" : "启用 Web 会配置用户服务；服务启停不会断开 SSH 连接。");
+    text("remote-action-hint", baseReason() || (instance?.installed ? status.actions?.update?.enabled === false ? status.actions.update.reason : "已按当前程序的命令能力检查，每次变更前会展示操作预览。" : "安装到当前 SSH 用户的默认位置；安装程序后，可再启用 Web 与用户服务。"));
+    text("remote-service-hint", instance && !instance.systemd ? "未检测到 systemd，无法管理用户服务；其他操作是否可用见对应按钮提示。" : instance?.installed && !instance.service?.installed ? (status.actions?.enable_web?.enabled ? "尚未安装用户服务。请先点击「启用 Web」创建并启动服务，再使用启停按钮。" : "尚未安装用户服务。" + (status.actions?.enable_web?.reason || "请先检测环境。")) : "启用 Web 会配置用户服务；服务启停不会断开 SSH 连接。");
     const reason = webReason();
     $("remote-open-web").disabled = Boolean(reason) || webLoading;
     $("remote-open-web").title = reason || "通过仅监听本机的 SSH 通道生成访问地址";
@@ -161,7 +163,7 @@ export function createRemoteManager({ call, toast }) {
   function syncPreview() {
     if (!dialog.open) return;
     dialog.setAttribute("aria-busy", String(previewLoading || submitting));
-    $("remote-apply").disabled = !preview || previewLoading || submitting || Boolean(actionReason(previewAction)) || (previewAction === "update" && passphrase.value.length < 12);
+    $("remote-apply").disabled = !preview || previewLoading || submitting || Boolean(actionReason(previewAction)) || (preview?.requiresBackupPassphrase && passphrase.value.length < 12);
     text("remote-apply", submitting ? "正在提交…" : previewAction ? "确认" + actionLabels[previewAction] : "确认执行");
     passphrase.disabled = submitting;
     $("remote-show-passphrase").disabled = submitting;
@@ -262,9 +264,9 @@ export function createRemoteManager({ call, toast }) {
       preview = result;
       text("remote-preview-summary", result.summary);
       list("remote-preview-changes", result.changes); list("remote-preview-warnings", result.warnings);
-      $("remote-passphrase-field").hidden = action !== "update";
-      passphrase.required = action === "update";
-      if (action === "update") passphrase.focus();
+      $("remote-passphrase-field").hidden = !result.requiresBackupPassphrase;
+      passphrase.required = result.requiresBackupPassphrase === true;
+      if (result.requiresBackupPassphrase) passphrase.focus();
     } catch (error) {
       if (current(id, epoch) && sequence === previewSequence && dialog.open) showError("remote-preview-error", errorMessage(error));
     } finally {
@@ -275,9 +277,9 @@ export function createRemoteManager({ call, toast }) {
   async function applyPreview(event) {
     event.preventDefault();
     if (!preview || submitting || actionReason(previewAction)) return;
-    if (previewAction === "update" && !passphrase.reportValidity()) return;
+    if (preview.requiresBackupPassphrase && !passphrase.reportValidity()) return;
     const id = row.connection.id, epoch = generation, action = previewAction, revision = preview.revision;
-    const credentials = action === "update" ? { backupPassphrase: passphrase.value } : undefined;
+    const credentials = preview.requiresBackupPassphrase ? { backupPassphrase: passphrase.value } : undefined;
     submitting = true; pendingSubmissions.add(id); dataRevision++;
     clearPassphrase(); showError("remote-preview-error", "");
     $("remote-preview-background").hidden = false;

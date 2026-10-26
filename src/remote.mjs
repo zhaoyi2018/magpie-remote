@@ -34,6 +34,7 @@ export function parseProbe(stdout) {
     service: { installed: fields.serviceInstalled === "true", state: fields.systemd !== "true" ? "unavailable" : fields.serviceActive === "active" ? "running" : ["inactive", "failed", ""].includes(fields.serviceActive ?? "") ? "stopped" : "unknown" },
     web: { enabled: fields.webEnabled === "true", port: Number(fields.webPort) || 3430, tls: fields.webTLS === "true" },
     linger: fields.linger === "yes", locked: fields.locked === "true", tools: (fields.tools ?? "").trim().split(/\s+/).filter(Boolean),
+    capabilities: (fields.capabilities ?? "").trim().split(/\s+/).filter(Boolean),
   };
 }
 
@@ -152,7 +153,11 @@ export class RemoteManager {
       if (record.operation?.state === "unknown") await this.#reconcile(id, record, signal);
       await this.#save();
     }
-    return { ...copy(record), stale: this.sessions.status(id).state !== "connected" };
+    const actions = record.instance && Object.fromEntries(remoteActions.map((action) => {
+      try { this.#validate(action, record.instance); return [action, { enabled: true }]; }
+      catch (error) { return [action, { enabled: false, reason: error.message, code: error.code }]; }
+    }));
+    return { ...copy(record), ...(actions && { actions }), stale: this.sessions.status(id).state !== "connected" };
   }
 
   async #reconcile(id, record, signal) {
@@ -173,8 +178,6 @@ export class RemoteManager {
   #validate(action, instance) {
     if (!remoteActions.includes(action)) throw new OperationError("REMOTE_ACTION_INVALID", "未知的远程管理操作");
     if (instance.platform !== "Linux" || instance.container) throw new OperationError("REMOTE_UNSUPPORTED", "首版支持普通 Linux 用户安装；容器请通过镜像管理部署");
-    const version = instance.version?.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
-    if (instance.installed && (!version || !(Number(version[1]) > 0 || Number(version[2]) > 1 || Number(version[2]) === 1 && Number(version[3]) >= 1472))) throw new OperationError("REMOTE_VERSION_UNSUPPORTED", "此安装版本未验证，请在服务器升级到 0.1.1472 或更新版本后管理");
     if (instance.locked) throw new OperationError("REMOTE_BUSY", "远端存在未释放的管理操作锁，请先核实操作状态");
     if (action === "install") {
       if (instance.installed || instance.service.installed) throw new OperationError("REMOTE_ALREADY_INSTALLED", "检测到已有程序或服务，请使用现有安装");
@@ -188,6 +191,21 @@ export class RemoteManager {
     if (!instance.tools.includes("sha256sum")) throw new OperationError("REMOTE_PREREQUISITE", "变更需要远端 sha256sum 复核程序和服务文件");
     if (action === "uninstall" && instance.service.installed && !instance.systemd) throw new OperationError("REMOTE_NO_SYSTEMD", "无法访问已有用户服务，未删除程序");
     if (action === "uninstall" && instance.binary !== instance.managedBinary) throw new OperationError("REMOTE_EXTERNAL_INSTALL", "自动卸载仅支持当前用户的 ~/.local/bin/magpie，请使用原安装方式处理其他路径");
+    if (action === "install") return;
+    if (!Array.isArray(instance.capabilities)) throw new OperationError("REMOTE_CAPABILITIES_UNKNOWN", "请重新检测环境，读取此安装的命令能力");
+    const requireCommand = (capability, command) => {
+      if (!instance.capabilities.includes(capability)) throw new OperationError("REMOTE_CAPABILITY_UNSUPPORTED", "当前程序的帮助信息未确认支持 " + command + "，请在服务器核对或更新程序");
+    };
+    if (action === "update") {
+      requireCommand("update", "magpie update");
+      if (!instance.capabilities.includes("backup") && !instance.tools.includes("tar")) throw new OperationError("REMOTE_PREREQUISITE", "当前程序未提供官方备份命令，更新前需要远端 tar 保存配置归档");
+      if (instance.service.state === "running") { requireCommand("daemon_restart", "magpie daemon restart"); requireCommand("healthcheck", "magpie healthcheck"); }
+    }
+    if (["start", "stop", "restart"].includes(action)) requireCommand("daemon_" + action, "magpie daemon " + action);
+    if (["start", "restart", "enable_web"].includes(action)) requireCommand("healthcheck", "magpie healthcheck");
+    if (action === "enable_web") requireCommand("daemon_install_web", "magpie daemon install --web --addr");
+    if (action === "uninstall" && instance.service.installed) requireCommand("daemon_uninstall", "magpie daemon uninstall");
+    if (action === "uninstall" && !instance.tools.includes("readlink")) throw new OperationError("REMOTE_PREREQUISITE", "卸载需要远端 readlink 核实默认安装路径");
   }
 
   async preview(id, action, { signal } = {}) {
@@ -198,9 +216,12 @@ export class RemoteManager {
     const release = action === "install" ? await this.release(instance.architecture) : undefined;
     const warnings = [], changes = [];
     if (action === "install") changes.push(`下载并校验官方 CLI ${release.version}`, "安装到 " + instance.managedBinary, "本次只安装程序，随后可启用用户服务与管理页面");
+    const backupMode = action === "update" ? (instance.capabilities.includes("backup") ? "encrypted" : "archive") : undefined;
     if (action === "update") {
-      changes.push("使用本次口令创建远端加密备份，并保留旧程序", "执行官方更新" + (instance.service.state === "running" ? "，重启现有服务并检查健康状态" : "，保持服务未运行状态"));
-      warnings.push("更新可能中断现有请求；备份不包含订阅和插件登录，恢复后可能需要重新登录", "备份位于远端 Magpie 配置旁的 magpie-remote/backups/，请保存本次口令；配置迁移后的回退需要单独验证");
+      changes.push(backupMode === "encrypted" ? "使用本次口令创建远端加密备份，并保留旧程序" : "先保存当前配置目录的 config.tar.gz 归档及旧程序；配置目录不存在时记录为空", "执行官方更新" + (instance.service.state === "running" ? "，重启现有服务并检查健康状态" : "，保持服务未运行状态"));
+      if (backupMode === "encrypted") warnings.push("备份不包含订阅和插件登录，恢复后可能需要重新登录", "请保存本次备份口令，恢复加密配置时需要它");
+      else warnings.push("当前程序未提供官方备份命令，配置归档未加密，可能含供应商密钥与登录信息；仅保存在远端当前用户可访问的目录，请妥善保管", "配置归档与官方加密备份格式不同，需要在服务器手动恢复，不提供自动回退");
+      warnings.push("更新可能中断现有请求；备份位于远端 Magpie 配置旁的 magpie-remote/backups/，配置迁移后的回退需要单独验证");
     }
     if (action === "enable_web") {
       changes.push("安装或更新当前用户的 Magpie 服务并启动", "管理页面仅监听远端 127.0.0.1:3430，通过 SSH 本地转发访问");
@@ -214,9 +235,9 @@ export class RemoteManager {
     }
     if (!instance.linger && ["start", "enable_web"].includes(action)) warnings.push("未确认启用 linger，退出 SSH 后用户服务可能停止；需要时在服务器配置 loginctl enable-linger");
     const revision = randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "");
-    this.#previews.set(id, { action, revision, baseline: hash(instance), profile: profileRevision(profile), instance, release, expires: Date.now() + 300000 });
+    this.#previews.set(id, { action, revision, baseline: hash(instance), profile: profileRevision(profile), instance, release, backupMode, expires: Date.now() + 300000 });
     record.instance = instance; record.observedAt = new Date().toISOString(); await this.#save();
-    return { connectionId: id, action, revision, summary: labels[action], changes, warnings, requiresBackupPassphrase: action === "update" };
+    return { connectionId: id, action, revision, summary: labels[action], changes, warnings, requiresBackupPassphrase: backupMode === "encrypted", ...(backupMode && { backupMode }) };
   }
 
   async apply(id, action, revision, { backupPassphrase } = {}) {
@@ -228,7 +249,7 @@ export class RemoteManager {
     if (record.operation?.revision === revision) return copy(record.operation);
     if (record.operation?.state === "unknown") throw new OperationError("REMOTE_BUSY", "上次操作结果待核实，请先连接并检测");
     if (!preview || preview.action !== action || preview.revision !== revision || preview.expires < Date.now() || preview.profile !== profileRevision(profile)) throw new OperationError("REMOTE_PREVIEW_STALE", "操作预览已过期或连接配置已变化，请重新预览");
-    if (action === "update" && (typeof backupPassphrase !== "string" || backupPassphrase.length < 12 || backupPassphrase.length > 1024 || /[\x00-\x1f\x7f]/.test(backupPassphrase))) throw new OperationError("REMOTE_PASSPHRASE_REQUIRED", "请填写至少 12 个字符的本次备份口令，不能包含换行");
+    if (preview.backupMode === "encrypted" && (typeof backupPassphrase !== "string" || backupPassphrase.length < 12 || backupPassphrase.length > 1024 || /[\x00-\x1f\x7f]/.test(backupPassphrase))) throw new OperationError("REMOTE_PASSPHRASE_REQUIRED", "请填写至少 12 个字符的本次备份口令，不能包含换行");
     this.#connected(id);
     const operation = { id: randomUUID(), action, revision, state: "running", step: "checking", message: "正在复核环境", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     const previous = record.operation;
@@ -251,8 +272,8 @@ export class RemoteManager {
       operation.step = "executing"; operation.message = labels[operation.action] + "中，刷新页面后可继续查看";
       await this.#save();
       const script = actionScript(operation.action, instance, operation.id, preview.release);
-      const command = operation.action === "update" ? "sh -c '" + script.replaceAll("'", "'\\''") + "'" : "sh -s";
-      const input = operation.action === "update" ? passphrase + "\n" : script;
+      const command = preview.backupMode === "encrypted" ? "sh -c '" + script.replaceAll("'", "'\\''") + "'" : "sh -s";
+      const input = preview.backupMode === "encrypted" ? passphrase + "\n" : script;
       passphrase = undefined;
       const response = await this.sessions.execute(id, command, { input, timeoutMs: 600000, maxBytes: 65536 });
       if (response.code !== 0) throw new OperationError(response.code === 75 ? "REMOTE_BUSY" : "REMOTE_ACTION_FAILED", response.code === 75 ? "远端操作锁被占用，未重复执行" : "远端操作未成功结束，请检查当前状态和远端服务；错误码 " + response.code);
@@ -282,6 +303,7 @@ export class RemoteManager {
     this.#connected(id);
     const instance = await this.#probe(id);
     if (!instance.installed || !instance.web.enabled || instance.web.tls) throw new OperationError("REMOTE_WEB_UNAVAILABLE", "请先启用回环 HTTP 管理页面；已有 TLS 服务请使用其原访问方式");
+    if (!instance.capabilities.includes("daemon_web")) throw new OperationError("REMOTE_CAPABILITY_UNSUPPORTED", "当前程序的帮助信息未确认支持 magpie daemon web，请更新程序后获取管理链接");
     const response = await this.sessions.execute(id, webLinkCommand(instance), { timeoutMs: 15000, maxBytes: 16384 });
     const text = response.stdout.replace(/\x1b\[[0-9;]*m/g, "");
     const match = text.match(/http:\/\/(?:127\.0\.0\.1|localhost):([0-9]+)\/\?k=([A-Za-z0-9._~-]{16,256})/);

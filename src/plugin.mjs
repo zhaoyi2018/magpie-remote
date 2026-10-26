@@ -104,7 +104,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       execute({ connectionId, action }, ctx = {}) { return serial(connectionId, () => remote.preview(connectionId, action, { signal: ctx.abort })); },
     },
     remote_apply: {
-      description: "Start a previously previewed remote Magpie action using its revision and return a background operation immediately. Query remote_status for progress; never retry an unknown result. Updates require a backup passphrase entered separately on the management page.",
+      description: "Start a previously previewed remote Magpie action using its revision and return a background operation immediately. Query remote_status for progress; never retry an unknown result. The preview selects official encrypted backup or a clearly disclosed local config archive; encrypted backups require a passphrase entered separately on the management page.",
       args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, revision: { ...revisionSchema, description: "The short-lived revision returned by remote_preview for this action" } }),
       execute({ connectionId, action, revision }, ctx = {}) {
         return serial(connectionId, async () => {

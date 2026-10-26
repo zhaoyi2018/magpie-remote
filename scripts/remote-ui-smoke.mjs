@@ -26,7 +26,8 @@ async function remoteFixture(context) {
     platform: "Linux", architecture: "x86_64", container: false,
     installed: false, systemd: true, serviceInstalled: false,
     serviceActive: "inactive", webEnabled: false, webTLS: false,
-    version: "0.1.1472", locked: false, reconcile: "", nextUnknown: false,
+    version: "0.1.1327", locked: false, reconcile: "", nextUnknown: false,
+    capabilities: "update backup healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
   };
   const executions = [];
   let actionGate = null;
@@ -37,7 +38,7 @@ async function remoteFixture(context) {
       managedBinary: "/home/tester/.local/bin/magpie", binaryHash: state.installed ? "a".repeat(64) : "",
       configDirectory: "/home/tester/.config/magpie", unit: "/home/tester/.config/systemd/user/magpie.service",
       unitHash: state.serviceInstalled ? "b".repeat(64) : "", webPort: "3430", linger: "yes",
-      tools: "curl sha256sum base64 mktemp install readlink",
+      tools: "curl sha256sum base64 mktemp install readlink tar",
     };
     return "MIGPIE_REMOTE_V1\n" + Object.entries(values).map(([key, value]) => key + "\t" + Buffer.from(String(value)).toString("base64")).join("\n") + "\n";
   }
@@ -62,7 +63,7 @@ async function remoteFixture(context) {
           const script = command === "sh -s" ? input : command;
           let action;
           if (script.includes("download.XXXXXXXX")) action = "install";
-          else if (script.includes("config.magpie")) action = "update";
+          else if (script.includes("config.magpie") || script.includes("config.tar.gz")) action = "update";
           else if (script.includes("daemon install --web")) action = "enable_web";
           else if (script.includes("daemon restart")) action = "restart";
           else if (script.includes("daemon start")) action = "start";
@@ -193,9 +194,29 @@ try {
   assert.equal(await field("remote-action-enable_web").isDisabled(), true); assert.equal(await field("remote-open-web").isDisabled(), true);
   fixture.state.webTLS = false; fixture.state.platform = "Darwin"; await detect(); assert.equal(await field("remote-action-update").isDisabled(), true);
   fixture.state.platform = "Linux"; await detect();
+  assert.equal(await field("remote-action-start").isDisabled(), true);
+  assert.match(await field("remote-service-hint").textContent(), /请先点击「启用 Web」/);
+  assert.equal(await field("remote-action-enable_web").isEnabled(), true);
   await preview("enable_web"); await field("remote-apply").click();
   await field("remote-operation-state").filter({ hasText: "已完成" }).waitFor(); await waitEnabled("remote-open-web");
-  console.log("Remote UI: platform, container, existing service/systemd, unknown service and TLS capability checks passed.");
+  console.log("Remote UI: legacy 0.1.1327 can enable its first service; platform, container, systemd, service and TLS checks passed.");
+
+  const capabilities = fixture.state.capabilities;
+  fixture.state.capabilities = capabilities.replace("backup ", ""); await detect();
+  await preview("update");
+  assert.equal(await field("remote-passphrase-field").isVisible(), false);
+  assert.ok((await field("remote-preview-warnings").textContent()).includes("未加密"));
+  await waitEnabled("remote-apply");
+  await field("remote-apply").click();
+  await ui.locator("#remote-preview[open]").waitFor({ state: "hidden" });
+  await field("remote-operation-state").filter({ hasText: "已完成" }).waitFor();
+  await until(() => fixture.executions.filter((item) => item.action === "update").at(-1)?.passphrase.includes("config.tar.gz"), "Archive update was not dispatched");
+  fixture.state.capabilities = capabilities.replace("update ", ""); await detect();
+  assert.equal(await field("remote-action-update").isDisabled(), true);
+  assert.match(await field("remote-action-hint").textContent(), /magpie update/);
+  assert.equal(await field("remote-action-stop").isEnabled(), true);
+  fixture.state.capabilities = capabilities; await detect();
+  console.log("Remote UI: legacy archive backup preview, no passphrase submission and action-specific capability reasons passed.");
 
   const webBefore = count("remote_web"); await field("remote-web-port").fill("4444"); await field("remote-web-port").focus();
   await page.waitForTimeout(2200); assert.equal(await field("remote-web-port").inputValue(), "4444");
