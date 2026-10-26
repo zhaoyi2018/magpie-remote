@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { OperationError } from "../src/errors.mjs";
 import { RemoteManager, parseProbe } from "../src/remote.mjs";
 import { probeScript } from "../src/remote-scripts.mjs";
+import { backupInventoryScript } from "../src/remote-backups.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { temporary, until } from "./helpers.mjs";
 
@@ -16,7 +17,7 @@ const baseProbe = {
   installed: "true", systemd: "true", serviceInstalled: "true", serviceActive: "active",
   webEnabled: "true", webPort: "3430", webTLS: "false", linger: "yes", locked: "false",
   tools: "curl sha256sum base64 mktemp install readlink tar",
-  capabilities: "update backup healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
+  capabilities: "update backup restore healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
 };
 const managementKey = "fixture-management-key-123456789";
 const release = {
@@ -44,6 +45,10 @@ class FakeSessions {
   calls = [];
   forwards = [];
   added = [];
+  removed = [];
+  forgotten = [];
+  logs = [];
+  backupRows = [];
   onProbe;
   onAction;
   onReconcile;
@@ -56,14 +61,16 @@ class FakeSessions {
     const input = options.input;
     let kind;
     if (command === "sh -s" && input === probeScript) kind = "probe";
+    else if (command === "sh -s" && input === backupInventoryScript) kind = "backups";
     else if (command === "sh -s" && /cat "\$base\/operations\/[a-f0-9-]+\/state"/.test(input ?? "")) kind = "reconcile";
     else if (/ daemon web$/.test(command)) kind = "web";
-    else if ((command === "sh -s" && input?.includes("MIGPIE_DONE")) || command.startsWith("sh -c ")) kind = "action";
+    else if (command === "sh -s" && input?.includes("MIGPIE_DONE")) kind = "action";
     else throw new Error("Unexpected fixture command: " + command);
     const call = { kind, id, command, ...options };
     this.calls.push(call);
     if (kind === "probe") return this.onProbe ? this.onProbe(call) : response(probe(this.fields));
     if (kind === "action") return this.onAction ? this.onAction(call) : success();
+    if (kind === "backups") return response("MIGPIE_BACKUPS_V1\n" + this.backupRows.join("\n") + (this.backupRows.length ? "\n" : ""));
     if (kind === "reconcile") return this.onReconcile ? this.onReconcile(call) : response(this.remoteState + "\n");
     return this.webResponse;
   }
@@ -74,6 +81,10 @@ class FakeSessions {
     this.forwards.push(forward);
     return structuredClone(forward);
   }
+
+  async removeForward(id, forwardId) { this.removed.push(forwardId); this.forwards = this.forwards.filter((item) => item.id !== forwardId); }
+  forgetForward(id, forwardId) { this.forgotten.push(forwardId); }
+  recordLog(id, level, message) { this.logs.push({ level, message }); }
 
   actions() { return this.calls.filter((call) => call.kind === "action"); }
 }
@@ -102,9 +113,9 @@ async function completed(h) {
   return operation;
 }
 
-async function start(h, action = "restart", options) {
+async function start(h, action = "restart") {
   const preview = await h.remote.preview(h.profile.id, action);
-  const operation = await h.remote.apply(h.profile.id, action, preview.revision, options);
+  const operation = await h.remote.apply(h.profile.id, action, preview.revision);
   return { preview, operation };
 }
 
@@ -164,7 +175,7 @@ test("version 0.1.1327 can update and enable its first service when its help adv
   assert.equal(status.actions.start.code, "REMOTE_NO_SERVICE");
   await assert.rejects(h.remote.preview(h.profile.id, "start"), { code: "REMOTE_NO_SERVICE" });
   assert.equal((await h.remote.preview(h.profile.id, "enable_web")).action, "enable_web");
-  await start(h, "update", { backupPassphrase: "fixture-backup-passphrase" });
+  await start(h, "update");
   assert.equal((await completed(h)).state, "succeeded");
 });
 
@@ -188,7 +199,7 @@ test("legacy update without the official backup command uses an explicit archive
   const h = await fixture(t, { version: "magpie 0.1.1327", capabilities: "update", serviceInstalled: "false", serviceActive: "inactive", unitHash: "" });
   const preview = await h.remote.preview(h.profile.id, "update");
   assert.equal(preview.backupMode, "archive");
-  assert.equal(preview.requiresBackupPassphrase, false);
+  assert.equal(Object.hasOwn(preview, "requiresBackupPassphrase"), false);
   assert.ok(preview.warnings.some((warning) => warning.includes("未加密")));
   await h.remote.apply(h.profile.id, "update", preview.revision);
   assert.equal((await completed(h)).state, "succeeded");
@@ -305,34 +316,33 @@ test("a disconnect during the preflight probe fails without creating an uncertai
   assert.equal(h.sessions.actions().length, 0);
 });
 
-test("update sends a shell-sensitive backup passphrase only through stdin and excludes it from every local record", async (t) => {
+test("update always archives configuration without a passphrase even when official backup commands exist", async (t) => {
   const h = await fixture(t);
-  const passphrase = " fixture'$(touch /tmp/never-run)\\secret; ending ";
-  const { preview } = await start(h, "update", { backupPassphrase: passphrase });
+  const { preview } = await start(h, "update");
   const operation = await completed(h);
   assert.equal(operation.state, "succeeded");
-  assert.equal(preview.requiresBackupPassphrase, true);
+  assert.equal(preview.backupMode, "archive");
+  assert.equal(Object.hasOwn(preview, "requiresBackupPassphrase"), false);
+  assert.equal(Object.hasOwn(preview, "passphraseMinimumLength"), false);
   assert.equal(h.sessions.actions().length, 1);
   const action = h.sessions.actions()[0];
-  assert.equal(action.input, passphrase + "\n");
-  assert.ok(!action.command.includes(passphrase));
-  assert.ok(action.command.startsWith("sh -c "));
+  assert.equal(action.command, "sh -s");
+  assert.match(action.input, /tar -czf/);
+  assert.ok(!action.input.includes('"$bin" backup'));
+  assert.ok(!action.input.includes("read -r passphrase"));
+  assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf('"$bin" update'));
   assert.equal(action.maxBytes, 65536);
   assert.match(operation.result.backupDirectory, /\/magpie-remote\/backups\/[a-f0-9-]+$/);
-  for (const value of [JSON.stringify(preview), JSON.stringify(operation), JSON.stringify(await h.remote.status(h.profile.id)), await readFile(h.remote.file, "utf8"), await readFile(h.store.file, "utf8")]) {
-    assert.ok(!value.includes(passphrase), "backup passphrase appeared in a local response or file");
-  }
 });
 
-test("invalid backup passphrases cannot queue an update or consume its preview", async (t) => {
-  const h = await fixture(t);
-  const preview = await h.remote.preview(h.profile.id, "update");
-  for (const passphrase of [undefined, "short", "valid-length-but\nnew-line", "x".repeat(1025)]) {
-    await assert.rejects(h.remote.apply(h.profile.id, "update", preview.revision, { backupPassphrase: passphrase }), { code: "REMOTE_PASSPHRASE_REQUIRED" });
-  }
-  assert.equal(await h.remote.operation(h.profile.id), null);
-  assert.equal(h.sessions.actions().length, 0);
-});
+for (const action of ["backup", "update", "restore"]) {
+  test(`${action} requires tar even when official backup and restore commands exist`, async (t) => {
+    const h = await fixture(t, { tools: baseProbe.tools.replace(" tar", "") });
+    await assert.rejects(h.remote.preview(h.profile.id, action), { code: "REMOTE_PREREQUISITE" });
+    assert.equal(await h.remote.operation(h.profile.id), null);
+    assert.equal(h.sessions.actions().length, 0);
+  });
+}
 
 for (const [name, code, expectedCode] of [
   ["backup failed", 77, "REMOTE_ACTION_FAILED"],
@@ -343,7 +353,7 @@ for (const [name, code, expectedCode] of [
     const h = await fixture(t);
     const passphrase = "private-backup-phrase-123456";
     h.sessions.onAction = () => response("MIGPIE_DONE\n" + passphrase, code, "diagnostic-secret " + passphrase);
-    await start(h, "update", { backupPassphrase: passphrase });
+    await start(h, "update");
     const operation = await completed(h);
     assert.equal(operation.state, "failed");
     assert.equal(operation.error.code, expectedCode);
@@ -369,7 +379,7 @@ for (const [step, reason, backupReady, message] of [
       const operation = await h.remote.operation(h.profile.id);
       return response(`untrusted-${passphrase}\nMIGPIE_RESULT_V1\t${operation.id}\t${step}\t1\t${reason}\t${backupReady}\n`, 1, "diagnostic-secret");
     };
-    await start(h, "update", { backupPassphrase: passphrase });
+    await start(h, "update");
     const operation = await completed(h);
     assert.equal(operation.state, "failed");
     assert.equal(operation.step, step);
@@ -412,7 +422,7 @@ test("a success exit with contradictory structured evidence remains unknown", as
 test("unknown update reconciliation restores the failure stage and backup from a matching result", async (t) => {
   const h = await fixture(t);
   h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection"); };
-  const { operation } = await start(h, "update", { backupPassphrase: "fixture-backup-passphrase" });
+  const { operation } = await start(h, "update");
   await completed(h);
   h.sessions.remoteState = `failed\nMIGPIE_RESULT_V1\t${operation.id}\tupdating\t1\tnetwork\ttrue`;
   const status = await h.remote.status(h.profile.id, { refresh: true });
@@ -443,9 +453,9 @@ for (const [name, fields, shouldRestart] of [
 ]) {
   test(`updating a ${name} service preserves its running intent`, async (t) => {
     const h = await fixture(t, fields);
-    await start(h, "update", { backupPassphrase: "fixture-backup-passphrase" });
+    await start(h, "update");
     assert.equal((await completed(h)).state, "succeeded");
-    assert.equal(h.sessions.actions()[0].command.includes('"$bin" daemon restart'), shouldRestart);
+    assert.equal(h.sessions.actions()[0].input.includes('"$bin" daemon restart'), shouldRestart);
   });
 }
 
@@ -640,3 +650,153 @@ for (const [name, rule] of [
     assert.deepEqual(h.sessions.forwards, before);
   });
 }
+
+for (const [version, state] of [["magpie 0.1.1500", "available"], ["v0.1.1501", "current"], ["magpie version 0.1.1502", "current"], ["development build", "unknown"]]) {
+  test(`release comparison for ${version} reports ${state} and rejects redundant or unconfirmed updates`, async (t) => {
+    const h = await fixture(t, { version });
+    const status = await h.remote.status(h.profile.id, { refresh: true });
+    assert.equal(status.update.state, state);
+    assert.equal(status.actions.update.enabled, state === "available");
+    if (state !== "available") {
+      await assert.rejects(h.remote.preview(h.profile.id, "update"), { code: state === "current" ? "REMOTE_ALREADY_CURRENT" : "REMOTE_UPDATE_UNKNOWN" });
+      assert.equal(h.sessions.actions().length, 0);
+    }
+    assert.equal(status.actions.restart.enabled, true);
+  });
+}
+
+test("an unavailable release feed does not hide service controls or claim the current version is latest", async (t) => {
+  const h = await fixture(t);
+  h.remote.release = async () => { throw new OperationError("REMOTE_RELEASE_UNAVAILABLE", "fixture feed unavailable"); };
+  const status = await h.remote.status(h.profile.id, { refresh: true });
+  assert.equal(status.update.state, "unknown");
+  assert.equal(status.update.error.code, "REMOTE_RELEASE_UNAVAILABLE");
+  assert.equal(status.actions.update.enabled, false);
+  assert.equal(status.actions.stop.enabled, true);
+  assert.equal((await h.remote.preview(h.profile.id, "stop")).action, "stop");
+});
+
+const backupId = "3dba4545-7968-4d0d-91cc-eb06c5c1bb7f";
+function backupRow(format = "archive", fingerprint = "f".repeat(64)) {
+  return [backupId, format, "1234", "true", "1760000000", Buffer.from("magpie 0.1.1499").toString("base64"), fingerprint].join("\t");
+}
+
+test("remote backup inventory lists metadata without exposing backup contents and binds restores to the selected preview", async (t) => {
+  const h = await fixture(t);
+  h.sessions.backupRows = [backupRow()];
+  const listing = await h.remote.backups(h.profile.id);
+  assert.equal(listing.backups[0].format, "archive");
+  assert.equal(listing.backups[0].hasBinary, true);
+  assert.equal(listing.backups[0].size, 1234);
+  assert.equal(listing.backups[0].version, "magpie 0.1.1499");
+  const preview = await h.remote.preview(h.profile.id, "restore", { backupId });
+  assert.equal(preview.backupId, backupId);
+  assert.equal(Object.hasOwn(preview, "passphraseMinimumLength"), false);
+  await h.remote.apply(h.profile.id, "restore", preview.revision);
+  const operation = await completed(h);
+  assert.equal(operation.state, "succeeded");
+  const { command, input } = h.sessions.actions()[0];
+  assert.equal(command, "sh -s");
+  assert.ok(input.includes(backupId));
+  assert.ok(input.indexOf("tar -czf") < input.indexOf('run_step stopping "$bin" daemon stop'));
+  assert.ok(input.indexOf('run_step stopping "$bin" daemon stop') < input.indexOf('run_step restoring mv -- "$target"'));
+  assert.ok(input.includes('run_step starting "$bin" daemon start'));
+  assert.ok(!input.includes('"$bin" restore'));
+  assert.ok(h.sessions.logs.some((entry) => entry.message.includes(operation.result.backupDirectory)));
+});
+
+test("creating a manual archive backup returns its directory without updating or restarting Magpie", async (t) => {
+  const h = await fixture(t);
+  const { preview } = await start(h, "backup");
+  const operation = await completed(h);
+  assert.equal(preview.action, "backup");
+  assert.equal(operation.action, "backup");
+  assert.equal(operation.state, "succeeded");
+  assert.ok(operation.result.backupDirectory.endsWith(operation.id));
+  const { command, input } = h.sessions.actions()[0];
+  assert.equal(command, "sh -s");
+  assert.ok(input.includes("tar -czf"));
+  assert.ok(!input.includes('"$bin" update'));
+  assert.ok(!input.includes('"$bin" daemon'));
+  assert.ok(h.sessions.logs.every((entry) => !entry.message.includes("更新 Magpie")));
+});
+
+test("restoring a stopped archive needs no official backup, restore or service commands", async (t) => {
+  const h = await fixture(t, { capabilities: "update", serviceActive: "inactive" });
+  h.sessions.backupRows = [backupRow()];
+  const preview = await h.remote.preview(h.profile.id, "restore", { backupId });
+  await h.remote.apply(h.profile.id, "restore", preview.revision);
+  assert.equal((await completed(h)).state, "succeeded");
+  assert.ok(!h.sessions.actions()[0].input.includes('"$bin" daemon'));
+});
+
+test("a missing-config snapshot can restore an absent configuration with a pre-restore backup", async (t) => {
+  const h = await fixture(t);
+  h.sessions.backupRows = [backupRow("absent")];
+  const preview = await h.remote.preview(h.profile.id, "restore", { backupId });
+  assert.ok(preview.changes.some((change) => change.includes("无配置目录状态")));
+  await h.remote.apply(h.profile.id, "restore", preview.revision);
+  assert.match((await completed(h)).result.backupDirectory, /backups\//);
+});
+
+test("historical encrypted backups require manual restore but can be deleted after Magpie is uninstalled", async (t) => {
+  const h = await fixture(t);
+  h.sessions.backupRows = [backupRow("encrypted")];
+  assert.equal((await h.remote.backups(h.profile.id)).backups[0].format, "encrypted");
+  await assert.rejects(h.remote.preview(h.profile.id, "restore", { backupId }), { code: "REMOTE_BACKUP_FORMAT" });
+  await assert.rejects(h.remote.preview(h.profile.id, "delete_backup", { backupId: "../../elsewhere" }), { code: "REMOTE_BACKUP_INVALID" });
+  h.sessions.fields = { installed: "false", binary: "", version: "", binaryHash: "", serviceInstalled: "false", unitHash: "" };
+  const preview = await h.remote.preview(h.profile.id, "delete_backup", { backupId });
+  await h.remote.apply(h.profile.id, "delete_backup", preview.revision);
+  assert.equal((await completed(h)).state, "succeeded");
+  assert.match(h.sessions.actions()[0].input, /set_step deleting_backup/);
+  assert.ok(!h.sessions.actions()[0].input.includes('rm -rf'));
+});
+
+for (const action of ["stop", "uninstall"]) {
+  test(`successful ${action} closes only the managed Web tunnel and forgets its reconnect intent`, async (t) => {
+    const h = await fixture(t);
+    await h.remote.web(h.profile.id);
+    h.sessions.forwards.push({ id: "independent", targetPort: 9000 });
+    await start(h, action);
+    assert.equal((await completed(h)).state, "succeeded");
+    assert.deepEqual(h.sessions.removed, ["magpie-web"]);
+    assert.deepEqual(h.sessions.forgotten, ["magpie-web"]);
+    assert.deepEqual(h.sessions.forwards, [{ id: "independent", targetPort: 9000 }]);
+  });
+}
+
+test("refreshing an externally stopped service closes the Web tunnel and refuses a new management link", async (t) => {
+  const h = await fixture(t);
+  await h.remote.web(h.profile.id);
+  h.sessions.fields = { serviceActive: "inactive" };
+  await h.remote.status(h.profile.id, { refresh: true });
+  assert.deepEqual(h.sessions.removed, ["magpie-web"]);
+  await assert.rejects(h.remote.web(h.profile.id), { code: "REMOTE_WEB_UNAVAILABLE" });
+});
+
+test("unknown stop retains its tunnel until remote completion evidence confirms it stopped", async (t) => {
+  const h = await fixture(t);
+  await h.remote.web(h.profile.id);
+  h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture disconnected"); };
+  await start(h, "stop"); await completed(h);
+  assert.deepEqual(h.sessions.removed, []);
+  h.sessions.remoteState = "succeeded";
+  await h.remote.status(h.profile.id, { refresh: true });
+  assert.deepEqual(h.sessions.removed, ["magpie-web"]);
+  const before = h.sessions.logs.length;
+  await h.remote.status(h.profile.id);
+  assert.equal(h.sessions.logs.length, before);
+});
+
+test("a failed remote update emits one error into runtime logs without leaking stdout or the backup phrase", async (t) => {
+  const h = await fixture(t);
+  const secret = "private-backup-phrase-1234";
+  h.sessions.onAction = async () => response(`raw-secret-${secret}\nMIGPIE_RESULT_V1\t${(await h.remote.operation(h.profile.id)).id}\tupdating\t1\tnetwork\ttrue\n`, 1);
+  await start(h, "update");
+  const operation = await completed(h);
+  assert.equal(h.sessions.logs.filter((entry) => entry.level === "error").length, 1);
+  assert.ok(h.sessions.logs.find((entry) => entry.level === "error").message.includes(operation.result.backupDirectory));
+  assert.ok(h.sessions.logs.some((entry) => entry.message.includes("执行官方更新失败")));
+  assert.ok(!JSON.stringify(h.sessions.logs).includes(secret));
+});

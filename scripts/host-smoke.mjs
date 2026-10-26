@@ -60,7 +60,7 @@ try {
   });
   assert.equal(loaded.plugins.length, 1);
   assert.equal(loaded.plugins[0].error, undefined, loaded.plugins[0].error);
-  assert.equal(loaded.plugins[0].tools.length, 21);
+  assert.equal(loaded.plugins[0].tools.length, 22);
   assert.deepEqual(loaded.plugins[0].provides ?? [], [], "The SSH page must not register model providers");
   assert.deepEqual(await rpc("providers", {}), [], "The tools-only backend must leave the provider list empty");
   const call = async (name, args = {}) => JSON.parse((await rpc("tool", { spec: root, name, args, ms: 5000 })).text);
@@ -103,7 +103,7 @@ try {
   await call("remove_connection", { connectionId: fixture.profile.id, expectedRevision: saved.revision });
   assert.deepEqual(await call("connections"), []);
   assert.deepEqual(await call("status"), []);
-  console.log("Magpie host: 21 tools and no model providers registered; versioned edits and stale rejection, SSH authentication, c2s/s2c diagnostics/recovery and data round trips, backup/restore, retry cancellation, port release and runtime deletion passed.");
+  console.log("Magpie host: 22 tools and no model providers registered; versioned edits and stale rejection, SSH authentication, c2s/s2c diagnostics/recovery and data round trips, backup/restore, retry cancellation, port release and runtime deletion passed.");
   if (process.argv.includes("--ui")) {
     const harness = await startUIHarness({ getEndpoint: sandbox.getEndpoint });
     cleanup.unshift(() => harness.close());

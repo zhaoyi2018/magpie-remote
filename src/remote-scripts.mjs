@@ -1,4 +1,7 @@
-export const remoteActions = ["install", "update", "start", "stop", "restart", "enable_web", "uninstall"];
+import { backupIdPattern, backupInspection } from "./remote-backups.mjs";
+
+export const remoteActions = ["install", "update", "start", "stop", "restart", "enable_web", "backup", "restore", "delete_backup", "uninstall"];
+export const backupActions = ["update", "backup", "restore"];
 
 export function shellQuote(value) {
   if (typeof value !== "string" || /[\x00-\x1f\x7f]/.test(value)) throw new Error("远端参数无效");
@@ -33,7 +36,7 @@ if [ -n "$bin" ] && [ -x "$bin" ]; then
   has_command() { printf '%s\\n' "$commands" | grep -Eq "^$1([[:space:]]|$)"; }
   has_daemon() { printf '%s\\n' "$daemon" | tr '[]|' '   ' | grep -Eq "(^|[[:space:]])$1([[:space:]]|$)"; }
   capabilities=''
-  for command in update backup healthcheck; do
+  for command in update backup restore healthcheck; do
     if has_command "$command"; then capabilities="$capabilities $command"; fi
   done
   for action in install uninstall start stop restart web; do
@@ -72,20 +75,28 @@ mkdir "$lock" 2>/dev/null || { printf 'MIGPIE_LOCKED\\n'; exit 75; }
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 `;
 
-export function actionScript(action, instance, operationId, release) {
+export function actionScript(action, instance, operationId, release, selectedBackup) {
+  if (["restore", "delete_backup"].includes(action) && (!backupIdPattern.test(selectedBackup?.id ?? "") || !/^[a-f0-9]{64}$/.test(selectedBackup?.fingerprint ?? ""))) throw new Error("备份标识或校验值无效");
   const bin = shellQuote(instance.binary || instance.managedBinary);
+  const restoreCleanup = action === "restore" ? `  if [ -n "$restore_stage" ]; then
+    if [ "$restore_applied" = false ] && [ -d "$restore_stage/previous" ] && [ ! -e "$target" ] && [ ! -L "$target" ]; then mv -- "$restore_stage/previous" "$target"; fi
+    if [ "$restore_applied" = true ] || [ ! -e "$restore_stage/previous" ]; then rm -rf -- "$restore_stage"; fi
+  fi
+` : "";
   const prefix = common + `bin=${bin}
 job="$base/operations/${operationId}"
 step=preparing
 reason=command_failed
 backup_ready=false
 stage=''
+restore_stage=''
+restore_applied=false
 finish() {
   code=$?
   trap - EXIT
   set +e
   if [ -n "$stage" ]; then rm -f "$stage/magpie"; rmdir "$stage"; fi
-  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
+${restoreCleanup}  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
   if [ -f "$job/reason" ]; then reason=$(cat "$job/reason"); fi
   state=failed
   if [ "$code" -eq 0 ]; then state=succeeded; step=completed; reason=none; fi
@@ -102,7 +113,6 @@ trap finish EXIT
 mkdir -p "$job"
 printf running > "$job/state"
 set_step() { step=$1; printf '%s' "$step" > "$job/step"; }
-# The backup runs in a pipeline subshell; files retain its stage and reason.
 run_step() {
   set_step "$1"
   shift
@@ -141,30 +151,62 @@ run_step checking_version "$bin" --version
 printf 'MIGPIE_DONE\\n'
 `;
   }
-  if (action === "update") {
-    const backup = instance.capabilities?.includes("backup") ? `IFS= read -r passphrase
-printf '%s\\n' "$passphrase" | run_step backing_up "$bin" backup "$backup/config.magpie"
-unset passphrase
-[ -s "$backup/config.magpie" ] || exit 77
-` : `command -v tar >/dev/null
+  const selected = selectedBackup ? `root="$base/backups"
+[ ! -L "$root" ] || exit 78
+backup="$root/${selectedBackup.id}"
+${backupInspection}inspect_backup || exit 79
+[ "$fingerprint" = ${shellQuote(selectedBackup.fingerprint)} ] || exit 79
+selected="$backup"
+` : "";
+  if (action === "delete_backup") return prefix + selected + `set_step deleting_backup
+run_step deleting_backup rm -f "$selected/config.magpie" "$selected/config.tar.gz" "$selected/config.absent" "$selected/magpie" "$selected/version"
+run_step deleting_backup rmdir "$selected"
+printf 'MIGPIE_DONE\\n'
+`;
+  if (backupActions.includes(action)) {
+    const mutation = action === "update" ? 'run_step updating "$bin" update </dev/null\n' : action === "restore" ? `set_step restoring
+case "$format" in archive|absent) ;; *) exit 78 ;; esac
+# Stage the archive beside the target, keeping extraction away from live files.
+target=$(readlink -f -- "$config") || exit 78
+[ -n "$target" ] && [ "$target" != / ] || exit 78
+base_path=$(cd "$base" && pwd -P)
+case "$base_path/" in "$target/"*) exit 78 ;; esac
+case "$target/" in "$base_path/"*) exit 78 ;; esac
+if [ -e "$target" ]; then [ -d "$target" ] && [ ! -L "$target" ] || exit 78; fi
+restore_stage=$(mktemp -d "$(dirname "$target")/.magpie-restore.XXXXXXXX")
+if [ "$format" = archive ]; then
+  mkdir -m 700 "$restore_stage/config"
+  extract_config() {
+    tar -tzf "$selected/config.tar.gz" > "$job/archive-files" || return $?
+    if LC_ALL=C grep -Eq '(^/|(^|/)\\.\\.(/|$))' "$job/archive-files"; then return 78; fi
+    tar -xzf "$selected/config.tar.gz" --no-same-owner --no-same-permissions -C "$restore_stage/config"
+  }
+  run_step restoring extract_config
+fi
+${instance.service.state === "running" ? 'run_step stopping "$bin" daemon stop </dev/null\n' : ""}set_step restoring
+if [ -d "$target" ]; then run_step restoring mv -- "$target" "$restore_stage/previous"; fi
+if [ "$format" = archive ]; then run_step restoring mv -- "$restore_stage/config" "$target";
+elif [ -L "$config" ]; then run_step restoring rm -- "$config"; fi
+restore_applied=true
+` : "";
+    return prefix + selected + `command -v sha256sum >/dev/null
+command -v tar >/dev/null
 config=${shellQuote(instance.configDirectory)}
+set_step preparing_backup
+[ ! -L "$base/backups" ] || exit 78
+mkdir -p "$base/backups"
+backup="$base/backups/${operationId}"
+mkdir -m 700 "$backup"
+printf '%s' ${shellQuote(instance.version)} > "$backup/version"
+set_step backing_up
 if [ -d "$config" ]; then
   run_step backing_up tar -czf "$backup/config.tar.gz" -C "$config" .
   [ -s "$backup/config.tar.gz" ] || exit 77
 elif [ -e "$config" ] || [ -L "$config" ]; then exit 77
-else printf 'Configuration directory did not exist before update.\\n' > "$backup/config.absent"; fi
-`;
-    return prefix + `command -v sha256sum >/dev/null
-set_step preparing_backup
-mkdir -p "$base/backups"
-backup="$base/backups/${operationId}"
-mkdir -m 700 "$backup"
-set_step backing_up
-${backup}run_step saving_binary cp -p "$bin" "$backup/magpie"
+else printf 'Configuration directory did not exist before this operation.\\n' > "$backup/config.absent"; fi
+run_step saving_binary cp -p "$bin" "$backup/magpie"
 backup_ready=true
-run_step updating "$bin" update </dev/null
-${instance.service.state === "running" ? 'run_step restarting "$bin" daemon restart </dev/null\n' : ""}run_step checking_version "$bin" --version </dev/null
-${instance.service.state === "running" ? 'run_step healthcheck "$bin" healthcheck </dev/null\n' : ""}printf 'MIGPIE_DONE\\n'
+${mutation}${action !== "backup" && instance.service.state === "running" ? `run_step ${action === "restore" ? 'starting "$bin" daemon start' : 'restarting "$bin" daemon restart'} </dev/null\n` : ""}${action === "update" ? 'run_step checking_version "$bin" --version </dev/null\n' : ""}${action !== "backup" && instance.service.state === "running" ? 'run_step healthcheck "$bin" healthcheck </dev/null\n' : ""}printf 'MIGPIE_DONE\\n'
 `;
   }
   if (action === "enable_web") return prefix + `MAGPIE_ADDR=127.0.0.1:3425 run_step enabling_web "$bin" daemon install --web --addr 127.0.0.1:3430 </dev/null

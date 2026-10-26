@@ -43,6 +43,11 @@ export class SessionManager {
     return id === undefined ? views : views.find((item) => item.id === id) ?? { id, state: "disconnected", forwards: [] };
   }
 
+  recordLog(id, level, message) {
+    const session = this.#sessions.get(id);
+    if (session && ["info", "warn", "error"].includes(level)) this.#log(session, level, message);
+  }
+
   isActive(id) {
     return ["connecting", "connected"].includes(this.#sessions.get(id)?.state)
       || ["waiting", "connecting"].includes(this.#intents.get(id)?.phase);

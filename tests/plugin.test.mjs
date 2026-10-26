@@ -11,7 +11,7 @@ test("the package exposes a single OpenCode v1 plugin with JSON Schema tool argu
   const directory = await temporary(t);
   const hooks = await plugin.server({ directory }, { webUI: false });
   assert.deepEqual(Object.keys(hooks), ["tool"]);
-  assert.equal(Object.keys(hooks.tool).length, 21);
+  assert.equal(Object.keys(hooks.tool).length, 22);
   for (const tool of Object.values(hooks.tool)) {
     assert.equal(tool.args.type, "object");
     assert.equal(tool.args.additionalProperties, false);

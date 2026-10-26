@@ -100,15 +100,15 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
     },
     remote_preview: {
       description: "Probe and preview a named remote Magpie lifecycle action. Returns a short-lived revision and exact changes/warnings. Does not modify the remote machine. Linux only.",
-      args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions } }),
-      execute({ connectionId, action }, ctx = {}) { return serial(connectionId, () => remote.preview(connectionId, action, { signal: ctx.abort })); },
+      args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, backupId: { type: "string", pattern: "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$" } }, ["connectionId", "action"]),
+      execute({ connectionId, action, backupId }, ctx = {}) { return serial(connectionId, () => remote.preview(connectionId, action, { signal: ctx.abort, backupId })); },
     },
     remote_apply: {
-      description: "Start a previously previewed remote Magpie action using its revision and return a background operation immediately. Query remote_status for progress; never retry an unknown result. The preview selects official encrypted backup or a clearly disclosed local config archive; encrypted backups require a passphrase entered separately on the management page.",
+      description: "Start a previously previewed remote Magpie action using its revision and return a background operation immediately. Query remote_status for progress; never retry an unknown result. Backups are unencrypted remote config archives with a copy of the current binary; no backup passphrase is needed.",
       args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, revision: { ...revisionSchema, description: "The short-lived revision returned by remote_preview for this action" } }),
-      execute({ connectionId, action, revision }, ctx = {}) {
+      execute({ connectionId, action, revision }) {
         return serial(connectionId, async () => {
-          const submission = remote.apply(connectionId, action, revision, ctx.credentials);
+          const submission = remote.apply(connectionId, action, revision);
           remoteSubmissions.add(submission);
           try { return await submission; }
           finally { remoteSubmissions.delete(submission); }
@@ -119,6 +119,11 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       description: "Read the latest remote operation for this connection, including failed or unknown results. Never returns credentials or raw command output.",
       args: args({ connectionId: idSchema, operationId: stringSchema }, ["connectionId"]),
       execute({ connectionId, operationId }) { return remote.operation(connectionId, operationId); },
+    },
+    remote_backups: {
+      description: "List remote Magpie backup metadata without reading configuration contents or credentials. Restore and delete require a fresh remote_preview with the selected backupId.",
+      args: args({ connectionId: idSchema }),
+      execute({ connectionId }, ctx = {}) { return serial(connectionId, () => remote.backups(connectionId, { signal: ctx.abort })); },
     },
     remote_web: {
       description: "Explicitly obtain a remote Magpie Web sign-in link through a loopback SSH forward. The returned link grants remote management access: do not log or share it. SSH must stay connected.",

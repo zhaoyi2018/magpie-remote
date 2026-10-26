@@ -5,8 +5,10 @@ import { readFile } from "node:fs/promises";
 import { SessionManager } from "../src/sessions.mjs";
 import { ProfileStore } from "../src/store.mjs";
 import { createTools } from "../src/plugin.mjs";
+import { RemoteManager } from "../src/remote.mjs";
+import { probeScript } from "../src/remote-scripts.mjs";
 import { startManagementServer } from "../src/web-server.mjs";
-import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
+import { echoServer, exchange, sshServer, temporary, until } from "./helpers.mjs";
 
 test("management snapshots include real lifecycle logs across reconnects without persisting credentials", async (t) => {
   const fixture = await sshServer(t);
@@ -71,4 +73,52 @@ test("failed authentication and forwarding are recorded as errors and history re
   assert.notEqual(sessions.status(profile.id).logs[0].message, "changed");
   await sessions.disconnect(profile.id);
   assert.equal(sessions.status(profile.id).logs.length, 200);
+});
+
+test("remote service stop releases its actual Web listener, preserves SSH and unrelated forwards, and appears in runtime snapshots", async (t) => {
+  const fixture = await sshServer(t), echo = await echoServer(t);
+  const store = new ProfileStore(join(await temporary(t), "connections.json"));
+  const sessions = new SessionManager({ env: { MIGPIE_TEST_PASSWORD: "local-test-secret" } });
+  let active = true;
+  fixture.server.on("connection", (client) => client.on("ready", () => client.on("session", (accept) => {
+    const channelSession = accept(); channelSession.on("error", () => {});
+    channelSession.on("exec", (acceptExec, _reject, { command }) => {
+      const channel = acceptExec(); channel.on("error", () => {});
+      let input = "";
+      channel.on("data", (chunk) => { input += chunk; });
+      channel.on("end", () => {
+        let output;
+        if (input === probeScript) {
+          const fields = { platform: "Linux", architecture: "x86_64", username: "tester", home: "/home/tester", binary: "/home/tester/.local/bin/magpie", managedBinary: "/home/tester/.local/bin/magpie", version: "magpie 0.1.1501", installed: true, binaryHash: "a".repeat(64), configDirectory: "/home/tester/.config/magpie", serviceInstalled: true, systemd: true, serviceActive: active ? "active" : "inactive", webEnabled: true, webPort: echo.port, capabilities: "daemon_stop daemon_web", tools: "sha256sum" };
+          output = "MIGPIE_REMOTE_V1\n" + Object.entries(fields).map(([key, value]) => key + "\t" + Buffer.from(String(value)).toString("base64")).join("\n") + "\n";
+        } else if (command.endsWith(" daemon web")) output = `http://127.0.0.1:${echo.port}/?k=runtime-test-management-key-123456\n`;
+        else if (input.includes('"$bin" daemon stop')) { active = false; output = "MIGPIE_DONE\n"; }
+        else { channel.exit(70); channel.end(); return; }
+        channel.write(output); channel.exit(0); channel.end();
+      });
+    });
+  })));
+  const remote = new RemoteManager({ store, sessions });
+  const tools = createTools(store, sessions, remote), web = await startManagementServer({ tools });
+  t.after(async () => { await web.close(); await remote.close(); await sessions.close(); });
+  await tools.save_connection.execute({ connection: { ...fixture.profile, autoReconnect: true } });
+  await tools.connect.execute({ connectionId: fixture.profile.id });
+  const independent = await sessions.addForward(fixture.profile.id, { id: "kept", direction: "c2s", bindPort: 0, targetPort: echo.port });
+  const link = await remote.web(fixture.profile.id);
+  const webPort = Number(new URL(link.address).port);
+  assert.ok((await exchange(webPort)).length);
+  const preview = await remote.preview(fixture.profile.id, "stop");
+  await remote.apply(fixture.profile.id, "stop", preview.revision);
+  await until(async () => (await remote.operation(fixture.profile.id)).state === "succeeded" && !sessions.status(fixture.profile.id).forwards.some((item) => item.id === "magpie-web"));
+  await assert.rejects(exchange(webPort), /ECONNREFUSED/);
+  assert.equal(sessions.status(fixture.profile.id).state, "connected");
+  assert.ok((await exchange(independent.bindPort)).length);
+  const response = await fetch(new URL("api/snapshot", web.url), { headers: { Authorization: "Bearer " + web.token } });
+  const { connections: [row] } = await response.json();
+  assert.ok(row.session.logs.some((entry) => entry.message.includes("远程 Magpie：停止服务") && entry.message.includes("已完成")));
+  assert.ok(!JSON.stringify(row.session.logs).includes("runtime-test-management-key"));
+  const connectedAt = sessions.status(fixture.profile.id).connectedAt;
+  for (const client of fixture.clients) client.end();
+  await until(() => sessions.status(fixture.profile.id).state === "connected" && sessions.status(fixture.profile.id).connectedAt !== connectedAt);
+  assert.deepEqual(sessions.status(fixture.profile.id).forwards.map((forward) => forward.id), ["kept"]);
 });

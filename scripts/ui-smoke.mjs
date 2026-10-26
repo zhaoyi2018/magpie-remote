@@ -85,7 +85,7 @@ try {
   await field("edit-connection").click();
   await field("profile-password").fill("discard-this-draft");
   await ui.locator("#connection-editor .dialog-actions .close-dialog").click();
-  assert.equal(await field("profile-password").inputValue(), "");
+  await until(async () => (await field("profile-password").inputValue()) === "", "Cancelled password draft was not cleared after the dialog closed");
   assert.deepEqual((await store.get("ui-regression")).encryptedPassword, originalPassword);
   console.log("UI: password save, single Enter submission, blank edit preservation and cancelled-password cleanup passed.");
 

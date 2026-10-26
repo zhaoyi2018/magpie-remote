@@ -331,7 +331,7 @@ import { createRemoteManager } from "./remote.js";
       row.append(time, element("span", "log-level", { info: "信息", warn: "提示", error: "错误" }[log.level] ?? log.level), element("span", "log-message", log.message));
       $("log-list").append(row);
     }
-    if (!logs.length) $("log-list").append(element("p", "no-matches", filter === "error" ? "暂无错误日志" : "暂无运行日志，建立连接后会在这里记录会话事件。"));
+    if (!logs.length) $("log-list").append(element("p", "no-matches", filter === "error" ? "暂无错误日志" : "暂无运行日志，连接后会在这里记录 SSH、转发与远程 Magpie 事件。"));
   }
   function updateDuration() {
     const session = selected()?.session;

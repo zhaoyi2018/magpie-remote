@@ -165,33 +165,27 @@ test("HTTP edits and MCP edits share revisions and conflicts preserve the newer 
   assert.deepEqual(web.sessions.status(), []);
 });
 
-test("remote update credentials stay in the dedicated authenticated context and other methods reject them", async (t) => {
+test("remote actions accept no backup credentials and submit only their previewed arguments", async (t) => {
   const received = [];
   const result = { id: "fixture-operation", state: "running" };
-  const remote = { async apply(id, action, revision, credentials) { received.push({ id, action, revision, credentials }); return result; } };
+  const remote = { async apply(...args) { received.push(args); return result; } };
   const tools = createTools({}, {}, remote);
   const web = await startManagementServer({ tools });
   t.after(() => web.close());
-  const args = { connectionId: "server", action: "update", revision: "a".repeat(64) };
-  const credentials = { backupPassphrase: "fixture-backup-passphrase" };
-  assert.deepEqual(await tools.remote_apply.execute(args, { credentials }), result);
-  const request = (method, fields) => fetch(new URL("api/call", web.url), {
+  const args = { connectionId: "server", action: "backup", revision: "a".repeat(64) };
+  assert.deepEqual(await tools.remote_apply.execute(args), result);
+  const request = (method, credentials) => fetch(new URL("api/call", web.url), {
     method: "POST", headers: { Authorization: `Bearer ${web.token}`, "Content-Type": "application/json", Origin: "null" },
-    body: JSON.stringify({ method, args, credentials: fields }),
+    body: JSON.stringify({ method, args, ...(credentials !== undefined && { credentials }) }),
   });
-  const response = await request("remote_apply", credentials);
+  const response = await request("remote_apply");
   assert.equal(response.status, 200);
-  const body = await response.text();
-  assert.deepEqual(JSON.parse(body), { result });
-  assert.ok(!body.includes(credentials.backupPassphrase));
-  assert.equal(received.length, 2);
-  assert.deepEqual(received[0], received[1]);
-  assert.deepEqual(received[1].credentials, credentials);
-  for (const fields of [{ password: "wrong-field" }, { backupPassphrase: 123 }, { backupPassphrase: "x".repeat(4097) }]) {
+  assert.deepEqual(await response.json(), { result });
+  assert.deepEqual(received, Array(2).fill([args.connectionId, args.action, args.revision]));
+  for (const fields of [{}, { password: "wrong-field" }, { backupPassphrase: "obsolete-backup-phrase" }]) {
     assert.equal((await request("remote_apply", fields)).status, 400);
   }
-  assert.equal((await request("remote_preview", credentials)).status, 400);
-  assert.equal((await request("remote_status", credentials)).status, 400);
+  assert.equal((await request("remote_preview", { backupPassphrase: "obsolete" })).status, 400);
   assert.equal(received.length, 2);
 });
 

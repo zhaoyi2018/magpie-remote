@@ -108,7 +108,7 @@ export async function startManagementServer({ tools, port = 0 }) {
       if (!body.args || typeof body.args !== "object" || Array.isArray(body.args)) throw new Error("操作参数必须是对象");
       const credentials = body.credentials;
       if (credentials !== undefined) {
-        const fields = body.method === "connect" ? ["password", "passphrase"] : body.method === "save_connection" ? ["password"] : body.method === "remote_apply" ? ["backupPassphrase"] : [];
+        const fields = body.method === "connect" ? ["password", "passphrase"] : body.method === "save_connection" ? ["password"] : [];
         if (!fields.length || !credentials || typeof credentials !== "object" || Array.isArray(credentials)
           || Object.entries(credentials).some(([key, value]) => !fields.includes(key) || typeof value !== "string" || value.length > 4096
             || (body.method === "save_connection" && !value.length))) {

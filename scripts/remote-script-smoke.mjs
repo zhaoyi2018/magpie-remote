@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { actionScript, probeScript, shellQuote } from "../src/remote-scripts.mjs";
 import { parseProbe } from "../src/remote.mjs";
+import { backupInventoryScript, parseBackups } from "../src/remote-backups.mjs";
 
 // Runs generated POSIX scripts with a fake Magpie executable and service manager.
 // It never downloads a release or invokes an installed Magpie.
@@ -19,7 +20,7 @@ const run = (script, input = "") => new Promise((resolveRun, reject) => {
   const setup = `export HOME="$(cd ${shellQuote(home.replaceAll("\\", "/"))} && pwd -P)"\nexport XDG_CONFIG_HOME="$HOME/.config"\nexport PATH="$(cd ${shellQuote(tools.replaceAll("\\", "/"))} && pwd -P):$PATH"\n`;
   const child = spawn(bash, ["-c", setup + script], { env: { ...process.env, MSYS_NO_PATHCONV: "1" }, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "", stderr = "";
-  const timer = setTimeout(() => { child.kill(); reject(new Error("Script smoke timed out")); }, 10000);
+  const timer = setTimeout(() => { child.kill(); reject(new Error("Script smoke timed out: " + (script.match(/job=[^\n]+/)?.[0] ?? script.slice(-160)))); }, 20000);
   child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.once("error", (error) => { clearTimeout(timer); reject(error); });
   child.once("close", (code) => { clearTimeout(timer); resolveRun({ code, stdout, stderr }); });
@@ -33,11 +34,11 @@ set -eu
 state="$HOME/service-state"
 case "$1" in
   --version) printf 'magpie 0.1.1327\\n' ;;
-  --help) if [ -f "$HOME/limited-help" ]; then cat "$HOME/limited-help"; else printf '%s\\n' 'magpie update [check]' 'magpie backup [--no-keys] [file]' 'magpie healthcheck' 'magpie daemon [install|uninstall|start|stop|restart|status]' 'magpie daemon install [--web] [--addr host:port]' 'magpie daemon web [on|off]'; fi ;;
-  backup) IFS= read -r secret; [ "$secret" = 'test-backup-secret-12' ]; if [ -e "$HOME/fail-backup" ]; then printf 'passphrase unavailable: %s\\n' "$secret" >&2; exit 1; fi; printf 'encrypted-test-backup' > "$2" ;;
-  update) [ ! -e "$HOME/fail-backup" ]; if [ -e "$HOME/fail-update" ]; then printf 'download failed: dial tcp: no such host; isolated-private-output\\n' >&2; exit 1; fi; printf updated > "$HOME/updated" ;;
+  --help) if [ -f "$HOME/limited-help" ]; then cat "$HOME/limited-help"; else printf '%s\\n' 'magpie update [check]' 'magpie backup [--no-keys] [file]' 'magpie restore [file]' 'magpie healthcheck' 'magpie daemon [install|uninstall|start|stop|restart|status]' 'magpie daemon install [--web] [--addr host:port]' 'magpie daemon web [on|off]'; fi ;;
+  backup|restore) printf 'Official encrypted backup commands must not run\\n' >&2; exit 99 ;;
+  update) if [ -e "$HOME/fail-update" ]; then printf 'download failed: dial tcp: no such host; isolated-private-output\\n' >&2; exit 1; fi; printf updated > "$HOME/updated" ;;
   healthcheck) if [ -e "$HOME/fail-healthcheck" ]; then printf 'gateway not healthy\\n' >&2; exit 1; fi; [ "$(cat "$state" 2>/dev/null)" = running ] ;;
-  daemon) if [ "$2" = restart ] && [ -e "$HOME/fail-restart" ]; then printf 'permission denied: isolated-private-output\\n' >&2; exit 1; fi; case "$2" in
+  daemon) printf '%s\\n' "$2" >> "$HOME/service-actions"; if [ "$2" = restart ] && [ -e "$HOME/fail-restart" ]; then printf 'permission denied: isolated-private-output\\n' >&2; exit 1; fi; case "$2" in
     install|restart|start) printf running > "$state" ;;
     stop) printf stopped > "$state" ;;
     uninstall) rm -f "$HOME/.config/systemd/user/magpie.service" "$state" ;;
@@ -51,8 +52,12 @@ esac
   await writeFile(join(tools, "loginctl"), "#!/bin/sh\nprintf 'yes\\n'\n", { mode: 0o755 });
   const posixHome = (await run('cd "$HOME" && pwd -P')).stdout.trim();
   const binary = posixHome + "/.local/bin/magpie";
+  const config = join(home, ".config", "magpie");
+  const backupPath = (backupId, file = "") => join(home, ".config", "magpie-remote", "backups", backupId, file);
   await mkdir(join(home, ".local", "bin"), { recursive: true });
   await mkdir(join(home, ".config", "systemd", "user"), { recursive: true });
+  await mkdir(config);
+  await writeFile(join(config, "providers.json"), "isolated-config-secret");
   await writeFile(join(home, ".local", "bin", "magpie"), fake, { mode: 0o755 });
   await writeFile(join(home, ".config", "systemd", "user", "magpie.service"), '[Service]\nExecStart="' + binary + '" "serve" "--web=127.0.0.1:3430"\nEnvironment="MAGPIE_WEB_KEY=isolated-script-secret"\n');
   const probe = await run(probeScript); assert.equal(probe.code, 0, probe.stderr);
@@ -67,20 +72,26 @@ esac
   await rm(join(home, "limited-help"));
   // Use a canonical HOME for the scripts' explicit default-path ownership check.
   const canonical = 'export HOME=' + "'" + posixHome.replaceAll("'", "'\\''") + "'\n";
-  const update = actionScript("update", instance, id);
+  const execute = (action, operationId = randomUUID(), selected, observed = instance) => run(canonical + actionScript(action, observed, operationId, undefined, selected));
+  const listing = async () => {
+    const result = await run(backupInventoryScript);
+    assert.equal(result.code, 0, result.stderr);
+    return parseBackups(result.stdout, instance.configDirectory);
+  };
   await writeFile(join(home, "service-state"), "running");
-  const updated = await run(canonical + update, "test-backup-secret-12\n"); assert.equal(updated.code, 0, updated.stderr); assert.match(updated.stdout, /MIGPIE_DONE/);
+  const updated = await execute("update", id); assert.equal(updated.code, 0, updated.stderr);
   assert.ok(updated.stdout.includes(`MIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue`));
   assert.equal(await readFile(join(home, "updated"), "utf8"), "updated");
-  assert.equal(await readFile(join(home, ".config", "magpie-remote", "backups", id, "config.magpie"), "utf8"), "encrypted-test-backup");
-  await rm(join(home, "updated")); await writeFile(join(home, "fail-backup"), "fail");
-  const failed = await run(canonical + actionScript("update", instance, "d144400f-57fc-47be-aa55-f1ea81e01f7b"), "test-backup-secret-12\n");
-  assert.notEqual(failed.code, 0); await assert.rejects(access(join(home, "updated")));
-  assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", "d144400f-57fc-47be-aa55-f1ea81e01f7b", "state"), "utf8"), "failed");
-  assert.match(failed.stdout, /\tbacking_up\t1\tinteractive\tfalse/);
-  assert.ok(!(failed.stdout + failed.stderr).includes("test-backup-secret-12"));
-  assert.ok(!(await readFile(join(home, ".config", "magpie-remote", "operations", "d144400f-57fc-47be-aa55-f1ea81e01f7b", "result"), "utf8")).includes("test-backup-secret-12"));
-  await rm(join(home, "fail-backup"));
+  const contents = await run('tar -xOzf "$HOME/.config/magpie-remote/backups/' + id + '/config.tar.gz" ./providers.json');
+  assert.equal(contents.code, 0, contents.stderr); assert.equal(contents.stdout, "isolated-config-secret");
+  await assert.rejects(access(backupPath(id, "config.magpie")));
+  await rm(join(home, "updated"));
+  await writeFile(join(tools, "tar"), "#!/bin/sh\nprintf 'no space left: isolated-private-output\\n' >&2\nexit 42\n", { mode: 0o755 });
+  const failureId = randomUUID(), failed = await execute("update", failureId);
+  assert.equal(failed.code, 42); await assert.rejects(access(join(home, "updated")));
+  assert.match(failed.stdout, /\tbacking_up\t42\tdisk_full\tfalse/);
+  assert.ok(!(failed.stdout + failed.stderr).includes("isolated-private-output"));
+  await rm(join(tools, "tar"));
   for (const [flag, step, reason, updatedBeforeFailure] of [
     ["fail-update", "updating", "network", false],
     ["fail-restart", "restarting", "permission", true],
@@ -88,45 +99,97 @@ esac
   ]) {
     const operationId = randomUUID();
     await writeFile(join(home, flag), "fail");
-    const result = await run(canonical + actionScript("update", instance, operationId), "test-backup-secret-12\n");
+    const result = await execute("update", operationId);
     assert.equal(result.code, 1);
     assert.ok(result.stdout.includes(`MIGPIE_RESULT_V1\t${operationId}\t${step}\t1\t${reason}\ttrue`), result.stdout);
     assert.ok(!(result.stdout + result.stderr).includes("isolated-private-output"));
     assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", operationId, "result"), "utf8"), result.stdout);
-    assert.ok((await readFile(join(home, ".config", "magpie-remote", "backups", operationId, "magpie"))).length);
+    assert.ok((await readFile(backupPath(operationId, "magpie"))).length);
     if (updatedBeforeFailure) await rm(join(home, "updated"));
     else await assert.rejects(access(join(home, "updated")));
     await rm(join(home, flag));
   }
-  const legacy = { ...instance, capabilities: instance.capabilities.filter((capability) => capability !== "backup") };
-  await mkdir(join(home, "real-config"));
-  await writeFile(join(home, "real-config", "providers.json"), "isolated-config-secret");
-  const linked = await run('ln -s "$HOME/real-config" "$HOME/.config/magpie"');
-  assert.equal(linked.code, 0, linked.stderr);
+  const selected = (await listing()).find((backup) => backup.id === id);
+  assert.equal(selected.format, "archive"); assert.equal(selected.hasBinary, true); assert.equal(selected.version, instance.version);
+  await writeFile(join(config, "providers.json"), "before-restore");
+  await writeFile(join(config, "extra.json"), "must-disappear");
+  await writeFile(join(home, "service-actions"), "");
+  const restoreId = randomUUID(), restored = await execute("restore", restoreId, selected);
+  assert.equal(restored.code, 0, restored.stderr + restored.stdout);
+  assert.equal(await readFile(join(config, "providers.json"), "utf8"), "isolated-config-secret");
+  await assert.rejects(access(join(config, "extra.json")));
+  assert.equal(await readFile(join(home, "service-actions"), "utf8"), "stop\nstart\n");
+  assert.equal(await readFile(join(home, ".local", "bin", "magpie"), "utf8"), fake);
+  const beforeRestore = await run('tar -xOzf "$HOME/.config/magpie-remote/backups/' + restoreId + '/config.tar.gz" ./providers.json');
+  assert.equal(beforeRestore.stdout, "before-restore");
+  const manualId = randomUUID(), callsBefore = await readFile(join(home, "service-actions"), "utf8");
+  const manual = await execute("backup", manualId);
+  assert.equal(manual.code, 0, manual.stderr); await assert.rejects(access(join(home, "updated")));
+  assert.equal(await readFile(join(home, "service-actions"), "utf8"), callsBefore);
+  const manualBackup = (await listing()).find((backup) => backup.id === manualId);
+  const tampered = await execute("delete_backup", randomUUID(), { ...manualBackup, fingerprint: "0".repeat(64) });
+  assert.notEqual(tampered.code, 0); assert.ok(await readFile(backupPath(manualId, "config.tar.gz")));
+  const deleted = await execute("delete_backup", randomUUID(), manualBackup);
+  assert.equal(deleted.code, 0, deleted.stderr); await assert.rejects(access(backupPath(manualId)));
+  // Invalid and traversal archives must fail before service stop or config replacement.
+  for (const invalid of ["corrupt", "traversal"]) {
+    const invalidId = randomUUID(); await mkdir(backupPath(invalidId));
+    if (invalid === "corrupt") await writeFile(backupPath(invalidId, "config.tar.gz"), "not-an-archive");
+    else {
+      const result = await run('tar -czPf "$HOME/.config/magpie-remote/backups/' + invalidId + '/config.tar.gz" --transform=\'s|^|../|\' -C "$HOME/.config/magpie" providers.json');
+      assert.equal(result.code, 0, result.stderr);
+    }
+    const invalidBackup = (await listing()).find((backup) => backup.id === invalidId);
+    const result = await execute("restore", randomUUID(), invalidBackup);
+    assert.notEqual(result.code, 0); assert.match(result.stdout, /\trestoring\t\d+\tcommand_failed\ttrue/);
+    assert.equal(await readFile(join(config, "providers.json"), "utf8"), "isolated-config-secret");
+    assert.equal(await readFile(join(home, "service-actions"), "utf8"), callsBefore);
+  }
+  // A failed replacement must put the original directory back and retain its snapshot.
+  const realMove = (await run("command -v mv")).stdout.trim();
+  await writeFile(join(tools, "mv"), `#!/bin/sh
+if [ "$#" -eq 3 ] && [ "$1" = -- ]; then
+  case "$2" in */.magpie-restore.*/config) printf 'permission denied: isolated-private-output\\n' >&2; exit 43 ;; esac
+fi
+exec ${shellQuote(realMove)} "$@"
+`, { mode: 0o755 });
+  await writeFile(join(config, "providers.json"), "before-failed-replacement");
+  const rollbackId = randomUUID(), rolledBack = await execute("restore", rollbackId, selected);
+  assert.equal(rolledBack.code, 43, rolledBack.stderr + rolledBack.stdout);
+  assert.match(rolledBack.stdout, /\trestoring\t43\tpermission\ttrue/);
+  assert.equal(await readFile(join(config, "providers.json"), "utf8"), "before-failed-replacement");
+  assert.equal(await readFile(join(home, "service-state"), "utf8"), "stopped");
+  const rollbackSnapshot = await run('tar -xOzf "$HOME/.config/magpie-remote/backups/' + rollbackId + '/config.tar.gz" ./providers.json');
+  assert.equal(rollbackSnapshot.stdout, "before-failed-replacement");
+  assert.ok(!(rolledBack.stdout + rolledBack.stderr).includes("isolated-private-output"));
+  await rm(join(tools, "mv")); await writeFile(join(home, "service-state"), "running");
+  console.log("Remote backups: archive-only update/manual backup, exact config restore, pre-restore snapshot, failed-replacement rollback, binary preservation, corrupt/traversal rejection, fingerprint protection and scoped deletion passed.");
+  await rm(config, { recursive: true });
+  const absentId = randomUUID(), absent = await execute("backup", absentId);
+  assert.equal(absent.code, 0, absent.stderr);
+  const absentBackup = (await listing()).find((backup) => backup.id === absentId);
+  assert.equal(absentBackup.format, "absent");
+  await mkdir(config); await writeFile(join(config, "new.json"), "new-config");
+  const absentRestore = await execute("restore", randomUUID(), absentBackup);
+  assert.equal(absentRestore.code, 0, absentRestore.stderr); await assert.rejects(access(config));
+  const legacy = { ...instance, capabilities: instance.capabilities.filter((capability) => !["backup", "restore"].includes(capability)) };
+  await mkdir(join(home, "real-config")); await writeFile(join(home, "real-config", "providers.json"), "symlink-config-secret");
+  const linked = await run('ln -s "$HOME/real-config" "$HOME/.config/magpie"'); assert.equal(linked.code, 0, linked.stderr);
   // Git Bash may copy directories when native symlinks are unavailable.
   const symlinked = (await run('[ -L "$HOME/.config/magpie" ]')).code === 0;
-  const archiveId = randomUUID();
-  const archived = await run(canonical + actionScript("update", legacy, archiveId));
+  const linkedId = randomUUID(), archived = await execute("backup", linkedId, undefined, legacy);
   assert.equal(archived.code, 0, archived.stderr);
-  const archiveFile = '$HOME/.config/magpie-remote/backups/' + archiveId + '/config.tar.gz';
-  const contents = await run('tar -xOzf "' + archiveFile + '" ./providers.json');
-  assert.equal(contents.code, 0, contents.stderr);
-  assert.equal(contents.stdout, "isolated-config-secret", "A symlinked config directory must archive its contents");
-  await rm(join(home, "updated"));
-  await writeFile(join(tools, "tar"), "#!/bin/sh\nexit 42\n", { mode: 0o755 });
-  const failedArchive = await run(canonical + actionScript("update", legacy, randomUUID()));
-  assert.notEqual(failedArchive.code, 0);
-  assert.match(failedArchive.stdout, /\tbacking_up\t42\tcommand_failed\tfalse/);
-  await assert.rejects(access(join(home, "updated")));
-  await rm(join(tools, "tar"));
-  await rm(join(home, ".config", "magpie"), { recursive: true });
-  const absentId = randomUUID();
-  const absent = await run(canonical + actionScript("update", legacy, absentId));
-  assert.equal(absent.code, 0, absent.stderr);
-  assert.ok(await readFile(join(home, ".config", "magpie-remote", "backups", absentId, "config.absent"), "utf8"));
-  const uninstalled = await run(canonical + actionScript("uninstall", { ...instance, binary, managedBinary: binary }, "5d140b01-7a34-432b-ac15-934fba8fc9ae"));
+  const linkedBackup = (await listing()).find((backup) => backup.id === linkedId);
+  await writeFile(join(config, "providers.json"), "changed-linked-config");
+  await writeFile(join(home, "service-state"), "stopped"); await writeFile(join(home, "service-actions"), "");
+  const linkedRestore = await execute("restore", randomUUID(), linkedBackup, { ...legacy, service: { ...legacy.service, state: "stopped" } });
+  assert.equal(linkedRestore.code, 0, linkedRestore.stderr + linkedRestore.stdout);
+  assert.equal(await readFile(join(config, "providers.json"), "utf8"), "symlink-config-secret");
+  assert.equal(await readFile(join(home, "service-actions"), "utf8"), "");
+  assert.equal(await readFile(join(home, "service-state"), "utf8"), "stopped");
+  const uninstalled = await execute("uninstall", "5d140b01-7a34-432b-ac15-934fba8fc9ae", undefined, { ...instance, binary, managedBinary: binary });
   assert.equal(uninstalled.code, 0, uninstalled.stderr); await assert.rejects(access(join(home, ".local", "bin", "magpie")));
-  assert.ok((await readFile(join(home, ".config", "magpie-remote", "backups", id, "config.magpie"))).length);
+  assert.ok((await readFile(backupPath(id, "config.tar.gz"))).length);
   await writeFile(join(tools, "curl"), '#!/bin/sh\nfor output; do :; done\ncp "$HOME/release-source" "$output"\n', { mode: 0o755 });
   await writeFile(join(home, "release-source"), fake, { mode: 0o755 });
   const release = { version: "0.1.1472", sha256: createHash("sha256").update(fake).digest("hex"), url: "https://github.com/yetone/magpie-releases/releases/download/test/magpie-cli-linux-amd64" };
@@ -134,21 +197,18 @@ esac
   const badInstall = await run(actionScript("install", empty, "2d5d6952-bf60-47ad-b2c7-d4624bcb51dc", { ...release, sha256: "0".repeat(64) }));
   assert.notEqual(badInstall.code, 0); await assert.rejects(access(join(home, ".local", "bin", "magpie")));
   const installed = await run(actionScript("install", empty, "23737f6f-cc09-46d2-85dd-c7ba7965e42c", release));
-  assert.equal(installed.code, 0, installed.stderr);
-  assert.equal(await readFile(join(home, ".local", "bin", "magpie"), "utf8"), fake);
+  assert.equal(installed.code, 0, installed.stderr); assert.equal(await readFile(join(home, ".local", "bin", "magpie"), "utf8"), fake);
   for (const action of ["enable_web", "stop", "start", "restart"]) {
-    const observed = parseProbe((await run(probeScript)).stdout);
-    const result = await run(actionScript(action, observed, randomUUID()));
+    const observed = parseProbe((await run(probeScript)).stdout), result = await execute(action, randomUUID(), undefined, observed);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(await readFile(join(home, "service-state"), "utf8"), action === "stop" ? "stopped" : "running");
   }
   const observed = parseProbe((await run(probeScript)).stdout);
   await mkdir(join(home, ".config", "magpie-remote", "operation.lock"));
-  const locked = await run(actionScript("stop", observed, randomUUID()));
-  assert.equal(locked.code, 75);
-  assert.equal(await readFile(join(home, "service-state"), "utf8"), "running");
+  const locked = await execute("stop", randomUUID(), undefined, observed);
+  assert.equal(locked.code, 75); assert.equal(await readFile(join(home, "service-state"), "utf8"), "running");
   await rm(join(home, ".config", "magpie-remote", "operation.lock"), { recursive: true });
-  console.log(`Remote scripts: help capabilities, POSIX probe, checksum install, encrypted/archive backup with failure protection and ${symlinked ? "symlinked" : "directory"}/absent config, classified failure stages without secret output, service actions, lock exclusion and uninstall retaining backups passed.`);
+  console.log(`Remote scripts: help capabilities, POSIX probe, checksum install, ${symlinked ? "symlinked" : "directory"}/absent config restore, stopped-service preservation, classified failures without secret output, service actions, lock exclusion and uninstall retaining backups passed.`);
 } finally {
   if (dirname(resolve(directory)) === resolve(tmpdir()) && basename(directory).startsWith("migpie-script-smoke-")) await rm(directory, { recursive: true, force: true, maxRetries: 3 });
 }
