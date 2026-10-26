@@ -10,6 +10,39 @@ const hash = (value) => createHash("sha256").update(JSON.stringify(value)).diges
 const copy = (value) => value === undefined ? undefined : structuredClone(value);
 const labels = { install: "安装 Magpie", update: "更新 Magpie", start: "启动服务", stop: "停止服务", restart: "重启服务", enable_web: "启用管理页面", uninstall: "卸载 Magpie" };
 const uncertain = new Set(["REMOTE_TIMEOUT", "REMOTE_DISCONNECTED", "REMOTE_CANCELLED", "REMOTE_RESULT_UNKNOWN", "REMOTE_OUTPUT_LIMIT"]);
+const steps = { preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "下载程序", installing: "安装程序", updating: "执行官方更新", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", healthcheck: "检查服务健康状态", completed: "执行完成" };
+const reasons = {
+  command_failed: "请在服务器核对该步骤的命令及运行环境。",
+  permission: "远端报告权限不足或文件系统只读，请检查程序和配置目录的写入权限。",
+  disk_full: "远端报告磁盘空间或配额不足，请释放空间后再操作。",
+  network: "远端报告网络、代理或证书错误，请检查服务器到官方发布源和下载地址的连接。",
+  interactive: "远端命令要求口令或交互终端，请核对该版本的非交互命令支持。",
+  unsupported: "远端报告命令或参数不受支持，请核对当前版本的命令用法。",
+  none: "",
+};
+
+function parseActionResult(stdout, operationId, exitCode) {
+  const lines = stdout.split(/\r?\n/).filter((line) => line.startsWith("MIGPIE_RESULT_V1\t"));
+  if (lines.length !== 1) return;
+  const [marker, id, step, code, reason, backupReady, extra] = lines[0].split("\t");
+  if (marker !== "MIGPIE_RESULT_V1" || id !== operationId || !Object.hasOwn(steps, step) || !/^(?:0|[1-9]\d{0,2})$/.test(code) || Number(code) > 255 || (exitCode !== undefined && Number(code) !== exitCode) || !Object.hasOwn(reasons, reason) || !["true", "false"].includes(backupReady) || extra !== undefined) return;
+  if (Number(code) === 0 ? step !== "completed" || reason !== "none" : step === "completed" || reason === "none") return;
+  return { step, exitCode: Number(code), reason, backupReady: backupReady === "true" };
+}
+
+function actionFailure(action, exitCode, result) {
+  if (exitCode === 75 && !result) return new OperationError("REMOTE_BUSY", "远端操作锁被占用，未重复执行");
+  const step = result && steps[result.step];
+  let message = (step ? step + "失败" : "远端操作未成功结束") + "（退出码 " + exitCode + "）。";
+  message += result ? reasons[result.reason] : "此任务未返回具体失败阶段，请检测实际版本和服务状态。";
+  if (action === "update" && ["preparing", "verifying", "preparing_backup", "backing_up", "saving_binary"].includes(result?.step)) message += "本次尚未执行更新。";
+  if (action === "update" && ["restarting", "checking_version", "healthcheck"].includes(result?.step)) message += "更新命令已完成，请检查当前程序版本和服务状态，避免重复更新。";
+  return new OperationError("REMOTE_ACTION_FAILED", message);
+}
+
+function backupDirectory(instance, operationId) {
+  return instance.configDirectory.replace(/\/magpie$/, "/magpie-remote/backups/") + operationId;
+}
 
 export function parseProbe(stdout) {
   const lines = stdout.trim().split(/\r?\n/u);
@@ -163,15 +196,19 @@ export class RemoteManager {
   async #reconcile(id, record, signal) {
     const operation = record.operation;
     if (!/^[a-f0-9-]{36}$/.test(operation.id)) return;
-    const script = `set -eu\nbase="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote"\ncat "$base/operations/${operation.id}/state" 2>/dev/null || true\n`;
+    const script = `set -eu\nbase="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote"\ncat "$base/operations/${operation.id}/state" 2>/dev/null || true\nprintf '\\n'\ncat "$base/operations/${operation.id}/result" 2>/dev/null || true\n`;
     const response = await this.sessions.execute(id, "sh -s", { input: script, signal, timeoutMs: 10000 });
-    const state = response.stdout.trim();
-    if (response.code === 0 && ["succeeded", "failed"].includes(state) && !record.instance.locked) {
-      operation.state = state; operation.step = state === "succeeded" ? "completed" : "failed";
+    const lines = response.stdout.trim().split(/\r?\n/), state = lines[0];
+    const result = parseActionResult(response.stdout, operation.id);
+    const consistent = lines.length === 1 || (lines.length === 2 && result && (state === "succeeded" ? result.exitCode === 0 && result.step === "completed" : result.exitCode !== 0));
+    if (response.code === 0 && ["succeeded", "failed"].includes(state) && consistent && !record.instance.locked) {
+      operation.state = state; operation.step = state === "succeeded" ? "completed" : result?.step ?? "failed";
       operation.updatedAt = new Date().toISOString();
       delete operation.error;
-      if (state === "succeeded" && operation.action === "update") operation.result = { backupDirectory: record.instance.configDirectory.replace(/\/magpie$/, "/magpie-remote/backups/") + operation.id };
-      operation.message = state === "succeeded" ? "已根据远端完成记录核实操作结束，请检查当前环境" : "远端记录显示操作失败，请检查实际状态后处理";
+      if (result) operation.diagnostic = { step: result.step, exitCode: result.exitCode, reason: result.reason };
+      if (operation.action === "update" && (state === "succeeded" || result?.backupReady)) operation.result = { backupDirectory: backupDirectory(record.instance, operation.id) };
+      if (state === "failed" && result) operation.error = errorDetails(actionFailure(operation.action, result.exitCode, result));
+      operation.message = state === "succeeded" ? "已根据远端完成记录核实操作结束，请检查当前环境" : operation.error?.message ?? "远端记录显示操作失败，请检查实际状态后处理";
     } else operation.message = record.instance.locked ? "远端操作锁仍存在，请等待或在服务器核实任务；未重复执行" : "未取得明确完成记录，仍需在服务器核实结果；未重复执行";
   }
 
@@ -276,15 +313,21 @@ export class RemoteManager {
       const input = preview.backupMode === "encrypted" ? passphrase + "\n" : script;
       passphrase = undefined;
       const response = await this.sessions.execute(id, command, { input, timeoutMs: 600000, maxBytes: 65536 });
-      if (response.code !== 0) throw new OperationError(response.code === 75 ? "REMOTE_BUSY" : "REMOTE_ACTION_FAILED", response.code === 75 ? "远端操作锁被占用，未重复执行" : "远端操作未成功结束，请检查当前状态和远端服务；错误码 " + response.code);
-      if (!response.stdout.includes("MIGPIE_DONE")) throw new OperationError("REMOTE_RESULT_UNKNOWN", "远端没有返回完成标记，请检测实际状态");
+      const result = parseActionResult(response.stdout, operation.id, response.code);
+      if (result) {
+        operation.diagnostic = { step: result.step, exitCode: result.exitCode, reason: result.reason };
+        if (operation.action === "update" && result.backupReady) operation.result = { backupDirectory: backupDirectory(instance, operation.id) };
+      }
+      if (response.code !== 0) throw actionFailure(operation.action, response.code, result);
+      if (!response.stdout.split(/\r?\n/).includes("MIGPIE_DONE") || (!result && response.stdout.includes("MIGPIE_RESULT_V1"))) throw new OperationError("REMOTE_RESULT_UNKNOWN", "远端完成标记缺失或结果记录无效，请检测实际状态");
       operation.state = "succeeded"; operation.step = "completed"; operation.message = labels[operation.action] + "已完成";
-      if (operation.action === "update") operation.result = { backupDirectory: instance.configDirectory.replace(/\/magpie$/, "/magpie-remote/backups/") + operation.id };
+      if (operation.action === "update") operation.result = { backupDirectory: backupDirectory(instance, operation.id) };
       try { record.instance = await this.#probe(id); record.observedAt = new Date().toISOString(); }
       catch { operation.message += "，当前环境尚未刷新，请重新检测"; }
     } catch (error) {
       operation.state = operation.step === "executing" && uncertain.has(error.code) ? "unknown" : "failed";
-      operation.step = operation.state; operation.error = errorDetails(error); operation.message = error.message;
+      operation.step = operation.state === "failed" ? operation.diagnostic?.step ?? "failed" : operation.state;
+      operation.error = errorDetails(error); operation.message = error.message;
     } finally {
       passphrase = undefined; operation.updatedAt = new Date().toISOString();
       try { await this.#save(); }

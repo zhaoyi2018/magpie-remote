@@ -74,61 +74,110 @@ trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
 export function actionScript(action, instance, operationId, release) {
   const bin = shellQuote(instance.binary || instance.managedBinary);
-  const prefix = common + `bin=${bin}\n${instance.binaryHash ? `actual=$(sha256sum "$bin" | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.binaryHash)} ] || exit 79\n` : ""}${instance.unitHash ? `actual=$(sha256sum ${shellQuote(instance.unit)} | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.unitHash)} ] || exit 79\n` : ""}job="$base/operations/${operationId}"\nmkdir -p "$job"\nprintf running > "$job/state"\ntrap 'code=$?; if [ "$code" -eq 0 ]; then printf succeeded > "$job/state"; else printf failed > "$job/state"; fi; rmdir "$lock" 2>/dev/null || true' EXIT\n`;
+  const prefix = common + `bin=${bin}
+job="$base/operations/${operationId}"
+step=preparing
+reason=command_failed
+backup_ready=false
+stage=''
+finish() {
+  code=$?
+  trap - EXIT
+  set +e
+  if [ -n "$stage" ]; then rm -f "$stage/magpie"; rmdir "$stage"; fi
+  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
+  if [ -f "$job/reason" ]; then reason=$(cat "$job/reason"); fi
+  state=failed
+  if [ "$code" -eq 0 ]; then state=succeeded; step=completed; reason=none; fi
+  result=$(printf 'MIGPIE_RESULT_V1\\t%s\\t%s\\t%s\\t%s\\t%s' '${operationId}' "$step" "$code" "$reason" "$backup_ready")
+  if [ -d "$job" ]; then
+    printf '%s\\n' "$result" > "$job/result.tmp" && mv "$job/result.tmp" "$job/result"
+    printf '%s' "$state" > "$job/state"
+  fi
+  rmdir "$lock" 2>/dev/null || true
+  printf '%s\\n' "$result"
+  exit "$code"
+}
+trap finish EXIT
+mkdir -p "$job"
+printf running > "$job/state"
+set_step() { step=$1; printf '%s' "$step" > "$job/step"; }
+# The backup runs in a pipeline subshell; files retain its stage and reason.
+run_step() {
+  set_step "$1"
+  shift
+  if output=$("$@" 2>&1); then return 0; else code=$?; fi
+  reason=command_failed
+  if printf '%s' "$output" | grep -Eiq 'permission denied|operation not permitted|read-only file system|access is denied'; then reason=permission;
+  elif printf '%s' "$output" | grep -Eiq 'no space left|disk (is )?full|disk quota exceeded'; then reason=disk_full;
+  elif printf '%s' "$output" | grep -Eiq 'could not resolve|no such host|name resolution|connection (refused|reset|timed out)|network is unreachable|network.*unavailable|TLS handshake|certificate|x509|i/o timeout|deadline exceeded|failed to (fetch|download)|proxyconnect|HTTP[^[:cntrl:]]*(403|407|429|500|502|503|504)|status[^[:cntrl:]]*(403|407|429|500|502|503|504)'; then reason=network;
+  elif printf '%s' "$output" | grep -Eiq 'passphrase|password|not a terminal|inappropriate ioctl|/dev/tty'; then reason=interactive;
+  elif printf '%s' "$output" | grep -Eiq 'unknown (command|flag)|unrecognized (command|option)|unsupported (command|option)'; then reason=unsupported;
+  fi
+  unset output
+  printf '%s' "$reason" > "$job/reason"
+  return "$code"
+}
+set_step verifying
+${instance.binaryHash ? `actual=$(sha256sum "$bin" | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.binaryHash)} ] || exit 79\n` : ""}${instance.unitHash ? `actual=$(sha256sum ${shellQuote(instance.unit)} | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.unitHash)} ] || exit 79\n` : ""}`;
   if (action === "install") {
     return prefix + `command -v magpie >/dev/null 2>&1 && exit 76
 [ ! -e "$bin" ] && [ ! -L "$bin" ] || exit 76
 command -v curl >/dev/null
 command -v sha256sum >/dev/null
 stage=$(mktemp -d "$base/download.XXXXXXXX")
-trap 'code=$?; rm -f "$stage/magpie"; rmdir "$stage"; if [ "$code" -eq 0 ]; then printf succeeded > "$job/state"; else printf failed > "$job/state"; fi; rmdir "$lock" 2>/dev/null || true' EXIT
-curl -fLsS --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 ${shellQuote(release.url)} -o "$stage/magpie"
+run_step downloading curl -fLsS --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 ${shellQuote(release.url)} -o "$stage/magpie"
+set_step verifying
 printf '%s  %s\\n' ${shellQuote(release.sha256)} "$stage/magpie" | sha256sum -c - >/dev/null
 chmod 755 "$stage/magpie"
-"$stage/magpie" --version >/dev/null
+run_step checking_version "$stage/magpie" --version
+set_step installing
 mkdir -p "$HOME/.local/bin"
 [ ! -e "$bin" ] && [ ! -L "$bin" ] || exit 76
 install -m 755 "$stage/magpie" "$HOME/.local/bin/.magpie-${operationId}"
 mv -n "$HOME/.local/bin/.magpie-${operationId}" "$bin"
 [ ! -e "$HOME/.local/bin/.magpie-${operationId}" ] || exit 76
-"$bin" --version >/dev/null
+run_step checking_version "$bin" --version
 printf 'MIGPIE_DONE\\n'
 `;
   }
   if (action === "update") {
     const backup = instance.capabilities?.includes("backup") ? `IFS= read -r passphrase
-printf '%s\\n' "$passphrase" | "$bin" backup "$backup/config.magpie" >/dev/null 2>&1
+printf '%s\\n' "$passphrase" | run_step backing_up "$bin" backup "$backup/config.magpie"
 unset passphrase
 [ -s "$backup/config.magpie" ] || exit 77
 ` : `command -v tar >/dev/null
 config=${shellQuote(instance.configDirectory)}
 if [ -d "$config" ]; then
-  tar -czf "$backup/config.tar.gz" -C "$config" . >/dev/null 2>&1
+  run_step backing_up tar -czf "$backup/config.tar.gz" -C "$config" .
   [ -s "$backup/config.tar.gz" ] || exit 77
 elif [ -e "$config" ] || [ -L "$config" ]; then exit 77
 else printf 'Configuration directory did not exist before update.\\n' > "$backup/config.absent"; fi
 `;
     return prefix + `command -v sha256sum >/dev/null
+set_step preparing_backup
 mkdir -p "$base/backups"
 backup="$base/backups/${operationId}"
 mkdir -m 700 "$backup"
-${backup}cp -p "$bin" "$backup/magpie"
-"$bin" update >/dev/null 2>&1
-${instance.service.state === "running" ? '"$bin" daemon restart >/dev/null 2>&1\n' : ""}"$bin" --version >/dev/null
-${instance.service.state === "running" ? '"$bin" healthcheck >/dev/null 2>&1\n' : ""}printf 'MIGPIE_DONE\\n'
+set_step backing_up
+${backup}run_step saving_binary cp -p "$bin" "$backup/magpie"
+backup_ready=true
+run_step updating "$bin" update </dev/null
+${instance.service.state === "running" ? 'run_step restarting "$bin" daemon restart </dev/null\n' : ""}run_step checking_version "$bin" --version </dev/null
+${instance.service.state === "running" ? 'run_step healthcheck "$bin" healthcheck </dev/null\n' : ""}printf 'MIGPIE_DONE\\n'
 `;
   }
-  if (action === "enable_web") return prefix + `MAGPIE_ADDR=127.0.0.1:3425 "$bin" daemon install --web --addr 127.0.0.1:3430 >/dev/null 2>&1
-"$bin" healthcheck >/dev/null 2>&1
+  if (action === "enable_web") return prefix + `MAGPIE_ADDR=127.0.0.1:3425 run_step enabling_web "$bin" daemon install --web --addr 127.0.0.1:3430 </dev/null
+run_step healthcheck "$bin" healthcheck </dev/null
 printf 'MIGPIE_DONE\\n'
 `;
-  if (["start", "stop", "restart"].includes(action)) return prefix + `"$bin" daemon ${action} >/dev/null 2>&1
-${action === "stop" ? "" : '"$bin" healthcheck >/dev/null 2>&1\n'}printf 'MIGPIE_DONE\\n'
+  if (["start", "stop", "restart"].includes(action)) return prefix + `run_step ${action === "start" ? "starting" : action === "stop" ? "stopping" : "restarting"} "$bin" daemon ${action} </dev/null
+${action === "stop" ? "" : 'run_step healthcheck "$bin" healthcheck </dev/null\n'}printf 'MIGPIE_DONE\\n'
 `;
   if (action === "uninstall") return prefix + `expected="$HOME/.local/bin/magpie"
 [ "$bin" = "$expected" ] && [ -f "$bin" ] && [ ! -L "$bin" ] || exit 78
 [ "$(readlink -f "$bin")" = "$expected" ] || exit 78
-${instance.service.installed ? '"$bin" daemon uninstall >/dev/null 2>&1\n' : ""}rm "$bin"
+${instance.service.installed ? 'run_step uninstalling "$bin" daemon uninstall </dev/null\n' : ""}run_step uninstalling rm "$bin"
 printf 'MIGPIE_DONE\\n'
 `;
   throw new Error("未知的远端管理操作");

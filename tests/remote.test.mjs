@@ -356,6 +356,87 @@ for (const [name, code, expectedCode] of [
   });
 }
 
+for (const [step, reason, backupReady, message] of [
+  ["backing_up", "interactive", false, /备份配置失败.*尚未执行更新/],
+  ["updating", "network", true, /执行官方更新失败.*网络、代理或证书/],
+  ["restarting", "permission", true, /重启用户服务失败.*更新命令已完成/],
+  ["healthcheck", "command_failed", true, /检查服务健康状态失败.*更新命令已完成/],
+]) {
+  test(`update failure preserves its ${step} stage, classified reason and completed backup without raw output`, async (t) => {
+    const h = await fixture(t);
+    const passphrase = "fixture-private-passphrase";
+    h.sessions.onAction = async () => {
+      const operation = await h.remote.operation(h.profile.id);
+      return response(`untrusted-${passphrase}\nMIGPIE_RESULT_V1\t${operation.id}\t${step}\t1\t${reason}\t${backupReady}\n`, 1, "diagnostic-secret");
+    };
+    await start(h, "update", { backupPassphrase: passphrase });
+    const operation = await completed(h);
+    assert.equal(operation.state, "failed");
+    assert.equal(operation.step, step);
+    assert.deepEqual(operation.diagnostic, { step, exitCode: 1, reason });
+    assert.match(operation.message, message);
+    assert.equal(Boolean(operation.result?.backupDirectory), backupReady);
+    assert.ok(!(await readFile(h.remote.file, "utf8")).includes(passphrase));
+    assert.ok(!JSON.stringify(operation).includes("diagnostic-secret"));
+  });
+}
+
+test("invalid or unrelated result markers cannot add remote text to a failure", async (t) => {
+  for (const marker of [
+    "MIGPIE_RESULT_V1\twrong-id\tupdating\t1\tnetwork\ttrue",
+    "MIGPIE_RESULT_V1\t{id}\tupdating\t2\tnetwork\ttrue",
+    "MIGPIE_RESULT_V1\t{id}\tsecret-step\t1\tnetwork\ttrue",
+    "MIGPIE_RESULT_V1\t{id}\tupdating\t1\tsecret-reason\ttrue",
+    "MIGPIE_RESULT_V1\t{id}\tcompleted\t1\tnetwork\ttrue",
+    "MIGPIE_RESULT_V1\t{id}\tupdating\t1\tnone\ttrue",
+    "MIGPIE_RESULT_V1\t{id}\tupdating\t1\tnetwork\ttrue\nMIGPIE_RESULT_V1\t{id}\tupdating\t1\tnetwork\ttrue",
+  ]) {
+    const h = await fixture(t);
+    h.sessions.onAction = async () => response(marker.replaceAll("{id}", (await h.remote.operation(h.profile.id)).id), 1);
+    await start(h);
+    const operation = await completed(h);
+    assert.equal(operation.state, "failed");
+    assert.equal(operation.diagnostic, undefined);
+    assert.equal(operation.result, undefined);
+    assert.ok(!JSON.stringify(operation).includes("secret-"));
+  }
+});
+
+test("a success exit with contradictory structured evidence remains unknown", async (t) => {
+  const h = await fixture(t);
+  h.sessions.onAction = async () => response(`MIGPIE_DONE\nMIGPIE_RESULT_V1\t${(await h.remote.operation(h.profile.id)).id}\tupdating\t0\tnone\ttrue\n`);
+  await start(h);
+  assert.equal((await completed(h)).state, "unknown");
+});
+
+test("unknown update reconciliation restores the failure stage and backup from a matching result", async (t) => {
+  const h = await fixture(t);
+  h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection"); };
+  const { operation } = await start(h, "update", { backupPassphrase: "fixture-backup-passphrase" });
+  await completed(h);
+  h.sessions.remoteState = `failed\nMIGPIE_RESULT_V1\t${operation.id}\tupdating\t1\tnetwork\ttrue`;
+  const status = await h.remote.status(h.profile.id, { refresh: true });
+  assert.equal(status.operation.state, "failed");
+  assert.equal(status.operation.step, "updating");
+  assert.match(status.operation.message, /网络、代理或证书/);
+  assert.match(status.operation.result.backupDirectory, new RegExp(operation.id + "$"));
+});
+
+test("reconciliation keeps unknown when a structured result contradicts its state or belongs to another task", async (t) => {
+  const h = await fixture(t);
+  h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection"); };
+  const { operation } = await start(h);
+  await completed(h);
+  for (const state of [
+    `succeeded\nMIGPIE_RESULT_V1\t${operation.id}\tupdating\t1\tnetwork\ttrue`,
+    "failed\nMIGPIE_RESULT_V1\t00000000-0000-0000-0000-000000000000\tupdating\t1\tnetwork\ttrue",
+    "succeeded\nunexpected-output",
+  ]) {
+    h.sessions.remoteState = state;
+    assert.equal((await h.remote.status(h.profile.id, { refresh: true })).operation.state, "unknown");
+  }
+});
+
 for (const [name, fields, shouldRestart] of [
   ["running", {}, true],
   ["stopped", { serviceActive: "inactive" }, false],

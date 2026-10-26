@@ -4,7 +4,7 @@ const actionLabels = {
 };
 const serviceActions = new Set(["start", "stop", "restart", "enable_web"]);
 const operationLabels = { running: "执行中", succeeded: "已完成", failed: "失败", unknown: "结果未知" };
-const stepLabels = { checking: "复核环境", executing: "执行变更", completed: "执行完成", failed: "执行失败", unknown: "等待核实" };
+const stepLabels = { checking: "复核环境", executing: "执行变更", preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "下载程序", installing: "安装程序", updating: "执行官方更新", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", healthcheck: "检查服务健康状态", completed: "执行完成", failed: "执行失败", unknown: "等待核实" };
 const serviceLabels = { running: "运行中", stopped: "已停止", unavailable: "不可用", unknown: "待核实" };
 
 export function createRemoteManager({ call, toast }) {
@@ -151,12 +151,12 @@ export function createRemoteManager({ call, toast }) {
     text("remote-operation-state", submitting ? "正在提交…" : operationLabels[state] ?? "结果待核实");
     $("remote-operation-state").className = "badge" + (state === "succeeded" ? " connected" : state === "failed" ? " failed" : " connecting");
     text("remote-operation-step", operation?.step ? "当前步骤：" + (stepLabels[operation.step] ?? "处理远端任务") : "");
-    const backupDirectory = state === "succeeded" && operation?.action === "update" ? operation.result?.backupDirectory : "";
+    const backupDirectory = operation?.action === "update" ? operation.result?.backupDirectory : "";
     text("remote-operation-backup", backupDirectory ? "远端备份目录：" + backupDirectory : "");
     $("remote-operation-backup").hidden = !backupDirectory;
     text("remote-operation-message", submitting ? "请求提交后可关闭预览窗口，任务会在远端后台继续执行。" : operation?.message || (submissionUncertain ? "未能确认任务是否已接收。请先检测环境，避免重复提交。" : ""));
     text("remote-operation-time", operation ? "任务 " + operation.id + " · 更新于 " + time(operation.updatedAt) : "");
-    showError("remote-operation-error", operation?.error?.message || "");
+    showError("remote-operation-error", operation?.error?.message !== operation?.message ? operation?.error?.message || "" : "");
     $("remote-operation-unknown").hidden = !uncertain();
   }
 

@@ -26,7 +26,7 @@ async function remoteFixture(context) {
     platform: "Linux", architecture: "x86_64", container: false,
     installed: false, systemd: true, serviceInstalled: false,
     serviceActive: "inactive", webEnabled: false, webTLS: false,
-    version: "0.1.1327", locked: false, reconcile: "", nextUnknown: false,
+    version: "0.1.1327", locked: false, reconcile: "", nextUnknown: false, nextFailure: null,
     capabilities: "update backup healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
   };
   const executions = [];
@@ -73,6 +73,12 @@ async function remoteFixture(context) {
           executions.push({ kind: "action", action, ...(action === "update" && { passphrase: input }) });
           const gate = actionGate; actionGate = null;
           if (gate) await gate.promise;
+          if (state.nextFailure) {
+            const { step, reason, backupReady } = state.nextFailure; state.nextFailure = null;
+            const operationId = script.match(/operations\/([a-f0-9-]{36})/)?.[1];
+            assert.ok(operationId);
+            finish(`MIGPIE_RESULT_V1\t${operationId}\t${step}\t1\t${reason}\t${backupReady}\n`, 1); return;
+          }
           if (action === "install") state.installed = true;
           if (action === "enable_web") { state.serviceInstalled = true; state.webEnabled = true; state.serviceActive = "active"; }
           if (["start", "restart"].includes(action)) state.serviceActive = "active";
@@ -174,6 +180,22 @@ try {
   assert.equal(fixture.executions.find((item) => item.action === "update").passphrase, secret + "\n");
   assert.ok(!(await readFile(remote.file, "utf8")).includes(secret));
   console.log("Remote UI: update passphrase validation, visibility, retained focus, stdin delivery, clearing and close-during-submit passed.");
+
+  fixture.state.nextFailure = { step: "updating", reason: "network", backupReady: true };
+  await preview("update"); await field("remote-backup-passphrase").fill(secret); await field("remote-apply").click();
+  await field("remote-operation-state").filter({ hasText: "失败" }).waitFor();
+  await field("remote-operation-step").filter({ hasText: "执行官方更新" }).waitFor();
+  assert.match(await field("remote-operation-message").textContent(), /网络、代理或证书/);
+  assert.equal(await field("remote-operation-error").isVisible(), false, "The same failure message must only appear once");
+  assert.equal(await field("remote-operation-backup").isVisible(), true);
+  await page.reload(); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor(); await openRemote();
+  await field("remote-operation-state").filter({ hasText: "失败" }).waitFor();
+  assert.match(await field("remote-operation-step").textContent(), /执行官方更新/);
+  assert.equal(await field("remote-operation-backup").isVisible(), true);
+  const failureScreenshots = resolve(process.env.MIGPIE_REMOTE_UI_ARTIFACTS ?? ".local/remote-ui-regression"); await mkdir(failureScreenshots, { recursive: true });
+  await field("remote-operation").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(failureScreenshots, "update-failure.png"), fullPage: true });
+  console.log("Remote UI: classified update failure, specific stage, retained backup and single message survive reload.");
 
   fixture.state.nextUnknown = true; await preview("update"); await field("remote-backup-passphrase").fill(secret); await field("remote-apply").click();
   await field("remote-operation-state").filter({ hasText: "结果未知" }).waitFor();
