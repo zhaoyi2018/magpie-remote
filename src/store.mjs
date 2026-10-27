@@ -42,6 +42,9 @@ function decode(contents) {
 export class ProfileStore {
   #pending = Promise.resolve();
   #lastBackupTime = 0;
+  #storageWarning = null;
+
+  get storageWarning() { return structuredClone(this.#storageWarning); }
 
   constructor(file, { backupLimit = 5, renameFile = rename, removeFile = rm, onWarning = (warning) => console.warn(warning.message) } = {}) {
     this.file = file;
@@ -217,6 +220,7 @@ export class ProfileStore {
 
   #warn(cause) {
     const warning = new OperationError("CONFIG_BACKUP_CLEANUP_FAILED", "配置与备份已保留，但多余备份未能清理，将在下次成功写入后重试", { cause });
+    this.#storageWarning = { code: warning.code, message: warning.message, observedAt: new Date().toISOString() };
     try { this.onWarning(warning); } catch { /* A warning must not turn a committed write into a failure. */ }
   }
 
@@ -224,6 +228,7 @@ export class ProfileStore {
     try {
       const valid = (await this.listBackups()).filter((item) => item.valid);
       for (const old of valid.slice(this.backupLimit)) await this.removeFile(join(this.backupDirectory, old.id + ".json"));
+      this.#storageWarning = null;
     } catch (cause) { this.#warn(cause); }
   }
 

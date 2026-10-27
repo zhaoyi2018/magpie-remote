@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { ProfileStore, profileRevision, publicProfile } from "../src/store.mjs";
@@ -16,7 +16,11 @@ const releaseRequests = [];
 try {
   const directory = await temporary(context);
   const fixture = await sshServer(context), echo = await echoServer(context);
-  const store = new ProfileStore(join(directory, "connections.json"));
+  let blockCleanup = false;
+  const store = new ProfileStore(join(directory, "connections.json"), { backupLimit: 2, removeFile: async (path, options) => {
+    if (blockCleanup) throw new Error("fixture cleanup blocked");
+    return rm(path, options);
+  }, onWarning() {} });
   const sessions = new SessionManager({ env: {} });
   cleanup.unshift(() => sessions.close());
   const tools = createTools(store, sessions);
@@ -88,6 +92,22 @@ try {
   await until(async () => (await field("profile-password").inputValue()) === "", "Cancelled password draft was not cleared after the dialog closed");
   assert.deepEqual((await store.get("ui-regression")).encryptedPassword, originalPassword);
   console.log("UI: password save, single Enter submission, blank edit preservation and cancelled-password cleanup passed.");
+
+  blockCleanup = true;
+  await store.createBackup(); await store.createBackup();
+  await field("refresh").click(); await field("storage-warning").filter({ hasText: "多余备份未能清理" }).waitFor();
+  await field("open-backups").click(); await field("backup-warning").filter({ hasText: "多余备份未能清理" }).waitFor();
+  assert.equal(await field("backup-error").isVisible(), false);
+  blockCleanup = false; await field("create-backup").click(); await field("backup-warning").waitFor({ state: "hidden" });
+  await ui.locator("#backup-dialog .dialog-actions .close-dialog").click();
+  await field("refresh").click(); await field("storage-warning").waitFor({ state: "hidden" });
+  console.log("UI: backup cleanup warning stays nonblocking and clears after successful cleanup.");
+
+  const connectTool = tools.connect.execute;
+  tools.connect.execute = async () => { throw Object.assign(new Error("fixture untrusted host"), { code: "HOST_KEY_REJECTED", category: "trust" }); };
+  await field("connect").click(); await field("connection-guidance").filter({ hasText: "独立核对" }).waitFor();
+  assert.ok((await field("connection-guidance").textContent()).includes("不要直接信任"));
+  tools.connect.execute = connectTool;
 
   await field("edit-connection").click();
   await field("profile-name").fill("Local conflict draft");

@@ -23,11 +23,15 @@
 | `migpie-remote_remote_status` | `connectionId`；可选 `refresh` | 读取环境缓存、最新任务（含运行阶段与下载字节 / 速度）及各操作可用性与原因；显式刷新探测命令能力并核实未知结果 |
 | `migpie-remote_remote_preview` | `connectionId`, `action`；恢复/删除加 `backupId` | 返回变更清单、提示和短时 revision；备份统一使用普通配置归档，不执行变更 |
 | `migpie-remote_remote_apply` | `connectionId`, `action`, `revision` | 提交预览的固定操作，立即返回后台任务；配置归档不要求口令 |
-| `migpie-remote_remote_operation` | `connectionId`；可选 `operationId` | 返回此连接最新任务，不包含原始命令输出或凭据 |
+| `migpie-remote_remote_operation` | `connectionId`；可选 `operationId` 或 `history` | 默认返回最新任务；按 ID 查当前或历史；`history: true` 返回当前与最多 20 条旧终态摘要，不包含原始命令输出或凭据 |
 | `migpie-remote_remote_backups` | `connectionId` | 列出远端备份格式、大小、版本与校验值，不读取配置内容；恢复和删除须另行预览 |
 | `migpie-remote_remote_web` | `connectionId`；可选 `port` | 显式读取官方管理链接并建立临时回环 SSH 转发；返回的链接含管理密钥 |
 
 远程生命周期的操作范围、配置归档、断线核实和卸载边界见[远程 Magpie 管理](remote.md)。
+
+`remote_status.history` 为最多 20 条历史终态，当前任务仍在 `operation`；`remote_operation({connectionId, history: true})` 返回 `{connectionId, limit: 20, operations}`，当前任务排第一，所以最多 21 条。`history` 不能与 `operationId` 同时传入；按 ID 查不到时返回 `REMOTE_OPERATION_MISSING`。任务历史在宿主重启后保留，未知任务继续占据当前槽，直到取得明确完成证据。恢复任务的 `restore` 包含 `configState`、`serviceState`、`rollbackState` 及可选的 `recoveryDirectory`，详见[恢复语义](remote.md)。
+
+`config_backups({includeStatus: true})` 返回 `{backups, storageWarning}`；`connections({includeStatus: true})` 返回 `{connections, storageWarning}`。省略参数仍返回原数组。`storageWarning` 为 `null` 或 `{code, message, observedAt}`，目前只报告本次宿主内观察到的备份清理失败；不包含异常 cause 或文件内容。清理失败不撤销已提交配置，下次清理成功后警告清除。HTTP 快照同样返回该字段，页面以非阻断提示显示。
 
 ## SSH 配置的选择导入
 

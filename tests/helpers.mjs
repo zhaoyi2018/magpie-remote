@@ -78,7 +78,7 @@ export async function until(predicate, message = "condition not met") {
   throw new Error(message);
 }
 
-export async function sshServer(t, { rejectRemote = false, hangAuth = false, hangForward = false, clientPublicKey = hostPublicKey } = {}) {
+export async function sshServer(t, { rejectRemote = false, hangAuth = false, hangForward = false, cancelForward = "accept", clientPublicKey = hostPublicKey } = {}) {
   const acceptedKey = utils.parseKey(`ssh-ed25519 ${clientPublicKey.toString("base64")}`);
   if (acceptedKey instanceof Error) throw acceptedKey;
   const clients = new Set();
@@ -142,6 +142,9 @@ export async function sshServer(t, { rejectRemote = false, hangAuth = false, han
             accept(listener.address().port);
           });
         } else if (name === "cancel-tcpip-forward") {
+          if (cancelForward === "reject") return reject();
+          if (cancelForward === "hang") return;
+          if (cancelForward === "disconnect") return client.end();
           const key = `${info.bindAddr}:${info.bindPort}`;
           const listener = forwards.get(key);
           if (!listener) return reject();

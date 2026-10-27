@@ -162,9 +162,20 @@ test("backup pruning failure is a warning after a successful commit and a later 
   assert.equal((await store.get(profile.id)).name, "committed");
   assert.equal((await store.listBackups()).length, 3);
   assert.equal(warnings.at(-1).code, "CONFIG_BACKUP_CLEANUP_FAILED");
+  const tools = createTools(store, { status: () => ({ state: "disconnected" }) });
+  const warning = store.storageWarning;
+  assert.equal(warning.code, "CONFIG_BACKUP_CLEANUP_FAILED");
+  assert.equal(warning.cause, undefined);
+  warning.message = "mutated client copy";
+  assert.notEqual(store.storageWarning.message, warning.message);
+  assert.equal(Array.isArray(await tools.config_backups.execute()), true);
+  assert.equal((await tools.config_backups.execute({ includeStatus: true })).storageWarning.code, "CONFIG_BACKUP_CLEANUP_FAILED");
+  assert.equal((await tools.connections.execute({ includeStatus: true })).storageWarning.code, "CONFIG_BACKUP_CLEANUP_FAILED");
   blocked = false;
   await store.createBackup();
   assert.equal((await store.listBackups()).length, 2);
+  assert.equal(store.storageWarning, null);
+  assert.equal((await tools.config_backups.execute({ includeStatus: true })).storageWarning, null);
 });
 
 test("restore requires an explicit stop, releases tunnels and leaves restored auto-connect profiles stopped", async (t) => {

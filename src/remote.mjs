@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { identifier } from "./config.mjs";
 import { OperationError, errorDetails } from "./errors.mjs";
 import { profileRevision } from "./store.mjs";
 import { actionScript, backupActions, probeScript, remoteActions, webLinkCommand } from "./remote-scripts.mjs";
 import { backupIdPattern, backupInventoryScript, parseBackups } from "./remote-backups.mjs";
+import { operationHistoryLimit, operationSummary, parseRestoreResult, restoreResultMessage, terminalOperation } from "./remote-results.mjs";
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const copy = (value) => value === undefined ? undefined : structuredClone(value);
@@ -107,8 +109,8 @@ export class RemoteManager {
   #ready;
   #closed = false;
 
-  constructor({ store, sessions, file = store.file + ".remote.json", release = latestRelease }) {
-    this.store = store; this.sessions = sessions; this.file = file; this.release = release;
+  constructor({ store, sessions, file = store.file + ".remote.json", release = latestRelease, renameFile = rename }) {
+    this.store = store; this.sessions = sessions; this.file = file; this.release = release; this.renameFile = renameFile;
     this.#ready = this.#load();
     void this.#ready.catch(() => {});
   }
@@ -122,18 +124,22 @@ export class RemoteManager {
       for (const record of data.records) {
         identifier(record.connectionId);
         if (!/^[a-f0-9]{64}$/.test(record.binding ?? "") || this.#records.has(record.connectionId)) throw new Error("invalid remote binding");
-        if (record.operation !== undefined) {
-          const operation = record.operation;
-          if (!operation || typeof operation !== "object" || Array.isArray(operation)
-            || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(operation.id ?? "")
-            || !remoteActions.includes(operation.action) || !/^[a-f0-9]{64}$/.test(operation.revision ?? "")
-            || !["running", "succeeded", "failed", "unknown"].includes(operation.state)
-            || typeof operation.message !== "string") throw new Error("invalid remote operation");
-        }
+        if (record.operation !== undefined) record.operation = operationSummary(record.operation);
+        if (record.history !== undefined && (!Array.isArray(record.history) || record.history.length > operationHistoryLimit)) throw new Error("invalid operation history");
+        record.history = (record.history ?? []).map(operationSummary);
+        if (record.history.some((operation) => !terminalOperation(operation) || operation.id === record.operation?.id)
+          || new Set(record.history.map((operation) => operation.id)).size !== record.history.length) throw new Error("invalid operation history");
         if (record.operation?.state === "running") {
-          record.operation.state = "unknown";
-          delete record.operation.progress;
-          record.operation.message = "插件已重启，请连接后检测远端操作结果";
+          const operation = record.operation;
+          if (operation.dispatch === "pending" && operation.step === "checking") {
+            operation.state = "failed"; operation.step = "failed";
+            operation.message = "插件在派发前退出，本次未执行远端变更，请重新预览后操作";
+            operation.error = errorDetails(new OperationError("REMOTE_NOT_DISPATCHED", operation.message));
+            operation.updatedAt = new Date().toISOString();
+          } else {
+            operation.state = "unknown";
+            operation.message = "插件已重启，请连接后检测远端操作结果";
+          }
         }
         this.#records.set(record.connectionId, record);
       }
@@ -143,13 +149,21 @@ export class RemoteManager {
   }
 
   #save() {
-    const contents = JSON.stringify({ version: 1, records: [...this.#records.values()] }, null, 2) + "\n";
+    const records = [...this.#records.values()].map((record) => ({ ...record, ...(record.operation && { operation: operationSummary(record.operation) }), history: record.history.map(operationSummary) }));
+    const contents = JSON.stringify({ version: 1, records }, null, 2) + "\n";
     const pending = this.#queue.catch(() => {}).then(async () => {
       await mkdir(dirname(this.file), { recursive: true, mode: 0o700 });
       const temporary = this.file + "." + randomUUID() + ".tmp";
       try {
         await writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
-        await rename(temporary, this.file);
+        for (let attempt = 0; ; attempt++) {
+          try { await this.renameFile(temporary, this.file); break; }
+          catch (error) {
+            if (process.platform !== "win32" || !["EPERM", "EBUSY"].includes(error.code) || attempt >= 4) throw error;
+            // A concurrent reader or scanner can briefly hold the destination on Windows.
+            await delay(10 * (attempt + 1));
+          }
+        }
       } finally { await rm(temporary, { force: true }).catch(() => {}); }
     });
     this.#queue = pending;
@@ -170,7 +184,7 @@ export class RemoteManager {
       if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BINDING_CHANGED", "此连接的服务器身份已变化，旧操作结果仍待核实，请使用独立连接管理新服务器");
       this.#records.delete(id); record = undefined;
     }
-    if (!record) { record = { connectionId: id, binding }; this.#records.set(id, record); }
+    if (!record) { record = { connectionId: id, binding, history: [] }; this.#records.set(id, record); }
     return record;
   }
 
@@ -236,7 +250,8 @@ export class RemoteManager {
       : operation.state === "succeeded" ? "已完成" : operation.state === "unknown" ? "结果未知，请检测环境核实，避免重复执行"
         : operation.diagnostic ? actionFailure(operation.action, operation.diagnostic.exitCode, operation.diagnostic).message : "执行失败，请查看任务详情";
     const backup = operation.result?.backupDirectory ? "；远端备份目录：" + operation.result.backupDirectory : "";
-    this.sessions.recordLog?.(id, level, "远程 Magpie：" + labels[operation.action] + " · " + (reconciled ? "检测确认：" : "") + message + backup + "（任务 " + operation.id + "）");
+    const restore = restoreResultMessage(operation.restore);
+    this.sessions.recordLog?.(id, level, "远程 Magpie：" + labels[operation.action] + " · " + (reconciled ? "检测确认：" : "") + (operation.error?.code === "REMOTE_NOT_DISPATCHED" ? operation.message : message) + backup + (restore ? "；" + restore : "") + "（任务 " + operation.id + "）");
   }
 
   async #closeWebForward(id) {
@@ -290,17 +305,22 @@ export class RemoteManager {
     if (!/^[a-f0-9-]{36}$/.test(operation.id)) return;
     const script = `set -eu\nbase="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote"\ncat "$base/operations/${operation.id}/state" 2>/dev/null || true\nprintf '\\n'\ncat "$base/operations/${operation.id}/result" 2>/dev/null || true\n`;
     const response = await this.sessions.execute(id, "sh -s", { input: script, signal, timeoutMs: 10000 });
-    const lines = response.stdout.trim().split(/\r?\n/), state = lines[0];
+    const lines = response.stdout.split(/\r?\n/).filter((line) => line.length), state = lines[0];
     const result = parseActionResult(response.stdout, operation.id);
-    const consistent = lines.length === 1 || (lines.length === 2 && result && (state === "succeeded" ? result.exitCode === 0 && result.step === "completed" : result.exitCode !== 0));
+    const restore = operation.action === "restore" ? parseRestoreResult(response.stdout, operation.id) : undefined;
+    const consistent = lines.length === 1 || (result && (lines.length === 2 || (lines.length === 3 && restore))
+      && lines[1].startsWith("MIGPIE_RESULT_V1\t") && (lines.length < 3 || lines[2].startsWith("MIGPIE_RESTORE_V1\t"))
+      && (state === "succeeded" ? result.exitCode === 0 && result.step === "completed" && (!restore || (restore.configState === "applied" && restore.rollbackState === "not_needed" && ["running", "unchanged"].includes(restore.serviceState))) : result.exitCode !== 0));
     if (response.code === 0 && ["succeeded", "failed"].includes(state) && consistent && !record.instance.locked) {
       operation.state = state; operation.step = state === "succeeded" ? "completed" : result?.step ?? "failed";
       operation.updatedAt = new Date().toISOString();
       delete operation.error;
       if (result) operation.diagnostic = { step: result.step, exitCode: result.exitCode, reason: result.reason };
+      if (restore) operation.restore = restore;
       if (backupActions.includes(operation.action) && (state === "succeeded" || result?.backupReady)) operation.result = { backupDirectory: backupDirectory(record.instance, operation.id) };
       if (state === "failed" && result) operation.error = errorDetails(actionFailure(operation.action, result.exitCode, result));
       operation.message = state === "succeeded" ? "已根据远端完成记录核实操作结束，请检查当前环境" : operation.error?.message ?? "远端记录显示操作失败，请检查实际状态后处理";
+      if (restore) operation.message += "；" + restoreResultMessage(restore);
       if (state === "succeeded" && ["stop", "uninstall"].includes(operation.action)) {
         try { await this.#closeWebForward(id); }
         catch { operation.message += "，本机 Web 通道关闭失败，请在端口转发中停止该通道"; }
@@ -381,7 +401,7 @@ export class RemoteManager {
     }
     if (action === "restore") {
       changes.push("恢复备份 " + selectedBackup.id, "先保存恢复前的完整配置归档和当前程序副本", ...(instance.service.state === "running" ? ["停止当前运行的用户服务"] : []), selectedBackup.format === "absent" ? "还原为无配置目录状态，保留当前程序版本" : "用所选配置归档替换当前配置目录，保留当前程序版本", instance.service.state === "running" ? "重新启动原先运行的服务并检查健康状态" : "保持服务未运行状态");
-      warnings.push("当前配置目录会被替换，备份之外的设置、Agent 和插件配置不会保留；恢复前快照可在备份列表中查看", "配置格式需与当前程序兼容；外部目录中的数据不会随此归档恢复");
+      warnings.push("当前配置目录会被替换，备份之外的设置、Agent 和插件配置不会保留；恢复前快照可在备份列表中查看", "配置格式需与当前程序兼容；外部目录中的数据不会随此归档恢复", "配置应用后若服务启动或健康检查失败，不会自动回退；结果将分别说明配置、服务与恢复依据");
     }
     if (action === "delete_backup") {
       changes.push("删除远端备份目录 " + selectedBackup.directory, "移除其中的配置备份、旧程序副本和版本记录");
@@ -410,15 +430,17 @@ export class RemoteManager {
       if (record.operation.action === action && record.operation.revision === revision) return copy(record.operation);
       throw new OperationError("REMOTE_BUSY", "同一服务器已有管理操作正在执行");
     }
-    if (record.operation?.revision === revision) return copy(record.operation);
+    const accepted = [record.operation, ...record.history].find((item) => item?.revision === revision && item.action === action);
+    if (accepted) return copy(accepted);
     if (record.operation?.state === "unknown") throw new OperationError("REMOTE_BUSY", "上次操作结果待核实，请先连接并检测");
     if (!preview || preview.action !== action || preview.revision !== revision || preview.expires < Date.now() || preview.profile !== profileRevision(profile)) throw new OperationError("REMOTE_PREVIEW_STALE", "操作预览已过期或连接配置已变化，请重新预览");
     this.#connected(id);
-    const operation = { id: randomUUID(), action, revision, state: "running", step: "checking", message: "正在复核环境", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    const previous = record.operation;
+    const operation = { id: randomUUID(), action, revision, state: "running", step: "checking", dispatch: "pending", message: "正在复核环境", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...(preview.selectedBackup && { backupId: preview.selectedBackup.id }) };
+    const previous = record.operation, previousHistory = record.history;
+    if (terminalOperation(previous)) record.history = [operationSummary(previous), ...record.history].slice(0, operationHistoryLimit);
     record.operation = operation;
     try { await this.#save(); }
-    catch (cause) { record.operation = previous; throw new OperationError("REMOTE_STATE_WRITE_FAILED", "无法保存操作记录，未执行远端变更", { cause }); }
+    catch (cause) { record.operation = previous; record.history = previousHistory; throw new OperationError("REMOTE_STATE_WRITE_FAILED", "无法保存操作记录，未执行远端变更", { cause }); }
     this.#logOperation(id, operation);
     const task = this.#run(id, record, preview);
     this.#tasks.add(task);
@@ -434,7 +456,7 @@ export class RemoteManager {
       if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭，未执行变更");
       if (hash(instance) !== preview.baseline) throw new OperationError("REMOTE_PREVIEW_STALE", "远端程序、服务或环境已变化，请重新预览");
       this.#validate(operation.action, instance, preview.update);
-      operation.step = "executing"; operation.message = labels[operation.action] + "中，刷新页面后可继续查看";
+      operation.step = "executing"; operation.dispatch = "possible"; operation.message = labels[operation.action] + "中，刷新页面后可继续查看";
       await this.#save();
       this.#logOperation(id, operation);
       const script = actionScript(operation.action, instance, operation.id, preview.release, preview.selectedBackup);
@@ -442,10 +464,14 @@ export class RemoteManager {
       const response = await this.sessions.execute(id, "sh -s", { input: script, timeoutMs: 600000, maxBytes: 262144, onStdout: this.#progressReader(id, operation) });
       delete operation.progress;
       const result = parseActionResult(response.stdout, operation.id, response.code);
+      const restore = operation.action === "restore" ? parseRestoreResult(response.stdout, operation.id) : undefined;
+      if (restore) operation.restore = restore;
       if (result) {
         operation.diagnostic = { step: result.step, exitCode: result.exitCode, reason: result.reason };
         if (backupActions.includes(operation.action) && result.backupReady) operation.result = { backupDirectory: backupDirectory(instance, operation.id) };
       }
+      if (response.stdout.includes("MIGPIE_RESTORE_V1") && (!restore || !result
+        || (response.code === 0 && (restore.configState !== "applied" || restore.rollbackState !== "not_needed" || !["running", "unchanged"].includes(restore.serviceState))))) throw new OperationError("REMOTE_RESULT_UNKNOWN", "恢复结果记录无效，请检测配置与服务实际状态");
       if (response.code !== 0) throw actionFailure(operation.action, response.code, result);
       if (!response.stdout.split(/\r?\n/).includes("MIGPIE_DONE") || (!result && response.stdout.includes("MIGPIE_RESULT_V1"))) throw new OperationError("REMOTE_RESULT_UNKNOWN", "远端完成标记缺失或结果记录无效，请检测实际状态");
       operation.message = labels[operation.action] + "已完成";
@@ -467,16 +493,23 @@ export class RemoteManager {
       operation.error = errorDetails(error); operation.message = error.message;
     } finally {
       delete operation.progress;
+      if (operation.restore) operation.message += "；" + restoreResultMessage(operation.restore);
       operation.updatedAt = new Date().toISOString();
       try { await this.#save(); }
-      catch { operation.state = "unknown"; operation.message = "远端操作已返回，但本地记录保存失败，请重新检测结果"; }
+      catch (cause) {
+        operation.error = errorDetails(new OperationError("REMOTE_STATE_WRITE_FAILED", "无法保存操作结果，请检查本地目录权限和空间", { cause }));
+        if (dispatched) { operation.state = "unknown"; operation.message = "远端操作已返回，但本地记录保存失败，请重新检测结果"; }
+        else operation.message += "；本地结果保存失败，本次未派发远端变更";
+      }
       this.#logOperation(id, operation);
     }
   }
 
-  async operation(id, operationId) {
-    const profile = await this.#profile(id), operation = this.#record(id, profile).operation;
-    if (operationId && operationId !== operation?.id) throw new OperationError("REMOTE_OPERATION_MISSING", "未找到此连接的操作记录");
+  async operation(id, operationId, { history = false } = {}) {
+    const profile = await this.#profile(id), record = this.#record(id, profile);
+    if (history) return { connectionId: id, limit: operationHistoryLimit, operations: [record.operation, ...record.history].filter(Boolean).map(operationSummary) };
+    const operation = operationId ? [record.operation, ...record.history].find((item) => item?.id === operationId) : record.operation;
+    if (operationId && !operation) throw new OperationError("REMOTE_OPERATION_MISSING", "未找到此连接的操作记录，历史记录可能已轮换");
     return copy(operation ?? null);
   }
 

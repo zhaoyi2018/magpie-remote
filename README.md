@@ -116,18 +116,18 @@ http://127.0.0.1:3425/mcp/magpie/tools
 
 - [文档导航](docs/README.md)：配置、工具参数、架构、开发发布和验证记录。
 - [操作指南](docs/usage.md)：认证、主机公钥、双向转发与常见问题。
-- [工具接口](docs/tools.md)：21 个工具的参数与状态语义。
-- [远程 Magpie 管理](docs/remote.md)：安装、更新、备份口令、任务核实和官方 Web 入口。
+- [工具接口](docs/tools.md)：22 个工具的参数与状态语义。
+- [远程 Magpie 管理](docs/remote.md)：安装、更新、配置归档、恢复结果、任务历史与官方 Web 入口。
 - [SSH 配置导入](docs/ssh-import.md)：预览与选择导入、支持范围及页面接入约定。
 - [验证记录](docs/verification.md)：已完成的测试及尚未验证的部署场景。
 
-Next 阶段已加入断网自动重连和配置备份恢复。自动重连默认关闭，在连接编辑器中按需开启；页面顶部「备份与恢复」提供手动备份与预览恢复。恢复会停止全部连接并保留原配置，完成后按需手动连接。
+已支持断网自动重连和配置备份恢复。自动重连默认关闭，在连接编辑器中按需开启；页面顶部「备份与恢复」提供手动备份与预览恢复。恢复会停止全部连接并保留原配置，完成后按需手动连接。
 
-本轮补充配置版本保护、目标连接超时与恢复诊断，以及删除连接后的运行记录清理。配置文件和既有备份无需迁移；旧的无版本更新调用会明确拒绝，页面会保留冲突草稿供对照。
+远程任务保留当前记录与最近 20 条终态历史，可在运行日志中筛选，也可按操作 ID 查询。明确尚未派发的任务在宿主重启后结束为本地中止；可能已经执行的任务继续等待核实，不自动重放。页面同时显示非阻断的备份清理警告，以及认证、主机信任与 agent 的修复引导。
 
-远程管理首版支持普通 Linux amd64/arm64 的用户安装，供应商和 Agent 通过转发后的官方 Web 管理，插件内嵌编辑留待后续。更新优先使用官方加密备份；旧版没有备份命令时，预览会明示先保存未加密的受限配置归档。断线或超时结果保持待核实。使用范围与操作流程见[远程 Magpie 管理](docs/remote.md)。
+远程管理首版支持普通 Linux amd64/arm64 的用户安装，供应商和 Agent 通过转发后的官方 Web 管理，插件内嵌编辑留待后续。备份、更新与恢复统一保存未加密的配置归档和当前程序副本；归档可能包含密钥，请妥善保管。恢复结果分别报告配置、服务、回退与恢复依据，应用后启动失败不自动回退。断线或超时结果保持待核实。使用范围与操作流程见[远程 Magpie 管理](docs/remote.md)。
 
-`npm run check:release` 汇总静态、Node、隔离 POSIX 脚本和两套 iframe 页面回归；`test:ui` 验证既有连接与转发，`test:ui:remote` 验证远程管理。另在 Bun 和实际隔离 Magpie 宿主验证工具注册与原有 SSH 流程。测试使用临时配置、回环 SSH 和受控响应，未执行真实 Linux 官方安装、升级或 systemd 部署；完整计数、证据与边界见[验证记录](docs/verification.md)。
+`npm run check:release` 统一运行静态、Node、隔离 POSIX 脚本、两套 iframe 页面、可用的 Bun 与显式提供的实际宿主检查，并生成含包文件清单的 `.local/release-check.json`。缺少外部验收时明确标为 `not_run`；`npm run check:release:strict` 要求全部通过。Ubuntu/Windows × Node 22/24 的 CI 已配置，真实 Linux 生命周期有[专用账户验收入口](docs/linux-acceptance.md)。本机回归使用临时配置、回环 SSH 与受控响应，未替代真实 Linux/systemd 验收；结果见[验证记录](docs/verification.md)。
 
 插件依据[官方中文插件规范](https://usemagpie.ai/docs/zh/plugins)开发；本次中文版访问失败时，使用了[官方英文版](https://usemagpie.ai/docs/plugins)核对入口、工具接口与运行边界。
 窗口里的页面开发参考https://usemagpie.ai/docs/zh/plugins#pages

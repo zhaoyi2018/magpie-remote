@@ -20,9 +20,11 @@ npm test
 
 `tests/passwords.test.mjs` 覆盖密码加密与重载、留空保留和显式替换、服务器信息重新绑定、切换认证移除密文、版本冲突、篡改或丢失密钥、并发密钥创建、加密备份恢复、管理页保存后无额外凭据登录，以及宿主启动和断网后的密码重连。所有密码和服务均为本地测试数据。
 
-Next 的 `tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `tests/network-proxy.mjs` 的双向丢包代理，验证显式断线、静默断网、恢复、退避上限、手动停止、临时凭据缺失和跨连接隔离。测试缩短保活与重试间隔，不修改系统网卡、防火墙或日常连接。`tests/backups.test.mjs` 验证快照轮换、无变化不轮换、损坏文件原样保留、过期预览、备份失败、并发恢复和连接停止；HTTP 测试覆盖主配置损坏时的已认证恢复入口。
+`tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `tests/network-proxy.mjs` 的双向丢包代理，验证显式断线、静默断网、恢复、退避上限、手动停止、临时凭据缺失和跨连接隔离。测试缩短保活与重试间隔，不修改系统网卡、防火墙或日常连接。`tests/backups.test.mjs` 验证快照轮换、无变化不轮换、损坏文件原样保留、过期预览、备份失败、并发恢复和连接停止；HTTP 测试覆盖主配置损坏时的已认证恢复入口。
 
 `tests/consistency.test.mjs` 验证旧版本写入与删除保护、同连接排队冲突、独立连接互不冲突、无变化版本稳定，以及删除失败保护和运行记录清理。`tests/forward-diagnostics.test.mjs` 使用本机 SSH 服务、迟到通道回调及可注入的本地目标连接，验证双向目标超时、真实拒绝与恢复、旧请求不覆盖新结果和快照隔离；不使用外部不可达地址模拟超时。HTTP 测试还覆盖页面和 MCP 共用版本保护。
+
+`tests/remote-results.test.mjs` 覆盖恢复协议的空尾字段、Base64 路径、重复/矛盾记录与摘要字段白名单；`tests/remote.test.mjs` 另验证派发前重启、派发边界保存失败、旧记录保守核实、历史查询/轮换、损坏历史保护与恢复结果跨重启保留。`tests/sessions.test.mjs` 注入远端取消监听的拒绝、超时和断链，要求关闭受影响 SSH、释放双向监听且独立连接仍能传输。
 
 `tests/remote-exec.test.mjs` 使用本机真实 SSH 通道验证标准输入、双输出、分片 UTF-8 实时标准输出、退出状态、输出上限、超时与断线。`tests/remote.test.mjs` 使用隔离状态文件和注入的远端响应验证生命周期预览、去重、环境变化、普通配置归档、恢复预览绑定、分片进度校验、下载阶段断线后的未知结果、卸载范围和 Web 转发冲突。`npm run test:remote` 通过标准输入向真实 POSIX shell 传入生成脚本，使用临时 HOME 和假的 Magpie / systemd 命令，并用逐步写入的临时文件验证下载字节在任务结束前输出；Windows 自动定位 Git Bash，也可用 `MIGPIE_BASH` 指定。它验证脚本行为，不下载程序或改变真实服务。
 
@@ -80,7 +82,7 @@ node scripts/host-smoke.mjs 'C:/path/to/bun.exe' 'C:/path/to/host-current.js'
 
 ## 修改与发布
 
-修改源码后运行 `npm run check` 和 `npm test`；涉及 SSH 生命周期、流或依赖时，再验证 Bun 和实际插件宿主。在 Magpie 桌面重新加载此插件后，宿主才会读取修改。
+修改源码后运行 `npm run check` 和 `npm test`。发布前使用 `npm run check:release` 生成 `.local/release-check.json`，包含源码指纹、提交、运行时、逐项结果与包清单；缺少 Bun、实际宿主或真实 Linux 记录会标为 `not_run`，报告为 `incomplete`。`npm run check:release:strict` 要求全部验收通过，可附 `-- --bun <绝对路径> --host <绝对路径> --linux-result <JSON>`。真实 Linux 入口、固定官方资产与清理见[发布门禁与 Linux 验收](linux-acceptance.md)。在 Magpie 桌面重新加载此插件后，宿主才会读取修改。
 
 ```powershell
 npm pack --dry-run

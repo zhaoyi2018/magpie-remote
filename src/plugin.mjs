@@ -116,9 +116,12 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       },
     },
     remote_operation: {
-      description: "Read the latest remote operation for this connection, including failed or unknown results. Never returns credentials or raw command output.",
-      args: args({ connectionId: idSchema, operationId: stringSchema }, ["connectionId"]),
-      execute({ connectionId, operationId }) { return remote.operation(connectionId, operationId); },
+      description: "Read the latest remote operation, find an operationId, or use history=true for the current operation and up to 20 previous terminal summaries. Never returns credentials or raw command output.",
+      args: args({ connectionId: idSchema, operationId: stringSchema, history: { type: "boolean", default: false } }, ["connectionId"]),
+      execute({ connectionId, operationId, history = false }) {
+        if (typeof history !== "boolean" || (history && operationId !== undefined)) throw new Error("history 必须是布尔值，且不能与 operationId 同时使用");
+        return remote.operation(connectionId, operationId, { history });
+      },
     },
     remote_backups: {
       description: "List remote Magpie backup metadata without reading configuration contents or credentials. Restore and delete require a fresh remote_preview with the selected backupId.",
@@ -131,9 +134,13 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       execute({ connectionId, port }) { return serial(connectionId, () => remote.web(connectionId, { port })); },
     },
     config_backups: {
-      description: "List local configuration backup metadata, even when the current configuration is damaged. Never returns credentials or backup contents.",
-      args: args({}),
-      execute() { return store.listBackups(); },
+      description: "List local configuration backup metadata, even when the current configuration is damaged. includeStatus=true returns {backups, storageWarning}; otherwise returns an array. Never returns credentials or backup contents.",
+      args: args({ includeStatus: { type: "boolean", default: false } }, []),
+      async execute({ includeStatus = false } = {}) {
+        if (typeof includeStatus !== "boolean") throw new Error("includeStatus 必须是布尔值");
+        const backups = await store.listBackups();
+        return includeStatus ? { backups, storageWarning: store.storageWarning } : backups;
+      },
     },
     config_backup: {
       description: "Create a validated local configuration backup. Retains the latest five valid snapshots; saved passwords remain encrypted and the local encryption key is never included.",
@@ -196,10 +203,12 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       },
     },
     connections: {
-      description: "List saved SSH profiles as {connection, revision, hasSavedPassword, session}, without passwords or ciphertext. Use each profile's revision as expectedRevision when editing or deleting its configuration. Does not connect.",
-      args: args({}),
-      async execute() {
-        return (await store.list()).map((profile) => ({ connection: publicProfile(profile), revision: profileRevision(profile), hasSavedPassword: Boolean(profile.encryptedPassword), session: sessions.status(profile.id) }));
+      description: "List saved SSH profiles as {connection, revision, hasSavedPassword, session}, without passwords or ciphertext. includeStatus=true returns {connections, storageWarning}; otherwise returns an array. Use each profile's revision as expectedRevision when editing or deleting its configuration. Does not connect.",
+      args: args({ includeStatus: { type: "boolean", default: false } }, []),
+      async execute({ includeStatus = false } = {}) {
+        if (typeof includeStatus !== "boolean") throw new Error("includeStatus 必须是布尔值");
+        const connections = (await store.list()).map((profile) => ({ connection: publicProfile(profile), revision: profileRevision(profile), hasSavedPassword: Boolean(profile.encryptedPassword), session: sessions.status(profile.id) }));
+        return includeStatus ? { connections, storageWarning: store.storageWarning } : connections;
       },
     },
     save_connection: {

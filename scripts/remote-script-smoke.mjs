@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, rm, access } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, basename, dirname } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -45,8 +45,8 @@ case "$1" in
       rm -f "$0.new"
     fi
     printf updated > "$HOME/updated" ;;
-  healthcheck) if [ -e "$HOME/fail-healthcheck" ]; then printf 'gateway not healthy\\n' >&2; exit 1; fi; [ "$(cat "$state" 2>/dev/null)" = running ] ;;
-  daemon) printf '%s\\n' "$2" >> "$HOME/service-actions"; if [ "$2" = restart ] && [ -e "$HOME/fail-restart" ]; then printf 'permission denied: isolated-private-output\\n' >&2; exit 1; fi; case "$2" in
+  healthcheck) if [ -e "$HOME/fail-healthcheck" ]; then printf 'gateway not healthy: isolated-private-output\\n' >&2; exit 1; fi; [ "$(cat "$state" 2>/dev/null)" = running ] ;;
+  daemon) printf '%s\\n' "$2" >> "$HOME/service-actions"; if { [ "$2" = restart ] && [ -e "$HOME/fail-restart" ]; } || { [ "$2" = start ] && [ -e "$HOME/fail-start" ]; }; then printf 'permission denied: isolated-private-output\\n' >&2; exit 1; fi; case "$2" in
     install|restart|start) printf running > "$state" ;;
     stop) printf stopped > "$state" ;;
     uninstall) rm -f "$HOME/.config/systemd/user/magpie.service" "$state" ;;
@@ -81,6 +81,24 @@ esac
   // Use a canonical HOME for the scripts' explicit default-path ownership check.
   const canonical = 'export HOME=' + "'" + posixHome.replaceAll("'", "'\\''") + "'\n";
   const execute = (action, operationId = randomUUID(), selected, observed = instance) => run(canonical + actionScript(action, observed, operationId, undefined, selected));
+  const assertRestoreResult = async (result, operationId, configState, serviceState, rollbackState, recoveryDirectory = instance.configDirectory.replace(/\/magpie$/, "/magpie-remote/backups/") + operationId) => {
+    const records = result.stdout.split("\n").filter((line) => /^MIGPIE_(RESULT|RESTORE)_V1\t/.test(line));
+    assert.equal(records.length, 2, result.stdout);
+    assert.equal(records[0].split("\t").length, 6);
+    assert.equal(records[0].split("\t")[0], "MIGPIE_RESULT_V1");
+    assert.equal(records[0].split("\t")[1], operationId);
+    const restoreFields = records[1].split("\t");
+    assert.equal(restoreFields.length, 6);
+    assert.deepEqual(restoreFields.slice(0, 5), ["MIGPIE_RESTORE_V1", operationId, configState, serviceState, rollbackState]);
+    assert.match(restoreFields[5], /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
+    const recovery = Buffer.from(restoreFields[5], "base64").toString("utf8");
+    if (recoveryDirectory instanceof RegExp) assert.match(recovery, recoveryDirectory);
+    else assert.equal(recovery, recoveryDirectory);
+    assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", operationId, "result"), "utf8"), records.join("\n") + "\n");
+    await assert.rejects(access(join(home, ".config", "magpie-remote", "operations", operationId, "output")));
+    for (const secret of ["isolated-private-output", "isolated-config-secret", "isolated-script-secret"]) assert.ok(!(result.stdout + result.stderr).includes(secret));
+    return recovery;
+  };
   const listing = async () => {
     const result = await run(backupInventoryScript);
     assert.equal(result.code, 0, result.stderr);
@@ -133,11 +151,15 @@ esac
   }
   const selected = (await listing()).find((backup) => backup.id === id);
   assert.equal(selected.format, "archive"); assert.equal(selected.hasBinary, true); assert.equal(selected.version, instance.version);
+  const rejectedRestoreId = randomUUID(), rejectedRestore = await execute("restore", rejectedRestoreId, { ...selected, fingerprint: "0".repeat(64) });
+  assert.equal(rejectedRestore.code, 79);
+  await assertRestoreResult(rejectedRestore, rejectedRestoreId, "not_applied", "unchanged", "not_needed", "");
   await writeFile(join(config, "providers.json"), "before-restore");
   await writeFile(join(config, "extra.json"), "must-disappear");
   await writeFile(join(home, "service-actions"), "");
   const restoreId = randomUUID(), restored = await execute("restore", restoreId, selected);
   assert.equal(restored.code, 0, restored.stderr + restored.stdout);
+  await assertRestoreResult(restored, restoreId, "applied", "running", "not_needed");
   assert.equal(await readFile(join(config, "providers.json"), "utf8"), "isolated-config-secret");
   await assert.rejects(access(join(config, "extra.json")));
   assert.equal(await readFile(join(home, "service-actions"), "utf8"), "stop\nstart\n");
@@ -162,30 +184,81 @@ esac
       assert.equal(result.code, 0, result.stderr);
     }
     const invalidBackup = (await listing()).find((backup) => backup.id === invalidId);
-    const result = await execute("restore", randomUUID(), invalidBackup);
+    const invalidRestoreId = randomUUID(), result = await execute("restore", invalidRestoreId, invalidBackup);
     assert.notEqual(result.code, 0); assert.match(result.stdout, /\trestoring\t\d+\tcommand_failed\ttrue/);
+    await assertRestoreResult(result, invalidRestoreId, "not_applied", "unchanged", "not_needed");
     assert.equal(await readFile(join(config, "providers.json"), "utf8"), "isolated-config-secret");
     assert.equal(await readFile(join(home, "service-actions"), "utf8"), callsBefore);
   }
   // A failed replacement must put the original directory back and retain its snapshot.
   const realMove = (await run("command -v mv")).stdout.trim();
-  await writeFile(join(tools, "mv"), `#!/bin/sh
+  const failingMove = (failRollback) => `#!/bin/sh
 if [ "$#" -eq 3 ] && [ "$1" = -- ]; then
-  case "$2" in */.magpie-restore.*/config) printf 'permission denied: isolated-private-output\\n' >&2; exit 43 ;; esac
+  case "$2" in
+    */.magpie-restore.*/config) printf 'permission denied: isolated-private-output\\n' >&2; exit 43 ;;
+    ${failRollback ? "*/.magpie-restore.*/previous) printf 'rollback failed: isolated-private-output\\n' >&2; exit 44 ;;" : ""}
+  esac
 fi
 exec ${shellQuote(realMove)} "$@"
-`, { mode: 0o755 });
+`;
+  await writeFile(join(tools, "mv"), failingMove(false), { mode: 0o755 });
   await writeFile(join(config, "providers.json"), "before-failed-replacement");
+  await writeFile(join(home, "service-actions"), "");
   const rollbackId = randomUUID(), rolledBack = await execute("restore", rollbackId, selected);
   assert.equal(rolledBack.code, 43, rolledBack.stderr + rolledBack.stdout);
   assert.match(rolledBack.stdout, /\trestoring\t43\tpermission\ttrue/);
+  await assertRestoreResult(rolledBack, rollbackId, "rolled_back", "stopped", "succeeded");
   assert.equal(await readFile(join(config, "providers.json"), "utf8"), "before-failed-replacement");
   assert.equal(await readFile(join(home, "service-state"), "utf8"), "stopped");
+  assert.equal(await readFile(join(home, "service-actions"), "utf8"), "stop\n");
   const rollbackSnapshot = await run('tar -xOzf "$HOME/.config/magpie-remote/backups/' + rollbackId + '/config.tar.gz" ./providers.json');
   assert.equal(rollbackSnapshot.stdout, "before-failed-replacement");
-  assert.ok(!(rolledBack.stdout + rolledBack.stderr).includes("isolated-private-output"));
-  await rm(join(tools, "mv")); await writeFile(join(home, "service-state"), "running");
-  console.log("Remote backups: archive-only update/manual backup, exact config restore, pre-restore snapshot, failed-replacement rollback, binary preservation, corrupt/traversal rejection, fingerprint protection and scoped deletion passed.");
+  // If putting previous back also fails, keep it and report its exact recovery path.
+  await writeFile(join(tools, "mv"), failingMove(true), { mode: 0o755 });
+  await writeFile(join(config, "providers.json"), "before-failed-rollback");
+  await writeFile(join(home, "service-state"), "running"); await writeFile(join(home, "service-actions"), "");
+  const failedRollbackId = randomUUID(), failedRollback = await execute("restore", failedRollbackId, selected);
+  assert.equal(failedRollback.code, 43, failedRollback.stderr + failedRollback.stdout);
+  assert.match(failedRollback.stdout, /\trestoring\t43\tpermission\ttrue/);
+  const retained = await assertRestoreResult(failedRollback, failedRollbackId, "unknown", "stopped", "failed", /^\/.+\/\.magpie-restore\.[A-Za-z0-9]+\/previous$/);
+  await assert.rejects(access(config));
+  const retainedConfig = await run('test -d ' + shellQuote(retained) + ' && cat ' + shellQuote(retained + '/providers.json'));
+  assert.equal(retainedConfig.code, 0, retainedConfig.stderr); assert.equal(retainedConfig.stdout, "before-failed-rollback");
+  const failedRollbackSnapshot = await run('tar -xOzf "$HOME/.config/magpie-remote/backups/' + failedRollbackId + '/config.tar.gz" ./providers.json');
+  assert.equal(failedRollbackSnapshot.stdout, "before-failed-rollback");
+  assert.equal(await readFile(join(home, "service-state"), "utf8"), "stopped");
+  assert.equal(await readFile(join(home, "service-actions"), "utf8"), "stop\n");
+  await rm(join(tools, "mv"));
+  const recovered = await run('mv -- ' + shellQuote(retained) + ' ' + shellQuote(instance.configDirectory) + ' && rm -rf -- ' + shellQuote(retained.slice(0, -"/previous".length)));
+  assert.equal(recovered.code, 0, recovered.stderr);
+  // Applied config stays applied when start or healthcheck fails; recovery uses the snapshot.
+  for (const [flag, step, reason, expectedService] of [
+    ["fail-start", "starting", "permission", "stopped"],
+    ["fail-healthcheck", "healthcheck", "command_failed", "running"],
+  ]) {
+    const operationId = randomUUID(), before = "before-" + flag;
+    await writeFile(join(config, "providers.json"), before); await writeFile(join(config, "extra.json"), "must-disappear");
+    await writeFile(join(home, "service-state"), "running"); await writeFile(join(home, "service-actions"), "");
+    await writeFile(join(home, flag), "fail");
+    const result = await execute("restore", operationId, selected);
+    assert.equal(result.code, 1, result.stderr + result.stdout);
+    assert.ok(result.stdout.includes(`MIGPIE_RESULT_V1\t${operationId}\t${step}\t1\t${reason}\ttrue`), result.stdout);
+    await assertRestoreResult(result, operationId, "applied", "unknown", "not_needed");
+    assert.equal(await readFile(join(config, "providers.json"), "utf8"), "isolated-config-secret");
+    await assert.rejects(access(join(config, "extra.json")));
+    assert.equal(await readFile(join(home, "service-state"), "utf8"), expectedService);
+    assert.equal(await readFile(join(home, "service-actions"), "utf8"), "stop\nstart\n");
+    assert.equal(await readFile(join(home, ".local", "bin", "magpie"), "utf8"), fake);
+    const snapshot = await run('tar -xOzf "$HOME/.config/magpie-remote/backups/' + operationId + '/config.tar.gz" ./providers.json');
+    assert.equal(snapshot.code, 0, snapshot.stderr); assert.equal(snapshot.stdout, before);
+    await rm(join(home, flag));
+  }
+  await writeFile(join(home, "service-state"), "running");
+  console.log("Remote backups: archive-only backups, exact restore, pre-restore snapshots, replacement rollback, retained failed rollback, applied start/healthcheck failures, two-line restore results, binary preservation, corrupt/traversal rejection, fingerprint protection and scoped deletion passed.");
+  // Reset completed scenarios before further inventory scans; keep the original for uninstall checks.
+  for (const backupId of await readdir(backupPath(""))) {
+    if (backupId !== id) await rm(backupPath(backupId), { recursive: true });
+  }
   await rm(config, { recursive: true });
   const absentId = randomUUID(), absent = await execute("backup", absentId);
   assert.equal(absent.code, 0, absent.stderr);
@@ -204,8 +277,9 @@ exec ${shellQuote(realMove)} "$@"
   const linkedBackup = (await listing()).find((backup) => backup.id === linkedId);
   await writeFile(join(config, "providers.json"), "changed-linked-config");
   await writeFile(join(home, "service-state"), "stopped"); await writeFile(join(home, "service-actions"), "");
-  const linkedRestore = await execute("restore", randomUUID(), linkedBackup, { ...legacy, service: { ...legacy.service, state: "stopped" } });
+  const linkedRestoreId = randomUUID(), linkedRestore = await execute("restore", linkedRestoreId, linkedBackup, { ...legacy, service: { ...legacy.service, state: "stopped" } });
   assert.equal(linkedRestore.code, 0, linkedRestore.stderr + linkedRestore.stdout);
+  await assertRestoreResult(linkedRestore, linkedRestoreId, "applied", "unchanged", "not_needed");
   assert.equal(await readFile(join(config, "providers.json"), "utf8"), "symlink-config-secret");
   assert.equal(await readFile(join(home, "service-actions"), "utf8"), "");
   assert.equal(await readFile(join(home, "service-state"), "utf8"), "stopped");

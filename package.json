@@ -31,7 +31,9 @@
     "test:ui": "node scripts/ui-smoke.mjs",
     "test:ui:remote": "node scripts/remote-ui-smoke.mjs",
     "test:remote": "node scripts/remote-script-smoke.mjs",
-    "check:release": "npm run check && npm test && npm run test:remote && npm run test:ui && npm run test:ui:remote",
+    "check:release": "node scripts/release-check.mjs",
+    "check:release:strict": "node scripts/release-check.mjs --strict",
+    "test:linux": "node scripts/linux-lifecycle-smoke.mjs",
     "check": "node scripts/check.mjs",
     "prepack": "npm run check && npm test"
   },

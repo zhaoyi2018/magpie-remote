@@ -160,6 +160,26 @@ test("remote-forward request timeout closes the session and removes every forwar
   assert.deepEqual(sessions.status(fixture.profile.id).forwards, []);
 });
 
+for (const cancelForward of ["reject", "hang", "disconnect"]) {
+  test(`remote-forward cancellation ${cancelForward} closes the affected SSH session and preserves other sessions`, async (t) => {
+    const fixture = await sshServer(t, { cancelForward }), echo = await echoServer(t);
+    const sessions = manager(t, { forwardTimeoutMs: 200 });
+    const other = { ...fixture.profile, id: "independent" };
+    await sessions.connect(fixture.profile); await sessions.connect(other);
+    const remote = await sessions.addForward(fixture.profile.id, { id: "remote", direction: "s2c", bindPort: 0, targetPort: echo.port });
+    const local = await sessions.addForward(fixture.profile.id, { id: "local", direction: "c2s", bindPort: 0, targetPort: echo.port });
+    const independent = await sessions.addForward(other.id, { id: "independent", direction: "c2s", bindPort: 0, targetPort: echo.port });
+    assert.deepEqual(await exchange(remote.bindPort), Buffer.from("SSH tunnel round trip"));
+    await assert.rejects(sessions.removeForward(fixture.profile.id, "remote"));
+    assert.ok(["failed", "disconnected"].includes(sessions.status(fixture.profile.id).state));
+    assert.deepEqual(sessions.status(fixture.profile.id).forwards, []);
+    await until(() => fixture.listeners.size === 0, "remote listener survived uncertain cancellation");
+    for (const port of [remote.bindPort, local.bindPort]) await assert.rejects(exchange(port), /ECONNREFUSED/);
+    assert.equal(sessions.status(other.id).state, "connected");
+    assert.deepEqual(await exchange(independent.bindPort), Buffer.from("SSH tunnel round trip"));
+  });
+}
+
 test("an unexpected SSH disconnect cleans up client and server listeners", async (t) => {
   const fixture = await sshServer(t);
   const sessions = manager(t);

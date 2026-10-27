@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OperationError } from "../src/errors.mjs";
 import { RemoteManager, parseProbe } from "../src/remote.mjs";
@@ -104,12 +104,14 @@ async function fixture(t, fields = {}) {
 
 async function completed(h) {
   let operation;
-  await until(async () => {
-    operation = await h.remote.operation(h.profile.id);
-    if (!operation || operation.state === "running") return false;
-    const data = JSON.parse(await readFile(h.remote.file, "utf8"));
-    return data.records.find((record) => record.connectionId === h.profile.id)?.operation?.state === operation.state;
-  }, "remote operation did not finish and persist");
+  try {
+    await until(async () => {
+      operation = await h.remote.operation(h.profile.id);
+      if (!operation || operation.state === "running") return false;
+      const data = JSON.parse(await readFile(h.remote.file, "utf8"));
+      return data.records.find((record) => record.connectionId === h.profile.id)?.operation?.state === operation.state;
+    }, "remote operation did not finish and persist");
+  } catch (cause) { throw new Error("remote operation did not finish and persist: " + JSON.stringify(operation), { cause }); }
   return operation;
 }
 
@@ -117,6 +119,122 @@ async function start(h, action = "restart") {
   const preview = await h.remote.preview(h.profile.id, action);
   const operation = await h.remote.apply(h.profile.id, action, preview.revision);
   return { preview, operation };
+}
+
+test("transient Windows destination locks retry only the local atomic rename", { skip: process.platform !== "win32" }, async (t) => {
+  const h = await fixture(t); await h.remote.close();
+  let locks = 2, calls = 0;
+  h.remote = new RemoteManager({ ...h.options, renameFile: async (source, target) => {
+    calls++;
+    if (locks-- > 0) throw Object.assign(new Error("fixture reader lock"), { code: "EPERM" });
+    return rename(source, target);
+  } });
+  t.after(() => h.remote.close());
+  await start(h); assert.equal((await completed(h)).state, "succeeded");
+  assert.ok(calls >= 6); assert.equal(h.sessions.actions().length, 1);
+});
+
+test("restart ends a proven pre-dispatch task locally and permits a fresh preview", async (t) => {
+  const h = await fixture(t), entered = deferred(), released = deferred();
+  const preview = await h.remote.preview(h.profile.id, "restart");
+  h.sessions.onProbe = async () => { entered.resolve(); await released.promise; return response(probe()); };
+  t.after(() => released.resolve());
+  await h.remote.apply(h.profile.id, "restart", preview.revision);
+  await entered.promise;
+  const captured = await readFile(h.remote.file, "utf8"), file = join(h.directory, "restart.remote.json");
+  const pending = JSON.parse(captured).records[0].operation;
+  assert.equal(pending.dispatch, "pending"); assert.equal(pending.step, "checking");
+  await writeFile(file, captured);
+  const sessions = new FakeSessions(), restarted = new RemoteManager({ ...h.options, file, sessions });
+  t.after(() => restarted.close());
+  const stopped = await restarted.operation(h.profile.id);
+  assert.equal(stopped.state, "failed"); assert.equal(stopped.error.code, "REMOTE_NOT_DISPATCHED");
+  await restarted.preview(h.profile.id, "restart");
+  assert.equal(sessions.actions().length, 0); assert.equal(h.sessions.actions().length, 0);
+  const closing = h.remote.close(); released.resolve(); await closing;
+  assert.equal(h.sessions.actions().length, 0);
+});
+
+for (const dispatch of [undefined, "possible"]) {
+  test(`restart preserves uncertainty for a checking task with dispatch ${dispatch}`, async (t) => {
+    const h = await fixture(t);
+    await start(h); await completed(h); await h.remote.close();
+    const data = JSON.parse(await readFile(h.remote.file, "utf8"));
+    Object.assign(data.records[0].operation, { state: "running", step: "checking", dispatch });
+    await writeFile(h.remote.file, JSON.stringify(data));
+    const restarted = new RemoteManager(h.options); t.after(() => restarted.close());
+    assert.equal((await restarted.operation(h.profile.id)).state, "unknown");
+    await assert.rejects(restarted.preview(h.profile.id, "restart"), { code: "REMOTE_BUSY" });
+    assert.equal(h.sessions.actions().length, 1);
+  });
+}
+
+test("failure to persist the dispatch boundary executes no action and remains a local failure", async (t) => {
+  const h = await fixture(t), entered = deferred(), released = deferred();
+  const preview = await h.remote.preview(h.profile.id, "restart"), file = h.remote.file;
+  h.sessions.onProbe = async () => { entered.resolve(); await released.promise; return response(probe()); };
+  t.after(() => released.resolve());
+  await h.remote.apply(h.profile.id, "restart", preview.revision); await entered.promise;
+  await rm(file); await mkdir(file);
+  released.resolve();
+  await until(async () => (await h.remote.operation(h.profile.id)).message.includes("本次未派发远端变更"));
+  assert.equal((await h.remote.operation(h.profile.id)).state, "failed");
+  assert.equal(h.sessions.actions().length, 0);
+  await h.remote.close();
+  await rm(file, { recursive: true });
+});
+
+test("terminal history survives restart, rotates at 20 and retrieves an earlier failed task by id", async (t) => {
+  const h = await fixture(t);
+  h.sessions.onAction = () => response("untrusted raw output and credentials", 1);
+  const first = await start(h); const failure = await completed(h);
+  h.sessions.onAction = undefined;
+  const ids = [failure.id];
+  for (let i = 0; i < 20; i++) { await start(h); ids.push((await completed(h)).id); }
+  assert.equal((await h.remote.operation(h.profile.id, failure.id)).state, "failed");
+  assert.equal((await h.remote.apply(h.profile.id, "restart", first.preview.revision)).id, failure.id);
+  assert.equal(h.sessions.actions().length, 21);
+  await h.remote.close();
+  const restarted = new RemoteManager(h.options); t.after(() => restarted.close());
+  const listing = await restarted.operation(h.profile.id, undefined, { history: true });
+  assert.equal(listing.limit, 20); assert.deepEqual(listing.operations.map((item) => item.id), ids.slice().reverse());
+  assert.equal((await restarted.operation(h.profile.id, failure.id)).state, "failed");
+  assert.ok(!(await readFile(h.remote.file, "utf8")).includes("untrusted raw output"));
+  const next = await restarted.preview(h.profile.id, "restart");
+  await restarted.apply(h.profile.id, "restart", next.revision); await restarted.close();
+  const reloaded = new RemoteManager(h.options); t.after(() => reloaded.close());
+  assert.equal((await reloaded.operation(h.profile.id, undefined, { history: true })).operations.length, 21);
+  await assert.rejects(reloaded.operation(h.profile.id, failure.id), { code: "REMOTE_OPERATION_MISSING" });
+});
+
+test("failed submission restores the previous operation and history without archiving it twice", async (t) => {
+  const h = await fixture(t);
+  await start(h); await completed(h); await start(h); await completed(h);
+  const preview = await h.remote.preview(h.profile.id, "restart");
+  const before = await h.remote.operation(h.profile.id, undefined, { history: true });
+  const file = h.remote.file, bytes = await readFile(file);
+  await rm(file); await mkdir(file);
+  try {
+    await assert.rejects(h.remote.apply(h.profile.id, "restart", preview.revision), { code: "REMOTE_STATE_WRITE_FAILED" });
+    assert.deepEqual(await h.remote.operation(h.profile.id, undefined, { history: true }), before);
+    assert.equal(h.sessions.actions().length, 2);
+  } finally { await rm(file, { recursive: true }); await writeFile(file, bytes); }
+});
+
+for (const damage of ["duplicate", "current", "running", "limit"]) {
+  test(`invalid ${damage} history is preserved and blocks management`, async (t) => {
+    const h = await fixture(t);
+    await start(h); await completed(h); await start(h); await completed(h); await h.remote.close();
+    const data = JSON.parse(await readFile(h.remote.file, "utf8")), record = data.records[0];
+    if (damage === "duplicate") record.history.push(record.history[0]);
+    if (damage === "current") record.history = [record.operation];
+    if (damage === "running") record.history[0].state = "running";
+    if (damage === "limit") record.history = Array(21).fill(record.history[0]);
+    const bytes = JSON.stringify(data); await writeFile(h.remote.file, bytes);
+    const restarted = new RemoteManager(h.options); t.after(() => restarted.close());
+    await assert.rejects(restarted.operation(h.profile.id), { code: "REMOTE_STATE_INVALID" });
+    assert.equal(await readFile(h.remote.file, "utf8"), bytes);
+  });
 }
 
 test("base64 probe retains version, Unicode paths and separate service and web facts", () => {
@@ -777,6 +895,59 @@ test("remote backup inventory lists metadata without exposing backup contents an
   assert.ok(input.includes('run_step starting "$bin" daemon start'));
   assert.ok(!input.includes('"$bin" restore'));
   assert.ok(h.sessions.logs.some((entry) => entry.message.includes(operation.result.backupDirectory)));
+});
+
+for (const [step, configState, serviceState, rollbackState] of [
+  ["restoring", "rolled_back", "stopped", "succeeded"],
+  ["restoring", "unknown", "stopped", "failed"],
+  ["starting", "applied", "unknown", "not_needed"],
+  ["healthcheck", "applied", "unknown", "not_needed"],
+]) {
+  test(`restore ${step}/${rollbackState} records separate configuration, service and recovery outcomes`, async (t) => {
+    const h = await fixture(t); h.sessions.backupRows = [backupRow()];
+    h.sessions.onAction = async () => {
+      const { id } = await h.remote.operation(h.profile.id);
+      const directory = rollbackState === "failed" ? "/home/tester/.config/.magpie-restore.fixture/previous" : "/home/tester/.config/magpie-remote/backups/" + id;
+      return response(`raw output secret\nMIGPIE_RESULT_V1\t${id}\t${step}\t43\tpermission\ttrue\nMIGPIE_RESTORE_V1\t${id}\t${configState}\t${serviceState}\t${rollbackState}\t${Buffer.from(directory).toString("base64")}\n`, 43);
+    };
+    const preview = await h.remote.preview(h.profile.id, "restore", { backupId });
+    await h.remote.apply(h.profile.id, "restore", preview.revision);
+    const result = await completed(h);
+    assert.equal(result.state, "failed"); assert.equal(result.restore.configState, configState);
+    assert.equal(result.restore.serviceState, serviceState); assert.equal(result.restore.rollbackState, rollbackState);
+    assert.ok(result.restore.recoveryDirectory.startsWith("/home/tester/"));
+    assert.ok(!JSON.stringify(result).includes("raw output secret"));
+    await h.remote.close();
+    const restarted = new RemoteManager(h.options); t.after(() => restarted.close());
+    assert.deepEqual((await restarted.operation(h.profile.id)).restore, result.restore);
+  });
+}
+
+test("a successful exit with uncertain restore service evidence remains unknown", async (t) => {
+  const h = await fixture(t); h.sessions.backupRows = [backupRow()];
+  h.sessions.onAction = async () => {
+    const { id } = await h.remote.operation(h.profile.id);
+    return response(`MIGPIE_DONE\nMIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue\nMIGPIE_RESTORE_V1\t${id}\tapplied\tunknown\tnot_needed\t\n`);
+  };
+  const preview = await h.remote.preview(h.profile.id, "restore", { backupId });
+  await h.remote.apply(h.profile.id, "restore", preview.revision);
+  assert.equal((await completed(h)).state, "unknown");
+  await assert.rejects(h.remote.preview(h.profile.id, "restore", { backupId }), { code: "REMOTE_BUSY" });
+});
+
+test("unknown restore reconciles matching two-line results and rejects contradictory restore evidence", async (t) => {
+  const h = await fixture(t); h.sessions.backupRows = [backupRow()];
+  h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost response"); };
+  const preview = await h.remote.preview(h.profile.id, "restore", { backupId });
+  await h.remote.apply(h.profile.id, "restore", preview.revision);
+  const { id } = await completed(h);
+  const base = `MIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue\n`;
+  h.sessions.remoteState = `succeeded\n${base}MIGPIE_RESTORE_V1\t${id}\trolled_back\tstopped\tsucceeded\t\n`;
+  assert.equal((await h.remote.status(h.profile.id, { refresh: true })).operation.state, "unknown");
+  h.sessions.remoteState = `succeeded\n${base}MIGPIE_RESTORE_V1\t${id}\tapplied\trunning\tnot_needed\t\n`;
+  const confirmed = await h.remote.status(h.profile.id, { refresh: true });
+  assert.equal(confirmed.operation.state, "succeeded"); assert.equal(confirmed.operation.restore.serviceState, "running");
+  assert.equal(h.sessions.actions().length, 1);
 });
 
 test("creating a manual archive backup returns its directory without updating or restarting Magpie", async (t) => {

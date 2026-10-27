@@ -25,6 +25,8 @@
 
 配置归档和无配置目录快照支持自动恢复。先保存恢复前的配置归档与当前程序，在独立临时目录中校验并展开所选归档；确认可用后才停止原先运行的服务并替换配置目录。无配置目录快照会移除当前配置目录。替换失败时尝试还原原目录；恢复成功后仅重新启动原先运行的服务并检查健康状态，原停止状态保持停止。归档无效或包含越界路径时，在停止服务和替换配置之前拒绝执行。预览绑定选定条目的文件校验值，内容变化时拒绝执行。
 
+恢复结果通过固定的 `MIGPIE_RESTORE_V1` 记录分别报告配置状态（`not_applied` / `applied` / `rolled_back` / `unknown`）、服务状态（`unchanged` / `running` / `stopped` / `unknown`）、回退状态（`not_needed` / `succeeded` / `failed`）和可选恢复目录。替换失败后搬回原配置成功不代表服务已恢复；搬回失败会保留临时目录的 `previous` 并报告其位置。配置已应用后若启动或健康检查失败，不自动回退，服务标为待核实，恢复依据指向操作前快照。`running` 仅在启动并通过健康检查后报告，原停止服务成功恢复时保持 `unchanged`。
+
 恢复会替换整个配置目录，保留当前程序版本，配置目录以外的数据不会随归档恢复。旧程序副本不代表跨版本配置一定可以降级，页面不提供自动回退二进制。历史 `config.magpie` 加密备份仍显示在列表并可删除，需要使用原工具和原口令手动恢复；不完整备份不能自动恢复。
 
 ## 操作进度与断线
@@ -35,7 +37,7 @@
 
 远程操作的提交、执行、成功、失败和断线待核实事件写入当前连接的「运行日志」，与 SSH、转发事件一起过滤和查看，保留最近 200 条，宿主重启后清空。失败步骤、退出码、分类原因和已完成的备份位置合并到对应日志条目，不另设重复任务详情区；远程页面仅保留任务摘要与日志入口。原始命令输出和 Web 管理密钥不进入运行日志。
 
-本地 `connections.json.remote.json` 保存最近环境与每个连接的最新任务；文件损坏时明确报错，不覆盖旧内容。插件重启后原运行任务标为结果待核实。远端使用 `magpie-remote/operation.lock` 互斥，将状态写入 `magpie-remote/operations/<UUID>/state`，并在 `result` 中记录操作标识、失败步骤、退出码、可识别的错误类别与备份完成标记。只有固定字段返回页面，不保存命令的原始输出或口令。
+本地 `connections.json.remote.json` 保存最近环境、每个连接的当前任务和最多 20 条旧终态摘要，仍使用 version 1；旧文件没有历史字段时兼容读取。开始新任务时才归档旧终态，未知任务不能被轮换。历史可在「运行日志 → 远程任务历史」按全部、失败和待核实筛选，或用操作 ID 查询；历史轮换不删除服务器上的操作目录或备份。文件损坏、历史重复或非终态历史会明确报错，不覆盖旧内容。新任务先记录 `dispatch: pending`，复核后在执行前持久化 `possible`；重启时仅 `pending` 且仍为 `checking` 的任务标为 `failed` / `REMOTE_NOT_DISPATCHED`，可重新预览。其他原运行任务，包括缺少派发字段的旧记录，均标为结果待核实。远端使用 `magpie-remote/operation.lock` 互斥，将状态写入 `magpie-remote/operations/<UUID>/state`，并在 `result` 中记录操作标识、失败步骤、退出码、可识别的错误类别与备份完成标记。只有固定字段返回页面，不保存命令的原始输出或口令。
 
 SSH 断开、超时、通道没有明确退出码时，变更任务标为结果待核实。重新连接后检测环境，只有取得远端明确的完成记录并确认操作锁已释放，才解除状态。不根据版本或服务看似正常就自动重试。若锁残留或记录缺失，请在服务器核实进程与变更，不要直接重复部署。关闭 SSH 通道不能保证远端进程一定终止。
 
@@ -70,10 +72,10 @@ systemctl --user is-active magpie.service
 
 | 工具 | 参数 | 结果 |
 | --- | --- | --- |
-| `remote_status` | `connectionId`、可选 `refresh` | 缓存环境与最新任务；`refresh: true` 连接后探测并核实未知任务 |
+| `remote_status` | `connectionId`、可选 `refresh` | 缓存环境、当前任务与历史；`refresh: true` 连接后探测并核实未知任务 |
 | `remote_preview` | `connectionId`、`action`；恢复或删除时加 `backupId` | `revision`、变更清单、提示、归档备份方式 |
 | `remote_apply` | `connectionId`、`action`、预览的 `revision` | 立即返回后台任务，后续查询状态 |
-| `remote_operation` | `connectionId`、可选 `operationId` | 此连接最新任务或 `null` |
+| `remote_operation` | `connectionId`、可选 `operationId` 或 `history: true` | 最新任务或 `null`；按 ID 查当前/历史；历史模式返回 `{connectionId, limit: 20, operations}`，当前加旧终态最多 21 条 |
 | `remote_web` | `connectionId`、可选 `port` | 临时本地访问地址和带管理 key 的登录链接 |
 | `remote_backups` | `connectionId` | 此连接的远端备份元数据列表 |
 

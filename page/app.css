@@ -211,6 +211,16 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .log-list { border: 1px solid var(--line); border-radius: 8px; }
 .log-row { display: grid; grid-template-columns: 142px 36px minmax(0, 1fr); gap: 14px; padding: 12px 14px; font-size: 12px; border-bottom: 1px solid var(--line); align-items: baseline; }
 .log-row:last-child { border-bottom: 0; }
+.operation-history { margin-top: 28px; }
+.operation-history .section-heading { flex-wrap: wrap; }
+.history-detail { display: grid; gap: 5px; }
+.history-detail strong { color: var(--fg); font-weight: 500; }
+.history-id { font-family: var(--mono); color: var(--muted); }
+.storage-warning { flex-shrink: 0; padding: 11px 15px; border: 1px solid color-mix(in srgb, var(--warn) 32%, var(--line)); border-radius: 8px; color: var(--warn); background: color-mix(in srgb, var(--warn) 6%, var(--surface)); overflow-wrap: anywhere; }
+.connection-guidance { margin: -8px 0 18px; padding: 0 2px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.connection-help { margin-top: 20px; font-size: 12px; color: var(--muted); }
+.connection-help summary { cursor: pointer; color: var(--fg); }
+.connection-help ol { padding-left: 22px; display: grid; gap: 8px; }
 .log-row time { color: var(--muted); font-variant-numeric: tabular-nums; }
 .log-message { overflow-wrap: anywhere; }
 .log-level { color: var(--ok); font-size: 11px; }

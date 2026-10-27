@@ -19,7 +19,9 @@ export function createBackupManager({ call, refresh, toast, confirmAction }) {
     finally { busy = false; syncButtons(); }
   }
   async function load() {
-    const backups = await call("config_backups");
+    const { backups, storageWarning } = await call("config_backups", { includeStatus: true });
+    $("backup-warning").textContent = storageWarning?.message ?? "";
+    $("backup-warning").hidden = !storageWarning;
     $("backup-list").replaceChildren();
     for (const backup of backups) {
       const row = document.createElement("div"); row.className = "backup-item";

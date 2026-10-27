@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { launcherURL, managementFailure, readResponse } from "../page/recovery.js";
+import { connectionGuidance, launcherURL, managementFailure, readResponse } from "../page/recovery.js";
 
 test("expired desktop and loopback pages return to their plugin launcher, not the stale service", () => {
   for (const origin of ["http://wails.localhost", "http://127.0.0.1:3425", "http://localhost:3425", "http://[::1]:3425"]) {
@@ -27,6 +27,16 @@ test("configuration failures remain actionable without being described as a stop
   assert.equal(managementFailure({ code: "SERVICE_UNREACHABLE" }).action, "reopen");
   assert.equal(managementFailure({ code: "MANAGEMENT_EXPIRED" }).action, "reopen");
   assert.equal(managementFailure({ code: "REQUEST_TIMEOUT", message: "请求超时" }).action, "retry");
+});
+
+test("connection guidance explains verified host trust, agent and credential recovery", () => {
+  assert.match(connectionGuidance({ code: "HOST_KEY_UNTRUSTED", category: "trust" }), /独立核对.*不要直接信任/);
+  assert.match(connectionGuidance({ code: "HOST_KEY_UNAVAILABLE" }), /known_hosts.*权限/);
+  assert.match(connectionGuidance({ code: "SSH_AUTH_FAILED" }, { authMethod: "agent" }), /ssh-add -l.*Windows.*SSH_AUTH_SOCK/);
+  assert.match(connectionGuidance({ code: "KEY_UNAVAILABLE" }), /私钥路径/);
+  assert.match(connectionGuidance({ code: "CREDENTIALS_REQUIRED" }), /填写凭据并连接/);
+  assert.match(connectionGuidance({ code: "SSH_TIMEOUT" }), /防火墙/);
+  assert.equal(connectionGuidance({ code: "FORWARD_REJECTED", message: "fixture secret" }), "");
 });
 
 test("the page retains credential requirements and handles invalid responses explicitly", async () => {

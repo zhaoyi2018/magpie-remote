@@ -102,6 +102,11 @@ async function remoteFixture(context) {
           if (action === "stop") state.serviceActive = "inactive";
           if (action === "uninstall") { state.installed = false; state.serviceInstalled = false; state.webEnabled = false; }
           if (state.nextUnknown) { state.nextUnknown = false; finish("fixture-response-without-completion-marker\n"); return; }
+          if (action === "restore") {
+            const operationId = script.match(/operations\/([a-f0-9-]{36})/)?.[1];
+            const recovery = Buffer.from("/home/tester/.config/magpie-remote/backups/" + operationId).toString("base64");
+            finish(`MIGPIE_DONE\nMIGPIE_RESULT_V1\t${operationId}\tcompleted\t0\tnone\ttrue\nMIGPIE_RESTORE_V1\t${operationId}\tapplied\trunning\tnot_needed\t${recovery}\n`); return;
+          }
           finish("MIGPIE_DONE\n");
         })().catch(() => { channel.exit(70); channel.end(); }); });
       });
@@ -266,6 +271,17 @@ try {
   assert.ok((await failureLog().textContent()).includes(failedOperation.result.backupDirectory));
   await page.reload(); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor(); await openRemote();
   await waitOperation("失败"); await field("tab-logs").click(); await failureLog().waitFor();
+  await field("history-filter").selectOption("failed");
+  await ui.locator("#operation-history-list article").filter({ hasText: failedOperation.id }).waitFor();
+  assert.equal(await ui.locator("#operation-history-list article").count(), 1);
+  await field("history-filter").selectOption("all");
+  assert.ok(await ui.locator("#operation-history-list article").count() > 1);
+  const heldHistory = gateTool("remote_status"); await heldHistory.entered;
+  await selectedRow("测试服务器").click(); await field("tab-logs").click(); heldHistory.release();
+  await page.waitForTimeout(150);
+  assert.ok(!(await field("operation-history-list").textContent()).includes(failedOperation.id));
+  await selectedRow("生产服务器").click(); await field("tab-logs").click();
+  await ui.locator("#operation-history-list article").filter({ hasText: failedOperation.id }).waitFor();
   assert.equal(await failureLog().count(), 1);
   assert.ok((await failureLog().textContent()).includes(failedOperation.result.backupDirectory));
   const failureScreenshots = resolve(process.env.MIGPIE_REMOTE_UI_ARTIFACTS ?? ".local/remote-ui-regression"); await mkdir(failureScreenshots, { recursive: true });
@@ -341,6 +357,10 @@ try {
   assert.equal(await field("remote-backup-passphrase").count(), 0);
   await field("remote-apply").click(); await waitOperation("已完成");
   await until(() => fixture.executions.some((item) => item.action === "restore"));
+  await field("tab-logs").click();
+  await ui.locator("#operation-history-list article").filter({ hasText: "配置已应用；服务已启动并通过健康检查" }).waitFor();
+  assert.equal((await remote.operation("remote-alpha")).restore.configState, "applied");
+  await openRemote();
   await field("remote-refresh-backups").click(); await backupAction("delete_backup").click();
   await waitEnabled("remote-apply"); await field("remote-apply").click(); await waitOperation("已完成");
   await until(() => !fixture.state.backups.some((backup) => backup.id === selectedBackup.id));

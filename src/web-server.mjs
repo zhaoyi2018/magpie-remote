@@ -97,7 +97,7 @@ export async function startManagementServer({ tools, port = 0 }) {
     if (relative.startsWith("api/")) {
       if (!secureEqual(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: "管理页面认证已过期，请重新打开页面", code: "MANAGEMENT_EXPIRED" });
       if (request.method === "GET" && relative === "api/snapshot") {
-        return json(response, 200, { connections: await tools.connections.execute({}) });
+        return json(response, 200, await tools.connections.execute({ includeStatus: true }));
       }
       if (request.method !== "POST" || relative !== "api/call") return json(response, 405, { error: "请求方法不支持" });
       if (!request.headers["content-type"]?.startsWith("application/json")) return json(response, 415, { error: "需要 JSON 请求" });

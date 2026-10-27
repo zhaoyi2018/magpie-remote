@@ -79,9 +79,23 @@ export function actionScript(action, instance, operationId, release, selectedBac
   if (["restore", "delete_backup"].includes(action) && (!backupIdPattern.test(selectedBackup?.id ?? "") || !/^[a-f0-9]{64}$/.test(selectedBackup?.fingerprint ?? ""))) throw new Error("备份标识或校验值无效");
   const bin = shellQuote(instance.binary || instance.managedBinary);
   const restoreCleanup = action === "restore" ? `  if [ -n "$restore_stage" ]; then
-    if [ "$restore_applied" = false ] && [ -d "$restore_stage/previous" ] && [ ! -e "$target" ] && [ ! -L "$target" ]; then mv -- "$restore_stage/previous" "$target"; fi
-    if [ "$restore_applied" = true ] || [ ! -e "$restore_stage/previous" ]; then rm -rf -- "$restore_stage"; fi
+    if [ "$restore_applied" = false ] && [ -d "$restore_stage/previous" ]; then
+      restore_config_state=unknown
+      restore_rollback_state=failed
+      if [ ! -e "$target" ] && [ ! -L "$target" ] && mv -- "$restore_stage/previous" "$target" >/dev/null 2>&1; then
+        restore_config_state=rolled_back
+        restore_rollback_state=succeeded
+      fi
+    fi
+    if [ "$restore_applied" = true ] || [ ! -e "$restore_stage/previous" ]; then rm -rf -- "$restore_stage" >/dev/null 2>&1; fi
   fi
+` : "";
+  const restoreResult = action === "restore" ? `  restore_recovery=''
+  if [ "$restore_rollback_state" = failed ] && [ -d "$restore_stage/previous" ]; then restore_recovery="$restore_stage/previous";
+  elif [ "$backup_ready" = true ]; then restore_recovery="$base/backups/${operationId}"; fi
+  restore_recovery=$(printf '%s' "$restore_recovery" | base64 | tr -d '\\r\\n')
+  restore_result=$(printf 'MIGPIE_RESTORE_V1\\t%s\\t%s\\t%s\\t%s\\t%s' '${operationId}' "$restore_config_state" "$restore_service_state" "$restore_rollback_state" "$restore_recovery")
+  result=$(printf '%s\\n%s' "$result" "$restore_result")
 ` : "";
   const prefix = common + `bin=${bin}
 job="$base/operations/${operationId}"
@@ -91,7 +105,7 @@ backup_ready=false
 stage=''
 restore_stage=''
 restore_applied=false
-finish() {
+${action === "restore" ? "restore_config_state=not_applied\nrestore_service_state=unchanged\nrestore_rollback_state=not_needed\n" : ""}finish() {
   code=$?
   trap - EXIT
   set +e
@@ -102,7 +116,7 @@ ${restoreCleanup}  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
   state=failed
   if [ "$code" -eq 0 ]; then state=succeeded; step=completed; reason=none; fi
   result=$(printf 'MIGPIE_RESULT_V1\\t%s\\t%s\\t%s\\t%s\\t%s' '${operationId}' "$step" "$code" "$reason" "$backup_ready")
-  if [ -d "$job" ]; then
+${restoreResult}  if [ -d "$job" ]; then
     printf '%s\\n' "$result" > "$job/result.tmp" && mv "$job/result.tmp" "$job/result"
     printf '%s' "$state" > "$job/state"
   fi
@@ -212,11 +226,12 @@ if [ "$format" = archive ]; then
   }
   run_step restoring extract_config
 fi
-${instance.service.state === "running" ? 'run_step stopping "$bin" daemon stop </dev/null\n' : ""}set_step restoring
+${instance.service.state === "running" ? 'restore_service_state=unknown\nrun_step stopping "$bin" daemon stop </dev/null\nrestore_service_state=stopped\n' : ""}set_step restoring
 if [ -d "$target" ]; then run_step restoring mv -- "$target" "$restore_stage/previous"; fi
 if [ "$format" = archive ]; then run_step restoring mv -- "$restore_stage/config" "$target";
 elif [ -L "$config" ]; then run_step restoring rm -- "$config"; fi
 restore_applied=true
+restore_config_state=applied
 ` : "";
     return prefix + selected + `command -v sha256sum >/dev/null
 command -v tar >/dev/null
@@ -235,7 +250,7 @@ elif [ -e "$config" ] || [ -L "$config" ]; then exit 77
 else printf 'Configuration directory did not exist before this operation.\\n' > "$backup/config.absent"; fi
 run_step saving_binary cp -p "$bin" "$backup/magpie"
 backup_ready=true
-${mutation}${action !== "backup" && instance.service.state === "running" ? `run_step ${action === "restore" ? 'starting "$bin" daemon start' : 'restarting "$bin" daemon restart'} </dev/null\n` : ""}${action === "update" ? 'run_step checking_version "$bin" --version </dev/null\n' : ""}${action !== "backup" && instance.service.state === "running" ? 'run_step healthcheck "$bin" healthcheck </dev/null\n' : ""}printf 'MIGPIE_DONE\\n'
+${mutation}${action !== "backup" && instance.service.state === "running" ? `${action === "restore" ? "restore_service_state=unknown\n" : ""}run_step ${action === "restore" ? 'starting "$bin" daemon start' : 'restarting "$bin" daemon restart'} </dev/null\n` : ""}${action === "update" ? 'run_step checking_version "$bin" --version </dev/null\n' : ""}${action !== "backup" && instance.service.state === "running" ? `run_step healthcheck "$bin" healthcheck </dev/null\n${action === "restore" ? "restore_service_state=running\n" : ""}` : ""}printf 'MIGPIE_DONE\\n'
 `;
   }
   if (action === "enable_web") return prefix + `MAGPIE_ADDR=127.0.0.1:3425 run_step enabling_web "$bin" daemon install --web --addr 127.0.0.1:3430 </dev/null

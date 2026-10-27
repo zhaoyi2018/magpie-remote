@@ -1,5 +1,5 @@
 import { icon, renderIcons, setIcon } from "./icons.js";
-import { launcherURL, managementFailure, readResponse } from "./recovery.js";
+import { connectionGuidance, launcherURL, managementFailure, readResponse } from "./recovery.js";
 import { createBackupManager } from "./backups.js";
 import { createRemoteManager } from "./remote.js";
 
@@ -118,6 +118,8 @@ import { createRemoteManager } from "./remote.js";
       try {
         const snapshot = await request("api/snapshot", {}, 5000);
         state.rows = snapshot.connections; state.online = true; serviceFailure = null;
+        $("storage-warning").textContent = snapshot.storageWarning?.message ?? "";
+        $("storage-warning").hidden = !snapshot.storageWarning;
         reconcileSelection();
         $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
         $("service-error").hidden = true;
@@ -144,7 +146,7 @@ import { createRemoteManager } from "./remote.js";
     } catch (error) {
       failure = error;
       if (!(name === "connect" && state.cancelled.has(id))) {
-        state.errors.set(id, error.message);
+        state.errors.set(id, { message: error.message, code: error.code, category: error.category });
         if (state.selected !== id) toast(error.message);
       }
     } finally {
@@ -206,8 +208,10 @@ import { createRemoteManager } from "./remote.js";
     $("reconnect-status").textContent = retry?.state === "waiting" ? `第 ${retry.attempts} 次重连将在 ${new Date(retry.nextRetryAt).toLocaleTimeString("zh-CN", { hour12: false })} 尝试；可随时停止。`
       : retry?.state === "paused" ? "自动重连已暂停：" + retry.reason + "。处理后请手动连接。"
       : `正在进行第 ${retry?.attempts ?? 0} 次重连…`;
-    const error = state.errors.get(connection.id) ?? (session.state === "failed" ? session.lastError : "");
-    $("operation-error").textContent = error ?? ""; $("operation-error").hidden = !error;
+    const error = state.errors.get(connection.id) ?? (session.state === "failed" ? session.error ?? { message: session.lastError } : null);
+    $("operation-error").textContent = error?.message ?? ""; $("operation-error").hidden = !error?.message;
+    const guidance = connectionGuidance(error, connection);
+    $("connection-guidance").textContent = guidance; $("connection-guidance").hidden = !guidance;
     const last = session.connectedAt ?? session.lastConnectedAt;
     $("last-connected").textContent = last ? "最近连接 " + new Date(last).toLocaleString("zh-CN", { hour12: false }) : "尚未建立连接";
     updateDuration(); renderForwards(row, Boolean(busy)); renderSettings(row); renderLogs(row);

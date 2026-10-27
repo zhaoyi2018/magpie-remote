@@ -1,0 +1,82 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node ${{ matrix.node }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      npm_config_ignore_scripts: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --omit=optional
+      - name: Node, Bun, SSH, script fixtures and package inventory
+        run: node scripts/release-check.mjs --skip-ui
+      - name: Upload checks, including explicit external not_run results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checks-${{ matrix.os }}-node-${{ matrix.node }}
+          path: |
+            .local/release-check.json
+            .local/release-logs/
+          if-no-files-found: warn
+
+  ui:
+    name: Linux browser regressions (fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      npm_config_ignore_scripts: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --omit=optional
+      - name: Install the locked Playwright browser
+        run: npm exec --no -- playwright install chromium
+      - name: Browser configuration and forwarding regression
+        run: npm run test:ui
+      - name: Remote browser regression with SSH responses only
+        run: npm run test:ui:remote
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-linux-node-24
+          path: |
+            .local/ui-regression/
+            .local/remote-ui-regression/
+          if-no-files-found: warn
+
+# Real Linux lifecycle acceptance deliberately has no hosted-runner shortcut.
+# Run the dedicated-account entry point described in docs/linux-acceptance.md,
+# then supply its JSON to release-check.mjs --strict alongside an actual host.

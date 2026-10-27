@@ -28,6 +28,7 @@
       </div>
     </header>
     <div id="service-error" class="service-error" role="alert" hidden><span id="service-error-message">管理服务已断开，当前显示最后读取的状态。</span><button id="reopen" class="button" type="button">重新打开</button></div>
+    <p id="storage-warning" class="storage-warning" role="status" hidden></p>
     <div class="app-layout" id="app-layout">
       <aside class="sidebar" id="server-pane" aria-label="连接配置">
         <div class="sidebar-heading"><h2>服务器</h2><span id="connection-count" class="count-pill">0</span></div>
@@ -54,6 +55,7 @@
           </div>
           <dl class="connection-meta"><div><dt>登录用户</dt><dd id="detail-user"></dd></div><div><dt>认证方式</dt><dd id="detail-auth"></dd></div><div><dt>连接时长</dt><dd id="connection-time">—</dd></div></dl>
           <div id="operation-error" class="operation-error" role="alert" hidden></div>
+          <p id="connection-guidance" class="connection-guidance" role="status" hidden></p>
           <p id="reconnect-status" class="reconnect-status" role="status" hidden></p>
           <div class="detail-tabs" role="tablist" aria-label="连接详情">
             <button id="tab-forwards" type="button" role="tab" aria-selected="true" aria-controls="panel-forwards"><span data-icon="forward"></span>端口转发 <span id="forward-count">0</span></button>
@@ -117,11 +119,13 @@
             <div class="section-heading"><div><h3>连接设置</h3><p>修改服务器配置前请先断开连接。</p></div><button id="edit-connection" class="button" type="button"><span data-icon="edit"></span>编辑配置</button></div>
             <dl id="settings-list" class="settings-list"></dl>
             <div class="credentials-setting"><div><h4>本次登录凭据</h4><p>需要密码或私钥口令时，在连接前填写。凭据不会保存。</p></div><button id="credentials-connect" class="button" type="button">填写凭据并连接</button></div>
+            <details class="connection-help"><summary>首次连接与认证排错</summary><ol><li>确认主机、SSH 端口和用户名可用。</li><li>从服务器控制台或管理员取得并独立核对 SHA256 主机指纹，在「编辑配置 → 主机校验与其他设置」填写；也可使用已核验的 known_hosts。</li><li>选择认证来源。SSH agent 可用 ssh-add -l 检查身份；Windows 使用运行 Magpie 的同一账户下的 OpenSSH agent。私钥填写本机路径，加密私钥需要口令；临时密码或口令可点「填写凭据并连接」。</li><li>环境变量需由 Magpie 宿主进程继承；修改后重新加载宿主。认证或主机信任失败时，处理原因后手动连接。</li></ol></details>
             <div class="danger-zone"><div><h4>删除此连接</h4><p>删除保存的服务器与全部转发预设。</p></div><button id="delete-connection" class="button danger" type="button">删除连接</button></div>
           </section>
           <section id="panel-logs" class="tab-panel" role="tabpanel" aria-labelledby="tab-logs" tabindex="0" hidden>
             <div class="section-heading"><div><h3>运行日志</h3><p>记录 SSH、转发与远程 Magpie 操作，保留最近 200 条，宿主重启后清空。</p></div><label class="log-filter"><span class="sr-only">日志级别</span><select id="log-filter"><option value="all">全部日志</option><option value="error">仅错误</option></select></label></div>
             <div id="log-list" class="log-list" aria-label="连接运行日志"></div>
+            <section class="operation-history" aria-labelledby="operation-history-title"><div class="section-heading"><div><h4 id="operation-history-title">远程任务历史</h4><p>保留当前任务与最近 20 条已结束任务，宿主重启后仍可查看。</p></div><label class="log-filter"><span class="sr-only">任务状态</span><select id="history-filter"><option value="all">全部任务</option><option value="failed">仅失败</option><option value="unknown">待核实</option></select></label></div><p id="history-error" class="field-error" role="alert" hidden></p><div id="operation-history-list" class="log-list" aria-label="远程任务历史"></div></section>
           </section>
         </section>
         <footer class="workspace-foot"><span id="last-connected">尚未建立连接</span><span id="last-updated">正在读取配置</span></footer>
@@ -220,7 +224,7 @@
 
   <dialog id="backup-dialog" aria-labelledby="backup-title" aria-describedby="backup-description">
     <div class="dialog-heading"><div><h2 id="backup-title">备份与恢复</h2><p id="backup-description">保存配置前自动备份，保留最近 5 份有效快照。密码保持加密，备份不包含解密密钥或私钥内容。</p></div><button class="icon-button close-dialog" type="button" aria-label="关闭"><span data-icon="close"></span></button></div>
-    <div class="dialog-content"><p class="field-note">恢复前可预览连接清单。确认恢复会停止所有连接与自动重连，并保留恢复前的配置。</p><div id="backup-list" class="backup-list" aria-live="polite"></div><p id="backup-error" class="field-error" role="alert" hidden></p></div>
+    <div class="dialog-content"><p class="field-note">恢复前可预览连接清单。确认恢复会停止所有连接与自动重连，并保留恢复前的配置。</p><p id="backup-warning" class="storage-warning" role="status" hidden></p><div id="backup-list" class="backup-list" aria-live="polite"></div><p id="backup-error" class="field-error" role="alert" hidden></p></div>
     <div class="dialog-actions"><button class="button close-dialog" type="button">关闭</button><button id="refresh-backups" class="button" type="button">刷新列表</button><button id="create-backup" class="button primary" type="button">立即备份</button></div>
   </dialog>
 

@@ -21,6 +21,29 @@ export function createRemoteManager({ call, toast }) {
   let readError = "", actionError = "", webError = "", submissionUncertain = false, uncertainSubmission = null;
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), backupRows = new Map();
+  let history = [], historySignature = "";
+
+  function drawHistory() {
+    const filter = $("history-filter").value;
+    const entries = [operation, ...history].filter((item) => item && (filter === "all" || item.state === filter));
+    const signature = JSON.stringify([row?.connection.id, filter, entries]);
+    if (signature === historySignature) return;
+    historySignature = signature;
+    const nodes = entries.map((item) => {
+      const level = item.state === "failed" ? "error" : item.state === "unknown" ? "warn" : "info";
+      const node = element("article", "log-row " + level);
+      const date = element("time", "", time(item.updatedAt ?? item.createdAt));
+      if (item.updatedAt || item.createdAt) date.dateTime = item.updatedAt ?? item.createdAt;
+      const detail = element("div", "log-message history-detail");
+      detail.append(element("strong", "", actionLabels[item.action] ?? "远程任务"), element("p", "", item.message));
+      if (item.result?.backupDirectory) detail.append(element("p", "", "远端备份目录：" + item.result.backupDirectory));
+      detail.append(element("p", "history-id", "任务 " + item.id));
+      node.append(date, element("span", "log-level", operationLabels[item.state] ?? item.state), detail);
+      return node;
+    });
+    if (!nodes.length) nodes.push(element("p", "no-matches", filter === "all" ? "暂无远程任务记录。" : "暂无符合此状态的任务。"));
+    $("operation-history-list").replaceChildren(...nodes);
+  }
 
   function setText(node, value) {
     const next = String(value ?? "");
@@ -200,7 +223,8 @@ export function createRemoteManager({ call, toast }) {
     text("remote-open-web", webLoading ? "正在建立通道…" : "获取 Web 地址");
     text("remote-web-hint", reason || "远端 Web 默认使用 3430 端口，仅通过本机回环 SSH 通道访问。");
     showError("remote-web-error", webError);
-    drawBackups(); drawTaskSummary(); syncPreview();
+    drawBackups(); drawTaskSummary(); drawHistory(); syncPreview();
+    showError("history-error", readError);
   }
 
   function drawBackups() {
@@ -349,7 +373,7 @@ export function createRemoteManager({ call, toast }) {
     const wasReady = sshReady(), wasActive = active, wasOnline = online, wasRemoteActive = remoteActive;
     if (changed) {
       generation++; dataRevision++; backupSequence++; reading = null; backupsLoading = null;
-      status = null; operation = null; readError = actionError = ""; submissionUncertain = false; uncertainSubmission = null; submitting = false;
+      status = null; operation = null; history = []; historySignature = ""; readError = actionError = ""; submissionUncertain = false; uncertainSubmission = null; submitting = false;
       backups = null; backupError = ""; backupsDirty = false; backupRefreshDue = false; completedBackupOperation = null;
       backupRows.clear(); $("remote-backup-list").replaceChildren();
       closePreview(); clearWeb(); $("remote-web-port").value = "3430";
@@ -385,7 +409,7 @@ export function createRemoteManager({ call, toast }) {
             if (!current(id, epoch) || version !== dataRevision) return;
             if (result?.connectionId !== id) throw new Error("远端状态与当前连接不匹配，请重新检测。");
             const wasRunning = running();
-            status = result; readError = "";
+            status = result; history = result.history ?? []; readError = "";
             if (result.operation) {
               observeOperation(result.operation);
               if (!submissionUncertain || (operation.action === uncertainSubmission?.action && operation.revision === uncertainSubmission?.revision)) {
@@ -508,6 +532,7 @@ export function createRemoteManager({ call, toast }) {
     if (button && !button.disabled) void openPreview(button.dataset.action, button.dataset.backupId);
   });
   $("remote-view-logs").addEventListener("click", () => { $("tab-logs").click(); $("tab-logs").focus(); });
+  $("history-filter").addEventListener("change", drawHistory);
   $("remote-open-web").addEventListener("click", () => { void openWeb(); });
   $("remote-web-port").addEventListener("input", () => { clearWeb(); draw(); });
   $("remote-web-url").addEventListener("click", (event) => event.currentTarget.select());

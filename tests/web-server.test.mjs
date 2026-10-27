@@ -32,7 +32,7 @@ test("the management API permits the sandboxed page and refuses untrusted origin
   const own = await fetch(new URL("api/snapshot", web.url), { headers: web.headers });
   assert.equal(own.status, 200);
   assert.equal(own.headers.get("access-control-allow-origin"), "null");
-  assert.deepEqual(await own.json(), { connections: [] });
+  assert.deepEqual(await own.json(), { connections: [], storageWarning: null });
   const foreign = await fetch(new URL("api/snapshot", web.url), { headers: { ...web.headers, Origin: "https://example.com" } });
   assert.equal(foreign.status, 403);
   const wrong = await fetch(new URL("api/snapshot", web.url), { headers: { ...web.headers, Authorization: "Bearer invalid" } });

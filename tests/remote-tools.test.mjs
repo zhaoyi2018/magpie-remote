@@ -15,6 +15,17 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("remote_operation exposes history without changing latest or id lookup contracts", async () => {
+  const calls = [], remote = { operation(...args) { calls.push(args); return args; } };
+  const tools = createTools({}, {}, remote);
+  tools.remote_operation.execute({ connectionId: "server" });
+  tools.remote_operation.execute({ connectionId: "server", operationId: "task-id" });
+  tools.remote_operation.execute({ connectionId: "server", history: true });
+  assert.deepEqual(calls, [["server", undefined, { history: false }], ["server", "task-id", { history: false }], ["server", undefined, { history: true }]]);
+  assert.throws(() => tools.remote_operation.execute({ connectionId: "server", history: "true" }));
+  assert.throws(() => tools.remote_operation.execute({ connectionId: "server", history: true, operationId: "task-id" }));
+});
+
 test("configuration restore waits for an accepted remote submission and refuses to disconnect its session", async () => {
   const entered = deferred(), release = deferred();
   let busy = false, disconnected = 0, restored = 0;
