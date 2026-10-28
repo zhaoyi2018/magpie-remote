@@ -144,7 +144,8 @@ try {
     await tools.connect.execute({ connectionId: id });
   }
   const recovery = await loadRecoveryKey(join(directory, "recovery.key"));
-  let web = await startManagementServer({ tools, recovery }); cleanup.unshift(() => web.close());
+  const openedWebURLs = [];
+  let web = await startManagementServer({ tools, recovery, openBrowser: async (url) => { openedWebURLs.push(url); } }); cleanup.unshift(() => web.close());
   const harness = await startUIHarness({ getEndpoint: () => web.url, recovery }); cleanup.unshift(() => harness.close());
   const executable = process.env.MIGPIE_UI_BROWSER;
   const options = executable ? { executablePath: resolve(executable) } : !existsSync(chromium.executablePath()) && process.platform === "win32" ? { channel: "msedge" } : {};
@@ -379,6 +380,16 @@ try {
   assert.equal(count("remote_web"), webBefore);
   await field("remote-web-port").fill("3430"); await showWeb();
   assert.match(await field("remote-web-url").inputValue(), /fixture-management-key/);
+  assert.equal(openedWebURLs.length, 0);
+  assert.equal(await field("remote-web-address").getAttribute("href"), await field("remote-web-url").inputValue());
+  await field("remote-web-address").click();
+  await until(() => openedWebURLs.length === 1, "Web link did not invoke the local browser opener");
+  assert.equal(openedWebURLs[0], await field("remote-web-url").inputValue());
+  assert.equal(await field("panel-remote").isVisible(), true);
+  await waitEnabled("remote-open-web");
+  await field("remote-hide-web").click();
+  assert.equal(await field("remote-web-address").getAttribute("href"), null);
+  await showWeb();
   assert.ok(!(await field("toast").textContent()).includes("fixture-management-key"));
   const webTunnelPort = Number(new URL(await field("remote-web-url").inputValue()).port);
   await preview("stop"); await field("remote-apply").click(); await waitOperation("已完成");

@@ -91,7 +91,7 @@
                   <div class="remote-web-controls"><label for="remote-web-port">远端 Web 端口<input id="remote-web-port" type="number" min="1" max="65535" step="1" value="3430" required inputmode="numeric" aria-describedby="remote-web-hint"></label><button id="remote-open-web" class="button" type="button" disabled>获取 Web 地址</button></div>
                   <p id="remote-web-hint" class="remote-secondary">远端 Web 默认使用 3430 端口，仅通过本机回环 SSH 通道访问。</p>
                   <p id="remote-web-error" class="field-error" role="alert" hidden></p>
-                  <div id="remote-web-result" class="remote-web-result" hidden><label for="remote-web-url">本次访问地址<input id="remote-web-url" type="text" readonly autocomplete="off" spellcheck="false" aria-describedby="remote-web-secret-note"></label><p id="remote-web-secret-note">地址包含管理密钥，请复制到浏览器地址栏访问并妥善保管。服务停止、切换服务器、SSH 断开或离开此页后会清空。</p><div class="remote-web-result-foot"><span id="remote-web-address"></span><button id="remote-hide-web" class="text-button" type="button">清空地址</button></div></div>
+                  <div id="remote-web-result" class="remote-web-result" hidden><label for="remote-web-url">本次访问地址<input id="remote-web-url" type="text" readonly autocomplete="off" spellcheck="false" aria-describedby="remote-web-secret-note"></label><p id="remote-web-secret-note">地址包含管理密钥，可点击下方链接在本机浏览器打开，也可复制访问，请妥善保管。服务停止、切换服务器、SSH 断开或离开此页后会清空。</p><div class="remote-web-result-foot"><a id="remote-web-address" rel="noreferrer noopener" referrerpolicy="no-referrer"></a><button id="remote-hide-web" class="text-button" type="button">清空地址</button></div></div>
                 </section>
               </div>
               <aside class="remote-environment-rail" aria-label="远端环境信息">

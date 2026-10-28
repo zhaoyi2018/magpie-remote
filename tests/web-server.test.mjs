@@ -56,6 +56,36 @@ test("the management API permits the sandboxed page and refuses untrusted origin
   assert.equal((await expiredResponse.json()).code, "MANAGEMENT_EXPIRED");
 });
 
+test("opening remote Web requires authentication and uses a freshly verified server link", async (t) => {
+  const link = "http://127.0.0.1:12345/?k=fixture-management-key-1234567890";
+  const opened = [], requested = [];
+  let unavailable = false;
+  const web = await startManagementServer({
+    tools: { remote_web: { async execute(args) {
+      requested.push(args);
+      if (unavailable) throw new Error("服务已停止");
+      return { url: link };
+    } } },
+    openBrowser: async (url) => { opened.push(url); },
+  });
+  t.after(() => web.close());
+  const invoke = (authorization, origin = "null") => fetch(new URL("api/call", web.url), {
+    method: "POST", headers: { Authorization: authorization, "Content-Type": "application/json", Origin: origin },
+    body: JSON.stringify({ method: "remote_web_open", args: { connectionId: "remote-alpha", port: 3430, url: "https://example.com/" } }),
+  });
+  assert.equal((await invoke("Bearer invalid")).status, 401);
+  assert.equal((await invoke(`Bearer ${web.token}`, "https://example.com")).status, 403);
+  assert.deepEqual(opened, []);
+  const response = await invoke(`Bearer ${web.token}`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { result: { opened: true } });
+  assert.deepEqual(requested, [{ connectionId: "remote-alpha", port: 3430 }]);
+  assert.deepEqual(opened, [link]);
+  unavailable = true;
+  assert.equal((await invoke(`Bearer ${web.token}`)).status, 400);
+  assert.deepEqual(opened, [link]);
+});
+
 test("launcher parameters cannot authorize external scripts in the management page", async (t) => {
   const web = await service(t);
   const page = new URL(web.url);

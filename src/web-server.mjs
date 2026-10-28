@@ -4,6 +4,7 @@ import { link, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/pro
 import { readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { errorDetails } from "./errors.mjs";
+import { openWebBrowser } from "./browser.mjs";
 
 const assets = new Map([
   ["", ["manage.html", "text/html; charset=utf-8"]],
@@ -82,7 +83,7 @@ export async function loadRecoveryKey(file) {
   return readKey();
 }
 
-export async function startManagementServer({ tools, port = 0, recovery }) {
+export async function startManagementServer({ tools, port = 0, recovery, openBrowser = openWebBrowser }) {
   const token = randomBytes(32).toString("base64url");
   const prefix = `/${token}/`;
   const signingKey = recovery && createPrivateKey({ key: Buffer.from(recovery.privateKey, "base64url"), type: "pkcs8", format: "der" });
@@ -151,7 +152,13 @@ export async function startManagementServer({ tools, port = 0, recovery }) {
       if (!request.headers["content-type"]?.startsWith("application/json")) return json(response, 415, { error: "需要 JSON 请求" });
       const body = await readJSON(request);
       if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("请求必须是对象");
-      const tool = Object.hasOwn(tools, body.method) && tools[body.method];
+      const tool = body.method === "remote_web_open" && tools.remote_web ? {
+        async execute({ connectionId, port }, context) {
+          const result = await tools.remote_web.execute({ connectionId, port }, context);
+          await openBrowser(result.url);
+          return { opened: true };
+        },
+      } : Object.hasOwn(tools, body.method) && tools[body.method];
       if (!tool) throw new Error("未知的管理操作");
       if (!body.args || typeof body.args !== "object" || Array.isArray(body.args)) throw new Error("操作参数必须是对象");
       const credentials = body.credentials;

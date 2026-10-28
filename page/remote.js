@@ -78,6 +78,7 @@ export function createRemoteManager({ call, toast }) {
   function clearWeb() {
     webSequence++; webLoading = false; webError = "";
     $("remote-web-url").value = "";
+    $("remote-web-address").removeAttribute("href");
     $("remote-web-result").hidden = true;
     text("remote-web-address", "");
     showError("remote-web-error", "");
@@ -522,7 +523,8 @@ export function createRemoteManager({ call, toast }) {
       if (!current(id, epoch) || sequence !== webSequence || !sshReady() || webReason()) return;
       if (!result?.url || !result.address) throw new Error("未获取到 Web 地址，请检查服务状态后重试。");
       $("remote-web-url").value = result.url;
-      text("remote-web-address", "本机通道：" + result.address);
+      $("remote-web-address").href = result.url;
+      text("remote-web-address", "在浏览器打开：" + result.address);
       $("remote-web-result").hidden = false;
       $("remote-web-url").focus(); $("remote-web-url").select();
     } catch (error) {
@@ -545,6 +547,19 @@ export function createRemoteManager({ call, toast }) {
   $("remote-open-web").addEventListener("click", () => { void openWeb(); });
   $("remote-web-port").addEventListener("input", () => { clearWeb(); draw(); });
   $("remote-web-url").addEventListener("click", (event) => event.currentTarget.select());
+  $("remote-web-address").addEventListener("click", async (event) => {
+    event.preventDefault();
+    if (!$("remote-web-url").value || webReason() || webLoading) return;
+    const id = row.connection.id, epoch = generation, sequence = webSequence;
+    webLoading = true; webError = ""; draw();
+    try {
+      await call("remote_web_open", { connectionId: id, port: Number($("remote-web-port").value) });
+    } catch (error) {
+      if (current(id, epoch) && sequence === webSequence) webError = errorMessage(error);
+    } finally {
+      if (current(id, epoch) && sequence === webSequence) { webLoading = false; draw(); }
+    }
+  });
   $("remote-hide-web").addEventListener("click", () => { clearWeb(); draw(); });
   dialog.querySelectorAll(".remote-close-preview").forEach((button) => button.addEventListener("click", () => { closePreview(); draw(); }));
   dialog.addEventListener("close", () => { if (!dialog.open) { closePreview(); draw(); } });

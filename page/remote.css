@@ -46,7 +46,7 @@
 .remote-web-result input { font-family: var(--mono); font-size: 12px; }
 .remote-web-result p { color: var(--muted); font-size: 11px; max-width: 76ch; overflow-wrap: anywhere; }
 .remote-web-result-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; }
-#remote-web-address { min-width: 0; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+#remote-web-address { min-width: 0; font-size: 11px; color: var(--accent); overflow-wrap: anywhere; text-underline-offset: 3px; }
 .remote-backups { padding: 23px 0 0; }
 .remote-backups-heading { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 10px; }
 .remote-backups-heading .remote-command-copy { flex-basis: 280px; }
