@@ -69,8 +69,8 @@ export function exchange(port, payload = Buffer.from("SSH tunnel round trip")) {
   });
 }
 
-export async function until(predicate, message = "condition not met") {
-  const limit = Date.now() + 4000;
+export async function until(predicate, message = "condition not met", timeout = 4000) {
+  const limit = Date.now() + timeout;
   while (Date.now() < limit) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));

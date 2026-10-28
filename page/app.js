@@ -123,11 +123,17 @@ import { createRemoteManager } from "./remote.js";
   function startDiscoveryFrame() {
     if (!canDiscover || recoveryFrame) return;
     const source = new URL("/recovery-frame/index.html", base);
-    recoveryFrame = document.createElement("iframe");
-    recoveryFrame.hidden = true; recoveryFrame.sandbox = "allow-scripts";
+    const frame = document.createElement("iframe");
+    recoveryFrame = frame;
+    frame.hidden = true; frame.sandbox = "allow-scripts";
+    function discard() {
+      if (recoveryFrame !== frame) return;
+      recoveryFrame = null; frame.remove(); discoveryResolve?.(null);
+    }
     let loaded = false;
-    recoveryFrame.addEventListener("load", () => {
-      if (loaded) { frameAuthentication = Promise.resolve(false); discoveryResolve?.(null); }
+    frame.addEventListener("load", () => {
+      if (recoveryFrame !== frame) return;
+      if (loaded) { frameAuthentication = Promise.resolve(false); discard(); }
       loaded = true;
     });
     frameAuthentication = new Promise((resolve) => {
@@ -135,19 +141,23 @@ import { createRemoteManager } from "./remote.js";
       let done = false;
       const finish = (value) => {
         if (done) return;
-        done = true; clearTimeout(timer); removeEventListener("message", receive); resolve(value);
+        done = true; clearTimeout(timer); removeEventListener("message", receive);
+        if (!value) discard();
+        resolve(value);
       };
       const receive = (event) => {
-        if (event.source !== recoveryFrame?.contentWindow || event.data?.type !== "migpie-recovery-ready" || event.data.request !== challenge) return;
+        if (recoveryFrame !== frame || event.source !== frame.contentWindow || event.data?.type !== "migpie-recovery-ready" || event.data.request !== challenge) return;
         event.stopImmediatePropagation();
         void signedRecovery(recovery, origin, challenge, event.data.result, "identity").then((verified) => finish(verified === true));
       };
       const timer = setTimeout(() => finish(false), 5000);
       addEventListener("message", receive);
-      recoveryFrame.addEventListener("load", () => recoveryFrame.contentWindow.postMessage({ type: "migpie-recovery-challenge", request: challenge }, "*"), { once: true });
+      frame.addEventListener("load", () => {
+        if (recoveryFrame === frame) frame.contentWindow.postMessage({ type: "migpie-recovery-challenge", request: challenge }, "*");
+      }, { once: true });
     });
-    recoveryFrame.src = source.href;
-    document.body.append(recoveryFrame);
+    frame.src = source.href;
+    document.body.append(frame);
   }
   addEventListener("message", (event) => {
     if (event.source !== recoveryFrame?.contentWindow || event.data?.type !== "migpie-recovery-candidate" || event.data.request !== discoveryRequest
@@ -177,7 +187,9 @@ import { createRemoteManager } from "./remote.js";
     } finally { clearTimeout(timer); }
   }
   async function discoverEndpoint() {
-    if (!recoveryFrame || discovering) return discovering ?? null;
+    if (discovering) return discovering;
+    startDiscoveryFrame();
+    if (!recoveryFrame) return null;
     const attempt = (async () => {
       const authentication = frameAuthentication;
       const validFrame = await authentication;
@@ -218,6 +230,7 @@ import { createRemoteManager } from "./remote.js";
         if (!Array.isArray(snapshot.connections)) throw Object.assign(new Error("管理服务返回了无法读取的状态"), { code: "INVALID_RESPONSE" });
         state.rows = snapshot.connections; state.online = !newEndpoint; serviceFailure = null;
         transportFailures = 0; discoveryAttempts = 0; nextDiscovery = 0;
+        startDiscoveryFrame();
         $("storage-warning").textContent = snapshot.storageWarning?.message ?? "";
         $("storage-warning").hidden = !snapshot.storageWarning;
         reconcileSelection();

@@ -310,6 +310,39 @@ try {
   await page.screenshot({ path: join(screenshotDirectory, "desktop.png"), fullPage: true });
   assert.ok((await stat(join(screenshotDirectory, "desktop.png"))).size > 1000);
 
+  for (const interrupted of ["frame", "identity"]) {
+    const retryContext = await browser.newContext({ permissions: ["local-network-access"] });
+    try {
+      const retryPage = await retryContext.newPage();
+      retryPage.on("pageerror", (error) => scriptErrors.push(error.message));
+      let attempts = 0;
+      const interruptedPath = interrupted === "frame" ? "**/recovery-frame/index.html" : "**/recovery/identity/*";
+      await retryContext.route(interruptedPath, (route) => ++attempts === 1 ? route.abort("failed") : route.continue());
+      await retryPage.goto(harness.url);
+      const retryUI = retryPage.frameLocator('iframe[title="SSH 连接"]');
+      await retryUI.locator("#service-state").filter({ hasText: "管理服务在线" }).waitFor();
+      await until(() => attempts >= 2, `A failed initial recovery ${interrupted} request permanently disabled recovery`, 15000);
+      const management = retryPage.frames().find((frame) => frame.url().startsWith(web.url));
+      await until(async () => management.childFrames().length === 1 && management.childFrames()[0].url().endsWith("/recovery-frame/index.html"), "The replacement recovery frame did not load");
+      // Wait for the identity exchange before closing its serving port.
+      await management.evaluate(() => new Promise((resolve) => {
+        const frame = document.querySelector("iframe");
+        addEventListener("message", function receive(event) {
+          if (event.source === frame.contentWindow && event.data?.type === "migpie-recovery-ready" && event.data.request === "a".repeat(43)) {
+            removeEventListener("message", receive); resolve();
+          }
+        });
+        frame.contentWindow.postMessage({ type: "migpie-recovery-challenge", request: "a".repeat(43) }, "*");
+      }));
+      const previous = web;
+      web = await startManagementServer({ tools, recovery });
+      await previous.close();
+      await until(() => retryPage.frames().some((frame) => frame.url().startsWith(web.url)), `Recovery did not survive an interrupted ${interrupted} request`, 20000);
+      await retryUI.locator("#service-state").filter({ hasText: "管理服务在线" }).waitFor();
+    } finally { await retryContext.close(); }
+  }
+  console.log("UI: interrupted initial recovery frame and identity requests retry while online and recover across ports.");
+
   const spoofed = await browser.newContext({ permissions: ["local-network-access"] });
   const spoofedPage = await spoofed.newPage(), leaked = [];
   await spoofedPage.exposeFunction("recordSpoof", (value) => leaked.push(value));
