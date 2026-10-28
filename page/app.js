@@ -1,5 +1,5 @@
 import { icon, renderIcons, setIcon } from "./icons.js";
-import { connectionGuidance, launcherURL, managementFailure, readResponse } from "./recovery.js";
+import { connectionGuidance, launcherURL, managementFailure, randomRecoveryValue, readResponse, recoveryOrigin, recoveryProof, signedRecovery } from "./recovery.js";
 import { createBackupManager } from "./backups.js";
 import { createRemoteManager } from "./remote.js";
 
@@ -7,9 +7,17 @@ import { createRemoteManager } from "./remote.js";
   const $ = (id) => document.getElementById(id);
   const tabs = ["forwards", "remote", "connection", "logs"];
   const state = { rows: [], selected: null, online: false, filter: "all", tab: "forwards", busy: new Map(), errors: new Map(), cancelled: new Set() };
-  const base = new URL("./", location.href);
-  const token = base.pathname.split("/")[1];
-  let refreshing;
+  let base = new URL("./", location.href);
+  let token = base.pathname.split("/")[1];
+  const launcher = launcherURL(location.hash) ?? launcherURL(location.search);
+  const fragment = new URLSearchParams(location.hash.slice(1));
+  const recovery = { secret: fragment.get("recovery"), publicKey: fragment.get("key") };
+  const canDiscover = launcher && /^[A-Za-z0-9_-]{43}$/.test(recovery.secret ?? "") && /^[A-Za-z0-9_-]+$/.test(recovery.publicKey ?? "");
+  let recoveryFrame, frameAuthentication, discoveryRequest, discoveryResolve;
+  let refreshing, discovering;
+  let pendingCalls = 0, transportFailures = 0;
+  let nextDiscovery = 0, discoveryAttempts = 0, newEndpoint = null;
+  let pageDetached = false, navigatingRecovery = false;
   let listCollapsed = isNarrow();
   let editingForwardConnection = null;
   let editingForwardId = null;
@@ -107,7 +115,91 @@ import { createRemoteManager } from "./remote.js";
     } finally { clearTimeout(timer); }
   }
   async function call(method, args = {}, credentials) {
-    return (await request("api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method, args, ...(credentials && { credentials }) }) })).result;
+    pendingCalls++;
+    try {
+      return (await request("api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method, args, ...(credentials && { credentials }) }) })).result;
+    } finally { pendingCalls--; }
+  }
+  function startDiscoveryFrame() {
+    if (!canDiscover || recoveryFrame) return;
+    const source = new URL("/recovery-frame/index.html", base);
+    recoveryFrame = document.createElement("iframe");
+    recoveryFrame.hidden = true; recoveryFrame.sandbox = "allow-scripts";
+    let loaded = false;
+    recoveryFrame.addEventListener("load", () => {
+      if (loaded) { frameAuthentication = Promise.resolve(false); discoveryResolve?.(null); }
+      loaded = true;
+    });
+    frameAuthentication = new Promise((resolve) => {
+      const challenge = randomRecoveryValue(), origin = base.origin;
+      let done = false;
+      const finish = (value) => {
+        if (done) return;
+        done = true; clearTimeout(timer); removeEventListener("message", receive); resolve(value);
+      };
+      const receive = (event) => {
+        if (event.source !== recoveryFrame?.contentWindow || event.data?.type !== "migpie-recovery-ready" || event.data.request !== challenge) return;
+        event.stopImmediatePropagation();
+        void signedRecovery(recovery, origin, challenge, event.data.result, "identity").then((verified) => finish(verified === true));
+      };
+      const timer = setTimeout(() => finish(false), 5000);
+      addEventListener("message", receive);
+      recoveryFrame.addEventListener("load", () => recoveryFrame.contentWindow.postMessage({ type: "migpie-recovery-challenge", request: challenge }, "*"), { once: true });
+    });
+    recoveryFrame.src = source.href;
+    document.body.append(recoveryFrame);
+  }
+  addEventListener("message", (event) => {
+    if (event.source !== recoveryFrame?.contentWindow || event.data?.type !== "migpie-recovery-candidate" || event.data.request !== discoveryRequest
+      || typeof event.data.origin !== "string" || event.data.origin.length > 128) return;
+    const candidate = recoveryOrigin(event.data.origin);
+    if (candidate && discoveryResolve) discoveryResolve(candidate);
+  });
+  async function recoveryFetch(origin, path) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch(new URL(path, origin), { credentials: "omit", redirect: "error", cache: "no-store", signal: controller.signal });
+      if (!response.ok) return null;
+      const reader = response.body?.getReader();
+      if (!reader) return null;
+      const chunks = []; let size = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.length;
+        if (size > 2048) { await reader.cancel(); return null; }
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(size); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } finally { clearTimeout(timer); }
+  }
+  async function discoverEndpoint() {
+    if (!recoveryFrame || discovering) return discovering ?? null;
+    const attempt = (async () => {
+      const authentication = frameAuthentication;
+      const validFrame = await authentication;
+      const candidate = await new Promise((resolve) => {
+        if (!validFrame || authentication !== frameAuthentication) return resolve(null);
+        discoveryRequest = randomRecoveryValue(24);
+        const timer = setTimeout(() => finish(null), 4000);
+        function finish(value) { clearTimeout(timer); if (discoveryResolve === finish) discoveryResolve = null; resolve(value); }
+        discoveryResolve = finish;
+        recoveryFrame.contentWindow.postMessage({ type: "migpie-recovery-discover", request: discoveryRequest, launcher }, "*");
+      });
+      if (!candidate) return null;
+      const challenge = randomRecoveryValue();
+      const identity = await recoveryFetch(candidate, `/recovery/identity/${challenge}`);
+      if (!await signedRecovery(recovery, candidate, challenge, identity, "identity")) return null;
+      const endpointChallenge = randomRecoveryValue();
+      const proof = await recoveryProof(recovery.secret, candidate, endpointChallenge);
+      const result = await recoveryFetch(candidate, `/recovery/endpoint/${proof}/${endpointChallenge}`);
+      return await signedRecovery(recovery, candidate, endpointChallenge, result, "endpoint");
+    })();
+    discovering = attempt;
+    try { return await attempt; } catch { return null; } finally { if (discovering === attempt) discovering = null; }
   }
   async function refresh(force = false) {
     if (refreshing) {
@@ -116,25 +208,65 @@ import { createRemoteManager } from "./remote.js";
     }
     refreshing = (async () => {
       try {
+        if (newEndpoint && !pendingCalls && !state.busy.size) {
+          base = newEndpoint; token = base.pathname.split("/")[1]; newEndpoint = null;
+          if (new URL(location.href).origin === base.origin) {
+            try { history.replaceState(null, "", base.pathname + location.hash); } catch { pageDetached = true; }
+          } else pageDetached = true;
+        }
         const snapshot = await request("api/snapshot", {}, 5000);
-        state.rows = snapshot.connections; state.online = true; serviceFailure = null;
+        if (!Array.isArray(snapshot.connections)) throw Object.assign(new Error("管理服务返回了无法读取的状态"), { code: "INVALID_RESPONSE" });
+        state.rows = snapshot.connections; state.online = !newEndpoint; serviceFailure = null;
+        transportFailures = 0; discoveryAttempts = 0; nextDiscovery = 0;
         $("storage-warning").textContent = snapshot.storageWarning?.message ?? "";
         $("storage-warning").hidden = !snapshot.storageWarning;
         reconcileSelection();
         $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
         $("service-error").hidden = true;
+        if (pageDetached) {
+          if (!pendingCalls && !state.busy.size && !document.querySelector("dialog[open]") && !remote.hasUncertain() && !document.hidden) {
+            const target = new URL(base.href); target.hash = location.hash;
+            navigatingRecovery = true; location.replace(target.href); return;
+          }
+          $("service-error").hidden = false;
+          $("service-error-message").textContent = "管理服务已恢复。请先保存或关闭正在编辑的内容，并核实结果未知的远程操作；处理完成后页面会更新地址。";
+          $("reopen").textContent = "重试读取";
+        }
       } catch (error) {
-        state.online = false; $("service-error").hidden = false;
-        serviceFailure = managementFailure(error);
+        state.online = false;
+        const transport = ["SERVICE_UNREACHABLE", "REQUEST_TIMEOUT", "MANAGEMENT_EXPIRED", "INVALID_RESPONSE"].includes(error.code);
+        if (transport) transportFailures++;
+        else transportFailures = 0;
+        const reconnecting = transport && error.code !== "MANAGEMENT_EXPIRED" && transportFailures < 2;
+        serviceFailure = reconnecting
+          ? { label: "正在重新连接", message: "暂时无法读取状态，正在自动重试。", action: "retry" }
+          : managementFailure(error);
+        if (canDiscover && transport && !reconnecting) serviceFailure.message = "暂时无法连接管理服务，当前显示最后读取的状态。正在自动重试；仍不可用时请重新打开页面或重新加载插件。";
+        $("service-error").hidden = reconnecting;
         $("service-error-message").textContent = serviceFailure.message;
         $("reopen").textContent = serviceFailure.action === "retry" ? "重试读取" : "重新打开";
         $("last-updated").textContent = "当前显示最后读取的状态";
+        $("service-state").textContent = serviceFailure.label;
+        $("service-state").className = "service-state is-offline";
+        render();
+        if (transport && (error.code === "MANAGEMENT_EXPIRED" || transportFailures >= 2) && Date.now() >= nextDiscovery) {
+          const endpoint = await discoverEndpoint();
+          nextDiscovery = Date.now() + Math.min(2000 * 2 ** discoveryAttempts, 30000);
+          discoveryAttempts = Math.min(discoveryAttempts + 1, 4);
+          if (endpoint && endpoint.href !== base.href) newEndpoint = endpoint;
+        }
+      }
+      if (newEndpoint) {
+        state.online = false;
+        serviceFailure = { label: "管理服务正在恢复", message: "已发现新的管理服务，正在等待已发出的操作结束。", action: "retry" };
+        $("service-error").hidden = false; $("service-error-message").textContent = serviceFailure.message; $("reopen").textContent = "重试读取";
       }
       $("service-state").textContent = state.online ? "管理服务在线" : serviceFailure.label;
       $("service-state").className = "service-state " + (state.online ? "is-online" : "is-offline");
       render();
     })();
     try { await refreshing; } finally { refreshing = null; }
+    if (newEndpoint && !pendingCalls && !state.busy.size && !document.hidden) return refresh();
   }
   async function run(id, name, operation, message) {
     const owner = Symbol();
@@ -156,6 +288,7 @@ import { createRemoteManager } from "./remote.js";
     return failure;
   }
   function render() {
+    if ($("connection-editor").open) connectionEditor.sync();
     if ($("forward-editor").open) syncForwardAction();
     $("new-connection").disabled = $("empty-add").disabled = $("import-config").disabled = !state.online;
     $("open-backups").disabled = serviceFailure?.action === "reopen";
@@ -681,14 +814,35 @@ import { createRemoteManager } from "./remote.js";
   addEventListener("resize", () => hideMenu());
   addEventListener("scroll", () => hideMenu(), true);
   $("reopen").addEventListener("click", () => {
-    if (serviceFailure?.action === "retry") { void refresh(true); return; }
-    const url = launcherURL(location.hash);
-    if (url) { location.replace(url); return; }
+    if (newEndpoint || pageDetached || serviceFailure?.action === "retry") { void refresh(true); return; }
+    if (launcher) {
+      if (document.querySelector("dialog[open]") || pendingCalls || remote.hasUncertain()) {
+        $("service-error-message").textContent = "请先复制或关闭未保存的内容，并核实进行中或结果未知的远程操作，再从 Magpie 侧栏重新打开插件。";
+        return;
+      }
+      location.replace(launcher); return;
+    }
     location.reload();
   });
-  render(); void refresh();
-  const polling = setInterval(() => { if (!document.hidden) void refresh(); }, 2000);
-  const clock = setInterval(updateDuration, 1000);
+  addEventListener("beforeunload", (event) => {
+    if (navigatingRecovery) return;
+    if (!remote.hasUncertain() && !(pageDetached && (document.querySelector("dialog[open]") || pendingCalls))) return;
+    event.preventDefault(); event.returnValue = "";
+  });
+  let polling, clock;
+  function startPolling() {
+    if (!polling) polling = setInterval(() => { if (!document.hidden) void refresh(); }, 2000);
+    if (!clock) clock = setInterval(updateDuration, 1000);
+  }
+  startDiscoveryFrame(); render(); void refresh(); startPolling();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
-  addEventListener("pagehide", () => { clearInterval(polling); clearInterval(clock); remote.close(); $("login-password").value = $("login-passphrase").value = ""; }, { once: true });
+  addEventListener("pagehide", (event) => {
+    clearInterval(polling); clearInterval(clock); polling = clock = null;
+    if (event.persisted) remote.suspend(); else remote.close();
+    $("login-password").value = $("login-passphrase").value = "";
+  });
+  addEventListener("pageshow", (event) => {
+    if (!event.persisted) return;
+    startPolling(); remote.resume(); void refresh();
+  });
 })();

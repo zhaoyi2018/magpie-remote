@@ -10,7 +10,7 @@ import { RemoteManager } from "../src/remote.mjs";
 import { probeScript } from "../src/remote-scripts.mjs";
 import { backupInventoryScript } from "../src/remote-backups.mjs";
 import { createTools } from "../src/plugin.mjs";
-import { startManagementServer } from "../src/web-server.mjs";
+import { startManagementServer, loadRecoveryKey } from "../src/web-server.mjs";
 import { sshServer, temporary, until } from "../tests/helpers.mjs";
 import { startUIHarness } from "./ui-harness.mjs";
 
@@ -143,8 +143,9 @@ try {
     await tools.save_connection.execute({ connection: { ...fixture.profile, id, name } });
     await tools.connect.execute({ connectionId: id });
   }
-  const web = await startManagementServer({ tools }); cleanup.unshift(() => web.close());
-  const harness = await startUIHarness({ getEndpoint: () => web.url }); cleanup.unshift(() => harness.close());
+  const recovery = await loadRecoveryKey(join(directory, "recovery.key"));
+  let web = await startManagementServer({ tools, recovery }); cleanup.unshift(() => web.close());
+  const harness = await startUIHarness({ getEndpoint: () => web.url, recovery }); cleanup.unshift(() => harness.close());
   const executable = process.env.MIGPIE_UI_BROWSER;
   const options = executable ? { executablePath: resolve(executable) } : !existsSync(chromium.executablePath()) && process.platform === "win32" ? { channel: "msedge" } : {};
   const browser = await chromium.launch({ ...options, headless: true }); cleanup.unshift(() => browser.close());
@@ -410,10 +411,15 @@ try {
   fixture.state.reconcile = "succeeded";
   assert.equal(await field("remote-web-url").inputValue(), ""); assert.equal(await field("remote-action-update").isDisabled(), true);
   await field("connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor(); await detect(); await showWeb();
-  await field("panel-remote").evaluate(() => dispatchEvent(new Event("pagehide")));
+  await field("panel-remote").evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
   assert.equal(await field("remote-web-url").inputValue(), "");
+  const beforeRestore = count("remote_status");
+  await field("panel-remote").evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  await until(() => count("remote_status") > beforeRestore, "Remote status did not resume after restoring the cached page");
+  const beforePolling = count("remote_status");
+  await until(() => count("remote_status") > beforePolling, "Remote polling did not resume after restoring the cached page");
   await page.reload(); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor(); await openRemote();
-  console.log("Remote UI: explicit Web access, editable port, retained focus and late-response/switch/disconnect/pagehide key cleanup passed.");
+  console.log("Remote UI: explicit Web access, key cleanup and polling after cached-page restoration passed.");
 
   const heldPreview = gateTool("remote_preview");
   await field("remote-action-update").click(); await heldPreview.entered;
@@ -435,6 +441,7 @@ try {
   await openRemote();
   console.log("Remote UI: late preview/apply responses stay with their connection; inactive polling and keyboard navigation passed.");
 
+  const executionsBeforeLostResponse = fixture.executions.filter((item) => item.kind === "action").length;
   await browserContext.route(api, async (route) => {
     if (route.request().postDataJSON()?.method === "remote_apply") await route.abort("failed");
     else await route.continue();
@@ -444,8 +451,22 @@ try {
   await detect();
   assert.equal(await field("remote-action-restart").isDisabled(), true, "An older completed operation must not resolve a lost submission response");
   await browserContext.unroute(api);
+  const replacement = await startManagementServer({ tools, recovery });
+  await web.close(); web = replacement;
+  const oldFrame = page.frames().find((item) => item.url().startsWith(api.replace("api/call", "")));
+  assert.ok(oldFrame, "The management page should stay open during reconnection");
+  await oldFrame.waitForFunction((url) => performance.getEntriesByType("resource").some((entry) => entry.name.startsWith(url + "api/snapshot")), web.url, { timeout: 15000 });
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  await detect();
+  assert.equal(await field("remote-action-restart").isDisabled(), true, "Reconnecting must not clear an unknown submission or retry it");
+  await selectedRow("测试服务器").click(); await openRemote();
+  await selectedRow("生产服务器").click(); await openRemote();
+  await detect();
+  assert.equal(await field("remote-action-restart").isDisabled(), true, "Changing connections must not clear an unknown submission");
+  assert.ok(oldFrame.url().startsWith(api.replace("api/call", "")), "Unknown results must keep the current document open");
+  assert.equal(fixture.executions.filter((item) => item.kind === "action").length, executionsBeforeLostResponse, "Reconnecting must not repeat the lost mutation");
   await page.reload(); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor(); await openRemote();
-  console.log("Remote UI: a lost apply response cannot be cleared by an unrelated completed operation.");
+  console.log("Remote UI: a lost apply response remains locked through management-service reconnection and connection changes.");
 
   const screenshots = resolve(process.env.MIGPIE_REMOTE_UI_ARTIFACTS ?? ".local/remote-ui-regression"); await mkdir(screenshots, { recursive: true });
   await field("connection-detail").evaluate((node) => { node.scrollTop = 220; });

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { identifier, pluginOptions, validateForward, validateProfile } from "./config.mjs";
 import { ProfileStore, assertProfileRevision, profileRevision, publicProfile } from "./store.mjs";
 import { SessionManager } from "./sessions.mjs";
-import { startManagementServer, publishEndpoint } from "./web-server.mjs";
+import { startManagementServer, publishEndpoint, loadRecoveryKey } from "./web-server.mjs";
 import { fileURLToPath } from "node:url";
 import { readSSHConfig } from "./ssh-config.mjs";
 import { OperationError } from "./errors.mjs";
@@ -350,9 +350,10 @@ export async function createPlugin(input = {}, options) {
   let web;
   if (config.webUI) {
     try {
-      web = await startManagementServer({ tools: hooks.tool, port: config.uiPort });
+      const recovery = await loadRecoveryKey(join(config.dataDirectory, "management-recovery.key"));
+      web = await startManagementServer({ tools: hooks.tool, port: config.uiPort, recovery });
       const file = fileURLToPath(new URL("../page/.runtime/endpoint.js", import.meta.url));
-      const unpublish = await publishEndpoint(file, web.url);
+      const unpublish = await publishEndpoint(file, web.url, recovery);
       const close = web.close;
       web.close = async () => { unpublish(); await close(); };
     } catch (error) {

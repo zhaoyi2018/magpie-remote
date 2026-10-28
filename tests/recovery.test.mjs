@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { connectionGuidance, launcherURL, managementFailure, readResponse } from "../page/recovery.js";
+import { createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { connectionGuidance, launcherURL, managementFailure, managementURL, readResponse, recoveryOrigin, recoveryProof, signedRecovery } from "../page/recovery.js";
 
 test("expired desktop and loopback pages return to their plugin launcher, not the stale service", () => {
   for (const origin of ["http://wails.localhost", "http://127.0.0.1:3425", "http://localhost:3425", "http://[::1]:3425"]) {
@@ -11,6 +12,44 @@ test("expired desktop and loopback pages return to their plugin launcher, not th
     assert.equal(launcherURL("#" + new URLSearchParams({ launcher })), null);
   }
   assert.equal(launcherURL(""), null);
+  for (const launcher of ["http://localhost/_magpie/plugin/x/../../settings", "http://localhost/_magpie/plugin/x;/index.html", "http://localhost/_magpie/plugin/x/other.js"]) {
+    assert.equal(launcherURL("?" + new URLSearchParams({ launcher })), null);
+  }
+});
+
+test("a discovered management endpoint is limited to an authenticated loopback address", () => {
+  const token = "a".repeat(43);
+  assert.equal(managementURL(`http://127.0.0.1:1234/${token}/`).pathname, `/${token}/`);
+  for (const value of [`http://localhost:1234/${token}/`, `http://127.0.0.1:1234/${token}/?x=1`, `http://user@127.0.0.1/${token}/`, `http://127.0.0.1/${token}/other`]) {
+    assert.equal(managementURL(value), null);
+  }
+});
+
+test("recovery signatures and proofs bind the challenge, purpose and exact candidate origin", async () => {
+  const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const recovery = { secret: randomBytes(32).toString("base64url"), publicKey: key.publicKey.export({ type: "spki", format: "der" }).toString("base64url") };
+  const origin = "http://127.0.0.1:1234", challenge = randomBytes(32).toString("base64url");
+  const signed = (payload) => {
+    const message = JSON.stringify(payload);
+    return { message, signature: sign("sha256", Buffer.from(message), { key: key.privateKey, dsaEncoding: "ieee-p1363" }).toString("base64url") };
+  };
+  const identity = signed({ version: 1, purpose: "identity", origin, challenge });
+  assert.equal(await signedRecovery(recovery, origin, challenge, identity, "identity"), true);
+  assert.equal(await signedRecovery(recovery, "http://127.0.0.1:1235", challenge, identity, "identity"), null);
+  assert.equal(await signedRecovery(recovery, origin, randomBytes(32).toString("base64url"), identity, "identity"), null);
+  assert.equal(await signedRecovery(recovery, origin, challenge, { ...identity, message: identity.message.replace("1234", "1235") }, "identity"), null);
+  const wrongKey = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).publicKey.export({ type: "spki", format: "der" }).toString("base64url");
+  assert.equal(await signedRecovery({ ...recovery, publicKey: wrongKey }, origin, challenge, identity, "identity"), null);
+  assert.equal(await signedRecovery(recovery, origin, challenge, identity, "endpoint"), null);
+  const target = `${origin}/${randomBytes(32).toString("base64url")}/`;
+  const endpoint = signed({ version: 1, purpose: "endpoint", origin, challenge, url: target });
+  assert.equal((await signedRecovery(recovery, origin, challenge, endpoint, "endpoint")).href, target);
+  assert.equal(await signedRecovery(recovery, origin, challenge, signed({ version: 1, purpose: "endpoint", origin, challenge, url: target.replace("1234", "1235") }), "endpoint"), null);
+  const expected = createHmac("sha256", Buffer.from(recovery.secret, "base64url")).update(origin + "\n" + challenge).digest("base64url");
+  assert.equal(await recoveryProof(recovery.secret, origin, challenge), expected);
+  assert.notEqual(await recoveryProof(recovery.secret, "http://127.0.0.1:1235", challenge), expected);
+  assert.equal(recoveryOrigin(origin), origin);
+  for (const value of ["http://localhost:1234", "http://127.0.0.1:1234/path", "https://127.0.0.1:1234", "http://user@127.0.0.1:1234"]) assert.equal(recoveryOrigin(value), null);
 });
 
 test("configuration failures remain actionable without being described as a stopped server", async () => {
@@ -45,5 +84,9 @@ test("the page retains credential requirements and handles invalid responses exp
   });
   await assert.rejects(readResponse(new Response("not JSON", { status: 502 })), { code: "INVALID_RESPONSE" });
   await assert.rejects(readResponse(new Response("null", { status: 502 })), { code: "INVALID_RESPONSE" });
+  const abort = new DOMException("response aborted", "AbortError");
+  await assert.rejects(readResponse({ json: async () => { throw abort; } }), (error) => error === abort);
+  const disconnected = new TypeError("response disconnected");
+  await assert.rejects(readResponse({ json: async () => { throw disconnected; } }), (error) => error === disconnected);
   await assert.rejects(readResponse(new Response(JSON.stringify({ error: "expired" }), { status: 401 })), { code: "MANAGEMENT_EXPIRED" });
 });

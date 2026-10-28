@@ -20,7 +20,7 @@ export function createRemoteManager({ call, toast }) {
   let preview = null, previewAction = null, previewBackupId = null, previewLoading = false, submitting = false, webLoading = false;
   let readError = "", actionError = "", webError = "", submissionUncertain = false, uncertainSubmission = null;
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
-  const pendingSubmissions = new Set(), backupRows = new Map();
+  const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
   let history = [], historySignature = "";
 
   function drawHistory() {
@@ -373,7 +373,9 @@ export function createRemoteManager({ call, toast }) {
     const wasReady = sshReady(), wasActive = active, wasOnline = online, wasRemoteActive = remoteActive;
     if (changed) {
       generation++; dataRevision++; backupSequence++; reading = null; backupsLoading = null;
-      status = null; operation = null; history = []; historySignature = ""; readError = actionError = ""; submissionUncertain = false; uncertainSubmission = null; submitting = false;
+      status = null; operation = null; history = []; historySignature = ""; readError = actionError = "";
+      uncertainSubmission = uncertainSubmissions.get(nextRow?.connection.id) ?? null;
+      submissionUncertain = Boolean(uncertainSubmission); submitting = false;
       backups = null; backupError = ""; backupsDirty = false; backupRefreshDue = false; completedBackupOperation = null;
       backupRows.clear(); $("remote-backup-list").replaceChildren();
       closePreview(); clearWeb(); $("remote-web-port").value = "3430";
@@ -412,8 +414,9 @@ export function createRemoteManager({ call, toast }) {
             status = result; history = result.history ?? []; readError = "";
             if (result.operation) {
               observeOperation(result.operation);
-              if (!submissionUncertain || (operation.action === uncertainSubmission?.action && operation.revision === uncertainSubmission?.revision)) {
-                submissionUncertain = false; uncertainSubmission = null;
+              if (!submissionUncertain || (operation.action === uncertainSubmission?.action && operation.revision === uncertainSubmission?.revision
+                && Number.isFinite(Date.parse(operation.createdAt)) && Date.parse(operation.createdAt) >= uncertainSubmission.startedAt)) {
+                submissionUncertain = false; uncertainSubmission = null; uncertainSubmissions.delete(id);
               }
             }
             if (fresh() && (!result.instance.installed || result.instance.web?.enabled === false || result.instance.service?.state === "stopped")) clearWeb();
@@ -470,7 +473,7 @@ export function createRemoteManager({ call, toast }) {
   async function applyPreview(event) {
     event.preventDefault();
     if (!preview || submitting || actionReason(previewAction, previewBackupId)) return;
-    const id = row.connection.id, epoch = generation, action = previewAction, revision = preview.revision;
+    const id = row.connection.id, epoch = generation, action = previewAction, revision = preview.revision, startedAt = Date.now();
     submitting = true; pendingSubmissions.add(id); dataRevision++;
     if (backupActions.has(action)) { backupSequence++; backupsLoading = null; backupsDirty = true; }
     showError("remote-preview-error", "");
@@ -478,23 +481,29 @@ export function createRemoteManager({ call, toast }) {
     clearWeb(); draw();
     try {
       const result = await call("remote_apply", { connectionId: id, action, revision });
-      if (!current(id, epoch)) return;
       if (!result || (result.connectionId && result.connectionId !== id)) throw new Error("未能核实远端任务，请检测环境确认结果。");
+      uncertainSubmissions.delete(id);
+      if (!current(id, epoch)) return;
       observeOperation(result); submissionUncertain = false; uncertainSubmission = null;
       closePreview(); toast("远端任务已提交，可在运行日志查看进度与结果。");
     } catch (error) {
+      const uncertainResult = ["REQUEST_TIMEOUT", "SERVICE_UNREACHABLE", "INVALID_RESPONSE", "MANAGEMENT_EXPIRED"].includes(error?.code) || !error?.code;
+      if (uncertainResult) uncertainSubmissions.set(id, { action, revision, startedAt });
       if (!current(id, epoch)) return;
       const message = errorMessage(error);
       // A lost response may have reached the server. Keep mutations locked until
       // an actual operation is recovered instead of inviting a duplicate apply.
-      submissionUncertain = ["REQUEST_TIMEOUT", "SERVICE_UNREACHABLE"].includes(error?.code) || !error?.code;
-      uncertainSubmission = submissionUncertain ? { action, revision } : null;
+      submissionUncertain = uncertainResult;
+      uncertainSubmission = uncertainResult ? { action, revision, startedAt } : null;
       actionError = submissionUncertain ? "提交结果待核实：" + message : message;
       if (dialog.open) showError("remote-preview-error", actionError);
     } finally {
       pendingSubmissions.delete(id);
-      if (current(id, epoch)) {
-        submitting = false; draw();
+      if (row?.connection.id === id) {
+        submitting = false;
+        uncertainSubmission = uncertainSubmissions.get(id) ?? null;
+        submissionUncertain = Boolean(uncertainSubmission);
+        draw();
         void refresh({ force: Boolean(operation && ["succeeded", "failed"].includes(operation.state)) });
         maybeRefreshBackups();
       }
@@ -544,12 +553,16 @@ export function createRemoteManager({ call, toast }) {
   function visibilityChanged() { syncPolling(); if (!document.hidden) void refresh(); }
   document.addEventListener("visibilitychange", visibilityChanged);
 
+  function suspend() {
+    closePreview(); clearWeb();
+    if (polling) { clearInterval(polling); polling = null; }
+  }
+  function resume() { syncPolling(); void refresh(); }
   function close() {
     if (closed) return;
-    closePreview(); clearWeb();
+    suspend();
     closed = true; generation++; backupSequence++; reading = null; backupsLoading = null;
-    if (polling) { clearInterval(polling); polling = null; }
     document.removeEventListener("visibilitychange", visibilityChanged);
   }
-  return { render, refresh, close };
+  return { render, refresh, suspend, resume, close, hasUncertain: () => pendingSubmissions.size > 0 || uncertainSubmissions.size > 0 || operation?.state === "unknown" };
 }

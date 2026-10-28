@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
+import { createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { get } from "node:http";
-import { startManagementServer, publishEndpoint } from "../src/web-server.mjs";
+import { startManagementServer, publishEndpoint, loadRecoveryKey } from "../src/web-server.mjs";
 import { createTools } from "../src/plugin.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
@@ -46,6 +47,66 @@ test("the management API permits the sandboxed page and refuses untrusted origin
   const preflight = await fetch(new URL("api/call", web.url), { method: "OPTIONS", headers: { Origin: "null", "Access-Control-Request-Headers": "authorization,content-type" } });
   assert.equal(preflight.status, 204);
   assert.match(preflight.headers.get("access-control-allow-headers"), /Authorization/);
+  const expired = new URL(`/${"a".repeat(43)}/api/snapshot`, web.url);
+  const expiredPreflight = await fetch(expired, { method: "OPTIONS", headers: { Origin: "null", "Access-Control-Request-Headers": "authorization" } });
+  assert.equal(expiredPreflight.status, 204);
+  const expiredResponse = await fetch(expired, { headers: web.headers });
+  assert.equal(expiredResponse.status, 404);
+  assert.equal(expiredResponse.headers.get("access-control-allow-origin"), "null");
+  assert.equal((await expiredResponse.json()).code, "MANAGEMENT_EXPIRED");
+});
+
+test("launcher parameters cannot authorize external scripts in the management page", async (t) => {
+  const web = await service(t);
+  const page = new URL(web.url);
+  for (const launcher of ["http://wails.localhost/_magpie/plugin/migpie-remote/index.html", "http://127.0.0.1:12345/_magpie/plugin/attacker/index.html", "https://example.com/_magpie/plugin/x/index.html"]) {
+    page.searchParams.set("launcher", launcher);
+    const policy = (await fetch(page)).headers.get("content-security-policy");
+    const scripts = policy.split(";").map((value) => value.trim()).find((value) => value.startsWith("script-src "));
+    assert.equal(scripts, `script-src ${new URL(web.url).origin}`);
+    assert.ok(!policy.includes("/.runtime/endpoint.js"));
+  }
+});
+
+test("recovery verifies identity before returning a token and binds proofs to the service origin", async (t) => {
+  const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const publicKey = key.publicKey.export({ type: "spki", format: "der" }).toString("base64url");
+  const secret = randomBytes(32).toString("base64url");
+  const privateKey = key.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url");
+  const web = await startManagementServer({ tools: {}, recovery: { secret, publicKey, privateKey } });
+  t.after(() => web.close());
+  const challenge = randomBytes(32).toString("base64url"), origin = new URL(web.url).origin;
+  const identity = await fetch(new URL(`/recovery/identity/${challenge}`, web.url), { headers: { Origin: "null" } });
+  assert.equal(identity.status, 200);
+  const identityText = await identity.text();
+  assert.ok(!identityText.includes(web.token));
+  assert.equal(JSON.parse(JSON.parse(identityText).message).origin, origin);
+  const frame = await fetch(new URL("/recovery-frame/index.html", web.url));
+  assert.equal(frame.status, 200);
+  const framePolicy = frame.headers.get("content-security-policy");
+  assert.match(framePolicy, /sandbox allow-scripts/);
+  assert.match(framePolicy, /script-src 'nonce-[^']+';/);
+  assert.ok(framePolicy.includes(`connect-src ${origin}`));
+  assert.match(await frame.text(), /http-equiv="Content-Security-Policy"/);
+  assert.ok(!framePolicy.includes("frame-ancestors"), "The discovery frame must remain embeddable under the sandboxed page");
+  const proof = (target) => createHmac("sha256", Buffer.from(secret, "base64url")).update(target + "\n" + challenge).digest("base64url");
+  const url = (value) => new URL(`/recovery/endpoint/${value}/${challenge}`, web.url);
+  assert.equal((await fetch(url(proof("http://127.0.0.1:1234")))).status, 404);
+  const response = await fetch(url(proof(origin)), { headers: { Origin: "null" } });
+  assert.equal(response.status, 200);
+  assert.equal(JSON.parse((await response.json()).message).url, web.url);
+  assert.equal((await fetch(url(proof(origin)), { headers: { Origin: "https://example.com" } })).status, 403);
+});
+
+test("recovery keys persist across restarts and concurrent startup without replacing damaged keys", async (t) => {
+  const file = join(await temporary(t), "recovery-key.json");
+  const [first, concurrent] = await Promise.all([loadRecoveryKey(file), loadRecoveryKey(file)]);
+  assert.deepEqual(first, concurrent);
+  assert.deepEqual(await loadRecoveryKey(file), first);
+  const damaged = "invalid recovery key";
+  await writeFile(file, damaged);
+  await assert.rejects(loadRecoveryKey(file));
+  assert.equal(await readFile(file, "utf8"), damaged);
 });
 
 test("the management page is self-contained and only serves its declared assets", async (t) => {
@@ -199,4 +260,12 @@ test("the endpoint launcher is removed only by the host that published it", asyn
   const removeLatest = await publishEndpoint(file, "http://127.0.0.1:1234/latest/");
   removeLatest();
   await assert.rejects(readFile(file), { code: "ENOENT" });
+  const removeFirst = await publishEndpoint(file, "http://127.0.0.1:1234/same/");
+  const removeSecond = await publishEndpoint(file, "http://127.0.0.1:1234/same/");
+  assert.ok(!(await readFile(join(file, "..", "discovery.css"), "utf8")).includes("/same/"));
+  removeFirst();
+  assert.match(await readFile(file, "utf8"), /same/);
+  assert.match(await readFile(join(file, "..", "discovery.css"), "utf8"), /1234/);
+  removeSecond();
+  await assert.rejects(readFile(join(file, "..", "discovery.css")), { code: "ENOENT" });
 });

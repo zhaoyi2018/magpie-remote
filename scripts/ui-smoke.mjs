@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { createServer } from "node:http";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { ProfileStore, profileRevision, publicProfile } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { createTools } from "../src/plugin.mjs";
-import { startManagementServer } from "../src/web-server.mjs";
+import { startManagementServer, loadRecoveryKey } from "../src/web-server.mjs";
 import { echoServer, exchange, sshServer, temporary, until } from "../tests/helpers.mjs";
 import { startUIHarness } from "./ui-harness.mjs";
 
@@ -24,9 +25,11 @@ try {
   const sessions = new SessionManager({ env: {} });
   cleanup.unshift(() => sessions.close());
   const tools = createTools(store, sessions);
-  const web = await startManagementServer({ tools });
+  const recovery = await loadRecoveryKey(join(directory, "recovery.key"));
+  let web = await startManagementServer({ tools, recovery });
   cleanup.unshift(() => web.close());
-  const harness = await startUIHarness({ getEndpoint: () => web.url });
+  let discoveryOverride = null;
+  const harness = await startUIHarness({ getEndpoint: () => web.url, recovery, discoveryStyle: () => discoveryOverride ?? `:root { --migpie-management-port: ${new URL(web.url).port}; }` });
   cleanup.unshift(() => harness.close());
   const executable = process.env.MIGPIE_UI_BROWSER;
   const browserOptions = executable ? { executablePath: resolve(executable) } : {};
@@ -53,6 +56,18 @@ try {
   const field = (id) => ui.locator("#" + id);
   await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
   assert.equal(await page.locator("iframe").getAttribute("sandbox"), "allow-scripts");
+  const snapshotURL = new URL("api/snapshot", web.url).href;
+  let failSnapshot = true;
+  await browserContext.route(snapshotURL, async (route) => {
+    if (route.request().method() === "GET" && failSnapshot) { failSnapshot = false; await route.abort("failed"); }
+    else await route.continue();
+  });
+  await field("refresh").click();
+  await field("service-state").filter({ hasText: "正在重新连接" }).waitFor();
+  assert.equal(await field("service-error").isVisible(), false);
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  await browserContext.unroute(snapshotURL);
+  console.log("UI: one interrupted snapshot retries without an offline alert.");
 
   // Submit through Enter inside the same CSP sandbox used by the host page.
   await field("new-connection").click();
@@ -172,6 +187,105 @@ try {
   const live = sessions.status("ui-regression").forwards[0];
   assert.ok((await exchange(live.bindPort)).length);
 
+  await field("tab-connection").click();
+  await field("disconnect").click(); await field("detail-state").filter({ hasText: "未连接" }).waitFor();
+  await field("edit-connection").click();
+  await field("profile-name").fill("Draft survives service restart");
+  const oldEndpoint = web.url;
+  const oldPort = Number(new URL(oldEndpoint).port);
+  await web.close();
+  web = await startManagementServer({ tools, port: oldPort, recovery });
+  assert.notEqual(web.url, oldEndpoint);
+  const oldFrame = page.frames().find((item) => item.url().startsWith(oldEndpoint));
+  assert.ok(oldFrame, "The management page should stay open during reconnection");
+  await oldFrame.waitForFunction((url) => performance.getEntriesByType("resource").some((entry) => entry.name.startsWith(url + "api/snapshot")), web.url, { timeout: 15000 });
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  assert.ok(oldFrame.url().startsWith(web.url), "Same-port recovery must update the document address");
+  assert.equal(await field("connection-editor").evaluate((node) => node.open), true);
+  assert.equal(await field("profile-name").inputValue(), "Draft survives service restart");
+  await field("save-connection").click();
+  await ui.locator("#connection-editor[open]").waitFor({ state: "hidden" });
+  assert.equal((await store.get("ui-regression")).name, "Draft survives service restart");
+  await field("tab-forwards").click();
+  await field("connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor();
+  console.log("UI: same-port token rotation reconnects without closing the editing dialog.");
+
+  const previous = web;
+  const originalBackups = tools.config_backups.execute;
+  const heldBackups = hold("config_backups", originalBackups);
+  await field("open-backups").click(); await until(heldBackups.entered, "The backup request was not held");
+  const oldSnapshot = new URL("api/snapshot", previous.url).href;
+  await browserContext.route(oldSnapshot, (route) => route.request().method() === "GET" ? route.abort("failed") : route.continue());
+  web = await startManagementServer({ tools, recovery });
+  await field("service-state").filter({ hasText: "管理服务正在恢复" }).waitFor({ timeout: 15000 });
+  await browserContext.unroute(oldSnapshot);
+  await field("refresh").evaluate((node) => node.click());
+  await field("service-state").filter({ hasText: "管理服务正在恢复" }).waitFor();
+  heldBackups.release();
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor({ timeout: 15000 });
+  await ui.locator("#backup-dialog .dialog-actions .close-dialog").click();
+  await until(() => page.frames().some((frame) => frame.url().startsWith(web.url)), "A successful old snapshot discarded the new endpoint", 15000);
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  await previous.close();
+  tools.config_backups.execute = originalBackups;
+  console.log("UI: a successful old snapshot cannot discard a new endpoint while an operation is pending.");
+
+  const attackerRequests = [];
+  const attacker = createServer((request, response) => {
+    attackerRequests.push({ path: request.url, authorization: request.headers.authorization, referrer: request.headers.referer });
+    response.writeHead(200, { "Access-Control-Allow-Origin": "null", "Content-Type": "application/json" });
+    response.end(JSON.stringify({ message: "fake", signature: "invalid" }));
+  });
+  await new Promise((resolve, reject) => { attacker.once("error", reject); attacker.listen(0, "127.0.0.1", resolve); });
+  cleanup.unshift(() => new Promise((resolve) => { attacker.close(resolve); attacker.closeAllConnections(); }));
+  const attackerOrigin = `http://127.0.0.1:${attacker.address().port}`;
+  discoveryOverride = `@import url("${attackerOrigin}/imported.css"); :root { --migpie-management-port: ${new URL(attackerOrigin).port}; }`;
+  const protectedEndpoint = web.url, protectedSnapshot = new URL("api/snapshot", protectedEndpoint).href;
+  await field("tab-connection").click(); await field("disconnect").click(); await field("detail-state").filter({ hasText: "未连接" }).waitFor();
+  await field("edit-connection").click(); await field("profile-name").fill("Protected draft");
+  await browserContext.route(protectedSnapshot, (route) => route.request().method() === "GET" ? route.abort("failed") : route.continue());
+  await until(() => attackerRequests.length > 0, "The forged discovery style was not exercised", 15000);
+  assert.ok(attackerRequests.every((request) => request.path.startsWith("/recovery/identity/") && !request.authorization && !request.referrer), "Unverified services must not receive proof, token, referrer or API calls");
+  assert.equal(await field("profile-name").inputValue(), "Protected draft");
+  assert.equal(await field("panel-forwards").evaluate(() => document.body.dataset.attacker ?? ""), "");
+  discoveryOverride = null; await browserContext.unroute(protectedSnapshot);
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor({ timeout: 15000 });
+  await ui.locator("#connection-editor .dialog-actions .close-dialog").click();
+  await field("tab-forwards").click(); await field("connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor();
+  console.log("UI: a forged discovery candidate cannot receive a token or recovery proof.");
+
+  const samePortEndpoint = web.url;
+  const replacement = await startManagementServer({ tools, recovery });
+  await web.close();
+  const occupied = createServer((request, response) => {
+    response.writeHead(404, { "Access-Control-Allow-Origin": "null", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Content-Type": "text/html" });
+    response.end("<html>not the management service</html>");
+  });
+  await new Promise((resolve, reject) => { occupied.once("error", reject); occupied.listen(Number(new URL(samePortEndpoint).port), "127.0.0.1", resolve); });
+  cleanup.unshift(() => new Promise((resolve) => { occupied.close(resolve); occupied.closeAllConnections(); }));
+  web = replacement;
+  await until(() => page.frames().some((frame) => frame.url().startsWith(web.url)), "The page did not navigate to the new management address", 20000);
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  assert.notEqual(new URL(web.url).port, new URL(samePortEndpoint).port);
+  assert.equal(sessions.status("ui-regression").state, "connected");
+  await page.frames().find((frame) => frame.url().startsWith(web.url)).evaluate(() => location.reload());
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  console.log("UI: an HTML response on the old port triggers authenticated recovery, navigation and a successful refresh.");
+  const reloadedFrame = page.frames().find((frame) => frame.url().startsWith(web.url));
+  const launchAddress = await reloadedFrame.evaluate(() => new URLSearchParams(location.hash.slice(1)).get("launcher"));
+  const manual = new URL(launchAddress); manual.searchParams.set("invalid", web.url);
+  await reloadedFrame.evaluate((url) => location.replace(url), manual.href);
+  await until(() => page.frames().some((frame) => frame.url().startsWith(web.url)), "Manual reopening rejected a healthy unchanged service", 15000);
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  console.log("UI: manually reopening accepts the same healthy management address.");
+
+  await field("panel-forwards").evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+  await field("panel-forwards").evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  const beforePageRestore = await field("last-updated").textContent();
+  await until(async () => (await field("last-updated").textContent()) !== beforePageRestore, "Snapshot polling did not resume after restoring the cached page");
+  console.log("UI: snapshot polling resumes after the browser restores a cached page.");
+
   tools.forward_add.execute = async () => { throw new Error("UI test: start rejected"); };
   await createForward("Saved but not started", "s2c");
   await field("save-forward").click();
@@ -195,6 +309,22 @@ try {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.screenshot({ path: join(screenshotDirectory, "desktop.png"), fullPage: true });
   assert.ok((await stat(join(screenshotDirectory, "desktop.png"))).size > 1000);
+
+  const spoofed = await browser.newContext({ permissions: ["local-network-access"] });
+  const spoofedPage = await spoofed.newPage(), leaked = [];
+  await spoofedPage.exposeFunction("recordSpoof", (value) => leaked.push(value));
+  await spoofedPage.addInitScript(() => addEventListener("message", (event) => { if (event.data?.type === "fixture-spoof") window.recordSpoof(JSON.stringify(event.data.data)); }));
+  const genuine = new URL("/recovery-frame/index.html", web.url).href;
+  await spoofed.route(genuine, (route) => route.fulfill({ status: 200, contentType: "text/html", body: `<script>addEventListener('message', e => parent.postMessage({type:'fixture-spoof', data:e.data}, '*'))</script>` }));
+  await spoofedPage.goto(harness.url);
+  const spoofedUI = spoofedPage.frameLocator('iframe[title="SSH 连接"]');
+  await spoofedUI.locator("#service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  await until(() => leaked.length > 0, "The spoofed frame did not receive its identity challenge");
+  await spoofed.route(new URL("api/snapshot", web.url).href, (route) => route.abort("failed"));
+  await spoofedUI.locator("#service-state").filter({ hasText: "管理服务离线" }).waitFor({ timeout: 15000 });
+  await spoofedPage.waitForTimeout(5500);
+  assert.ok(leaked.every((value) => !value.includes("launcher") && !value.includes(recovery.secret) && !value.includes(web.token)), "An unauthenticated frame must not receive the launcher or recovery credentials");
+  await spoofed.close();
   assert.deepEqual(scriptErrors, [], "Browser script errors");
   console.log(`UI: sandboxed desktop/narrow layout and browser script errors passed. Screenshots: ${screenshotDirectory}`);
 } finally {

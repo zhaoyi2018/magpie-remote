@@ -142,8 +142,9 @@
   });
   $("connection-editor").addEventListener("cancel", (event) => { if (connectionSaving) event.preventDefault(); });
   $("connection-editor").addEventListener("close", () => { if (!$("connection-editor").open) $("profile-password").value = ""; });
-  addEventListener("pagehide", () => { $("profile-password").value = ""; }, { once: true });
+  addEventListener("pagehide", () => { $("profile-password").value = ""; });
 
-  return { open: openConnection };
+  function sync() { $("save-connection").disabled = connectionSaving || !isOnline(); }
+  return { open: openConnection, sync };
   };
 })();

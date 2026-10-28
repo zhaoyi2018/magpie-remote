@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 // A development-only parent frame with Magpie's documented allow-scripts
 // sandbox and launch-page policy. The SSH backend still runs in the real host.
-export async function startUIHarness({ getEndpoint } = {}) {
+export async function startUIHarness({ getEndpoint, recovery, discoveryStyle } = {}) {
   const prefix = "/_magpie/plugin/ui-test/";
   const root = new URL("../page/", import.meta.url);
   let origin;
@@ -29,11 +29,15 @@ export async function startUIHarness({ getEndpoint } = {}) {
       response.setHeader("Content-Type", "text/javascript");
       return response.end(`window.magpie={ready:new Promise(resolve=>{addEventListener('message',e=>{if(e.source===parent&&e.data?.id==='launch-ready')resolve(e.data.result);});parent.postMessage({magpie:1,id:'launch-ready',method:'hello'},'*');})};`);
     }
-    const types = { "index.html": "text/html; charset=utf-8", "launch.js": "text/javascript", "launch.css": "text/css", "theme.js": "text/javascript", "icon.png": "image/png", "icon-dark.png": "image/png", "icon.svg": "image/svg+xml", ".runtime/endpoint.js": "text/javascript" };
+    const types = { "index.html": "text/html; charset=utf-8", "launch.js": "text/javascript", "launch.css": "text/css", "theme.js": "text/javascript", "icon.png": "image/png", "icon-dark.png": "image/png", "icon.svg": "image/svg+xml", ".runtime/endpoint.js": "text/javascript", ".runtime/discovery.css": "text/css" };
     if (!Object.hasOwn(types, file)) { response.writeHead(404); return response.end(); }
     if (file === ".runtime/endpoint.js" && getEndpoint) {
       response.setHeader("Content-Type", types[file]);
-      return response.end(`window.__migpieRemoteEndpoint = ${JSON.stringify({ url: getEndpoint() })};`);
+      return response.end(`window.__migpieRemoteEndpoint = ${JSON.stringify({ url: getEndpoint(), ...(recovery && { recovery: { secret: recovery.secret, publicKey: recovery.publicKey } }) })};`);
+    }
+    if (file === ".runtime/discovery.css" && getEndpoint) {
+      response.setHeader("Content-Type", types[file]);
+      return response.end(discoveryStyle ? discoveryStyle() : `:root { --migpie-management-port: ${new URL(getEndpoint()).port}; }`);
     }
     const data = await readFile(new URL(file, root));
     response.setHeader("Content-Type", types[file]);

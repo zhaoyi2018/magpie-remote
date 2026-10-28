@@ -1,18 +1,65 @@
-export function launcherURL(hash) {
+export function launcherURL(parameters) {
   try {
-    const url = new URL(new URLSearchParams(hash.replace(/^#/, "")).get("launcher"));
+    const url = new URL(new URLSearchParams(parameters.replace(/^[?#]/, "")).get("launcher"));
     const local = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
     const desktop = url.origin === "http://wails.localhost";
     if (url.protocol === "http:" && (local || desktop) && !url.username && !url.password
-      && url.pathname.startsWith("/_magpie/plugin/")) return url.href;
+      && /^\/_magpie\/plugin\/[a-zA-Z0-9_-]+\/(?:index\.html)?$/.test(url.pathname)) return url.href;
   } catch { /* Standalone pages do not have a launcher. */ }
   return null;
+}
+
+export function managementURL(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "http:" && url.hostname === "127.0.0.1" && !url.username && !url.password
+      && !url.search && !url.hash && /^\/[A-Za-z0-9_-]{43}\/$/.test(url.pathname)) return url;
+  } catch { /* Ignore an invalid or missing endpoint. */ }
+  return null;
+}
+
+function encode(value) {
+  return btoa(String.fromCharCode(...new Uint8Array(value))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decode(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("无效的恢复信息");
+  return Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4)), (character) => character.charCodeAt(0));
+}
+export function randomRecoveryValue(bytes = 32) { return encode(crypto.getRandomValues(new Uint8Array(bytes))); }
+
+export function recoveryOrigin(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "http:" && url.hostname === "127.0.0.1" && !url.username && !url.password
+      && url.pathname === "/" && !url.search && !url.hash) return url.origin;
+  } catch { /* Ignore invalid or missing candidates. */ }
+  return null;
+}
+
+export async function signedRecovery(recovery, origin, challenge, result, purpose) {
+  try {
+    const publicKey = await crypto.subtle.importKey("spki", decode(recovery.publicKey), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    if (!result || typeof result.message !== "string" || result.message.length > 512
+      || !await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, publicKey, decode(result.signature), new TextEncoder().encode(result.message))) return null;
+    const data = JSON.parse(result.message);
+    if (data.version !== 1 || data.purpose !== purpose || data.challenge !== challenge || data.origin !== origin) return null;
+    if (purpose === "identity") return true;
+    const target = managementURL(data.url);
+    return target?.origin === origin ? target : null;
+  } catch { return null; }
+}
+
+export async function recoveryProof(secret, origin, challenge) {
+  const key = await crypto.subtle.importKey("raw", decode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return encode(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(origin + "\n" + challenge)));
 }
 
 export async function readResponse(response) {
   let data;
   try { data = await response.json(); }
-  catch {
+  catch (error) {
+    if (error.name === "AbortError" || error instanceof TypeError) throw error;
+    if ([401, 404].includes(response.status)) throw Object.assign(new Error("管理页面认证已过期，请重新打开页面"), { code: "MANAGEMENT_EXPIRED", status: response.status });
     throw Object.assign(new Error("管理服务返回了无法读取的响应，请重试"), { code: "INVALID_RESPONSE", status: response.status });
   }
   if (!data || typeof data !== "object" || Array.isArray(data)) {

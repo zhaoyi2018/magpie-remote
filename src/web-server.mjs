@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, timingSafeEqual } from "node:crypto";
+import { link, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { readFileSync, unlinkSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { errorDetails } from "./errors.mjs";
 
 const assets = new Map([
@@ -57,9 +57,35 @@ function readJSON(request) {
   });
 }
 
-export async function startManagementServer({ tools, port = 0 }) {
+export async function loadRecoveryKey(file) {
+  async function readKey() {
+    const metadata = await lstat(file);
+    if (!metadata.isFile() || (process.platform !== "win32" && (metadata.mode & 0o077))) throw new Error("恢复密钥文件权限无效");
+    const saved = JSON.parse(await readFile(file, "utf8"));
+    if (saved?.version !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(saved.secret ?? "") || typeof saved.privateKey !== "string") throw new Error("恢复密钥格式无效");
+    const privateKey = createPrivateKey({ key: Buffer.from(saved.privateKey, "base64url"), type: "pkcs8", format: "der" });
+    if (privateKey.asymmetricKeyType !== "ec" || privateKey.asymmetricKeyDetails.namedCurve !== "prime256v1") throw new Error("恢复密钥类型无效");
+    const publicKey = createPublicKey(privateKey).export({ type: "spki", format: "der" }).toString("base64url");
+    return { secret: saved.secret, privateKey: saved.privateKey, publicKey };
+  }
+  try { return await readKey(); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const contents = JSON.stringify({ version: 1, secret: randomBytes(32).toString("base64url"), privateKey: key.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url") });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
+    try { await link(temporary, file); }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+  } finally { await rm(temporary, { force: true }).catch(() => {}); }
+  return readKey();
+}
+
+export async function startManagementServer({ tools, port = 0, recovery }) {
   const token = randomBytes(32).toString("base64url");
   const prefix = `/${token}/`;
+  const signingKey = recovery && createPrivateKey({ key: Buffer.from(recovery.privateKey, "base64url"), type: "pkcs8", format: "der" });
   const pageDirectory = new URL("../page/", import.meta.url);
   let origin;
   const server = createServer((request, response) => {
@@ -76,9 +102,8 @@ export async function startManagementServer({ tools, port = 0 }) {
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Content-Type-Options", "nosniff");
     if (request.headers.host !== new URL(origin).host) return json(response, 403, { error: "不接受该主机名" });
-    const path = new URL(request.url, origin).pathname;
-    if (!path.startsWith(prefix)) return json(response, 404, { error: "管理服务地址已过期", code: "MANAGEMENT_EXPIRED" });
-    const relative = path.slice(prefix.length);
+    const url = new URL(request.url, origin);
+    const path = url.pathname;
     const requestOrigin = request.headers.origin;
     if (requestOrigin && requestOrigin !== "null" && requestOrigin !== origin) {
       return json(response, 403, { error: "不接受该页面来源" });
@@ -87,13 +112,36 @@ export async function startManagementServer({ tools, port = 0 }) {
       response.setHeader("Access-Control-Allow-Origin", requestOrigin);
       response.setHeader("Vary", "Origin");
     }
-    if (request.method === "OPTIONS" && relative.startsWith("api/")) {
+    if (path === "/recovery-frame/index.html" && request.method === "GET") {
+      const script = await readFile(new URL("recovery-frame.js", pageDirectory), "utf8");
+      const nonce = randomBytes(18).toString("base64");
+      const policy = `default-src 'none'; script-src 'nonce-${nonce}'; style-src http:; connect-src ${origin}; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts`;
+      response.setHeader("Content-Security-Policy", policy);
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      const policyMeta = policy.replaceAll("'", "&#39;");
+      return response.end(`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content='${policyMeta}'><script nonce="${nonce}">${script}</script></head><body></body></html>`);
+    }
+    const identity = /^\/recovery\/identity\/([A-Za-z0-9_-]{43})$/.exec(path);
+    const discovery = /^\/recovery\/endpoint\/([A-Za-z0-9_-]{43})\/([A-Za-z0-9_-]{43})$/.exec(path);
+    if ((identity || discovery) && signingKey && request.method === "GET") {
+      const challenge = identity ? identity[1] : discovery[2];
+      if (discovery) {
+        const expected = createHmac("sha256", Buffer.from(recovery.secret, "base64url")).update(origin + "\n" + challenge).digest("base64url");
+        if (!secureEqual(discovery[1], expected)) return json(response, 404, { error: "文件不存在" });
+      }
+      const message = JSON.stringify({ version: 1, purpose: identity ? "identity" : "endpoint", origin, challenge, ...(discovery && { url: `${origin}${prefix}` }) });
+      const signature = sign("sha256", Buffer.from(message), { key: signingKey, dsaEncoding: "ieee-p1363" }).toString("base64url");
+      return json(response, 200, { message, signature });
+    }
+    if (request.method === "OPTIONS" && (path.startsWith(prefix + "api/") || /^\/[A-Za-z0-9_-]{43}\/api\//.test(path))) {
       response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       response.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
       response.setHeader("Access-Control-Allow-Private-Network", "true");
       response.writeHead(204);
       return response.end();
     }
+    if (!path.startsWith(prefix)) return json(response, 404, { error: "管理服务地址已过期", code: "MANAGEMENT_EXPIRED" });
+    const relative = path.slice(prefix.length);
     if (relative.startsWith("api/")) {
       if (!secureEqual(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: "管理页面认证已过期，请重新打开页面", code: "MANAGEMENT_EXPIRED" });
       if (request.method === "GET" && relative === "api/snapshot") {
@@ -129,7 +177,7 @@ export async function startManagementServer({ tools, port = 0 }) {
     const data = await readFile(new URL(asset[0], pageDirectory));
     response.setHeader("Content-Security-Policy", [
       "default-src 'none'", `script-src ${origin}`, `style-src ${origin}`,
-      `img-src ${origin} data:`, `connect-src ${origin}`, "object-src 'none'", "base-uri 'none'",
+      `img-src ${origin} data:`, "connect-src http://127.0.0.1:*", "frame-src http://127.0.0.1:* http://localhost:* http://wails.localhost", "object-src 'none'", "base-uri 'none'",
       "form-action 'none'", "sandbox allow-scripts",
       // Magpie's Windows desktop uses Wails' virtual origin rather than a loopback URL.
       "frame-ancestors http://127.0.0.1:* http://localhost:* http://wails.localhost",
@@ -150,14 +198,27 @@ export async function startManagementServer({ tools, port = 0 }) {
   };
 }
 
-export async function publishEndpoint(file, url) {
-  const contents = `window.__migpieRemoteEndpoint = ${JSON.stringify({ url })};\n`;
+export async function publishEndpoint(file, url, recovery) {
+  const owner = randomBytes(16).toString("base64url");
+  const contents = `window.__migpieRemoteEndpoint = ${JSON.stringify({ url, owner, ...(recovery && { recovery: { secret: recovery.secret, publicKey: recovery.publicKey } }) })};\n`;
+  const discoveryFile = join(dirname(file), "discovery.css");
+  const discovery = `/* ${owner} */\n:root { --migpie-management-port: ${new URL(url).port}; }\n`;
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${randomBytes(8).toString("hex")}.tmp`;
-  await writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
-  await rename(temporary, file);
+  async function publish(path, data) {
+    const temporary = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+    try { await writeFile(temporary, data, { flag: "wx", mode: 0o600 }); await rename(temporary, path); }
+    finally { await rm(temporary, { force: true }).catch(() => {}); }
+  }
+  await publish(discoveryFile, discovery);
+  try { await publish(file, contents); }
+  catch (error) {
+    try { if (readFileSync(discoveryFile, "utf8") === discovery) unlinkSync(discoveryFile); } catch { /* Already removed or replaced. */ }
+    throw error;
+  }
   const remove = () => {
-    try { if (readFileSync(file, "utf8") === contents) unlinkSync(file); } catch { /* Already removed or owned by a newer host. */ }
+    for (const [path, data] of [[file, contents], [discoveryFile, discovery]]) {
+      try { if (readFileSync(path, "utf8") === data) unlinkSync(path); } catch { /* Already removed or owned by a newer host. */ }
+    }
     process.removeListener("exit", remove);
   };
   process.once("exit", remove);
