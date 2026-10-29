@@ -4,6 +4,8 @@ import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createHostSandbox } from "../scripts/host-sandbox.mjs";
 import { fingerprint } from "../src/host-keys.mjs";
 import { keys } from "./fixtures.mjs";
 
@@ -29,6 +31,30 @@ export async function listen(server) {
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   return server.address().port;
+}
+
+export async function startPagePlugin(t, directory) {
+  const sandbox = await createHostSandbox(fileURLToPath(new URL("../", import.meta.url)));
+  t.after(() => sandbox.cleanup());
+  const { default: plugin } = await import(pathToFileURL(join(sandbox.root, "index.mjs")));
+  const { closePlugin } = await import(pathToFileURL(join(sandbox.root, "src", "plugin.mjs")));
+  const hooks = await plugin.server({ directory });
+  t.after(() => closePlugin(hooks));
+  const call = managementClient(sandbox.getEndpoint());
+  return { hooks, call, close: () => closePlugin(hooks) };
+}
+
+export function managementClient(url) {
+  const token = new URL(url).pathname.split("/")[1];
+  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  return async (method, args = {}) => {
+    const response = await fetch(new URL("api/call", url), {
+      method: "POST", headers, body: JSON.stringify({ method, args }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error ?? `Management request failed (${response.status})`);
+    return body.result;
+  };
 }
 
 export async function echoServer(t) {

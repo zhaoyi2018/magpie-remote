@@ -2,9 +2,9 @@
 
 为 **Magpie** 提供 SSH 连接管理、双向 TCP 端口转发和远程 Magpie 生命周期管理。
 
-在 Magpie 侧栏的 **SSH 连接** 页面中，可管理服务器、连接和断开，以及保存、启动、停止和删除 c2s / s2c 端口转发。「远程 Magpie」面板可检测 Linux 环境，预览并执行安装、更新、用户服务启停和保留配置的卸载，通过 SSH 转发访问官方 Web 管理供应商与 Agent。Agent 也可以通过 **Tools / MCP** 操作同一批配置、SSH 会话与远端任务。
+在 Magpie 侧栏的 **SSH 连接** 页面中，可管理服务器、连接和断开，以及保存、启动、停止和删除 c2s / s2c 端口转发。「远程 Magpie」面板可检测 Linux 环境，预览并执行安装、更新、用户服务启停和保留配置的卸载，通过 SSH 转发访问官方 Web 管理供应商与 Agent。
 
-本插件采用「页面＋工具」形式：`magpie.page` 提供侧栏页面，服务端注册 SSH 和远程管理工具，不注册模型供应商。启用且宿主成功加载后，「已安装」中显示「页面」和「工具」类型。保留服务端入口，让 SSH 管理后台随插件自动启动；纯页面插件不会启动该后台。
+本插件是供用户操作的管理页面。页面需要的 SSH 和远程管理后台随插件启动，不向 Magpie 注册 MCP 工具或模型供应商。升级自旧版本后，原有连接配置保留；此前通过 MCP 调用本插件的方式不再可用，请在页面中操作。部分 Magpie 版本可能因为插件带有后台入口而显示「供应商」标签，详见[开发说明](docs/development.md)。
 
 插件卡片、侧栏和页面复用同一个支持明暗主题的 SVG Logo。`magpie.icon` 内嵌图标供插件卡片读取，`magpie.page.icon` 指向包内的 `page/icon.svg`。替换原始 PNG Logo 后运行 `npm run icons` 同步生成两处配置。
 
@@ -45,78 +45,19 @@ magpie plugin add .
 
 也可以在 Magpie 的「设置 → 插件 → 添加插件」中填写项目文件夹的绝对路径。文件夹安装会直接加载源文件。
 
-在 Magpie 中找到插件提供的工具，复制其 MCP 服务地址，并填入所用 Agent 的 MCP 设置。默认地址为：
-
-```text
-http://127.0.0.1:3425/mcp/magpie/tools
-```
-
-实际地址以 Magpie 的插件工具页面为准；如果网关要求密钥，按该 Agent 的 MCP 设置方式配置请求认证。
+安装后启用插件，在 Magpie 侧栏打开「SSH 连接」。升级已有安装时，关闭再开启插件以加载新版本。
 
 ## 使用示例
 
-以下 JSON 是工具的参数，不是终端命令。示例中的服务器地址和用户名需要替换。私钥对应的服务器主机公钥需已存在于 `~/.ssh/known_hosts`，也可以提供核对过的 `hostFingerprint`。
-
-新建请求只允许不存在的连接 id。更新、保存预设或删除时，先读取 `connections` 返回的该连接 `revision`，再以顶层 `expectedRevision` 提交；配置已变化时会拒绝覆盖。升级后需刷新 Agent 的工具定义，完整参数和返回结构见[工具接口](docs/tools.md)。
-
-先调用 `migpie-remote_save_connection`：
-
-```json
-{
-  "connection": {
-    "id": "dev-server",
-    "name": "开发服务器",
-    "host": "server.example.com",
-    "port": 22,
-    "username": "developer",
-    "identityFile": "~/.ssh/id_ed25519"
-  }
-}
-```
-
-再调用 `migpie-remote_connect`，等待结果的 `state` 为 `connected`：
-
-```json
-{ "connectionId": "dev-server" }
-```
-
-调用 `migpie-remote_forward_add`，把客户端的 `18080` 转发到服务器的 `127.0.0.1:8080`：
-
-```json
-{
-  "connectionId": "dev-server",
-  "forward": {
-    "id": "server-web",
-    "direction": "c2s",
-    "bindPort": 18080,
-    "targetPort": 8080
-  }
-}
-```
-
-创建 s2c 时，服务器的 `13425` 会转发到客户端的 `127.0.0.1:3425`：
-
-```json
-{
-  "connectionId": "dev-server",
-  "forward": {
-    "id": "local-magpie",
-    "direction": "s2c",
-    "bindPort": 13425,
-    "targetPort": 3425
-  }
-}
-```
-
-这样，服务器上的应用可访问 `http://127.0.0.1:13425` 到达客户端的 Magpie 网关；应用仍需使用网关要求的认证信息。
-
-调用 `migpie-remote_status` 查看会话和转发，调用 `migpie-remote_disconnect` 释放该连接的全部转发。这两个工具都接受 `{"connectionId":"dev-server"}`。临时转发不会自动写入配置；需要下次连接时启动的转发应放进连接的 `forwards` 数组，见[完整示例](examples/connection.json)。
+1. 点击「新建 SSH 连接」，填写服务器地址、用户名和认证方式，再保存并连接。首次连接时按提示核对服务器主机公钥。
+2. 在连接详情中新建 c2s 转发，设置本地监听端口 `18080` 和服务器侧目标 `127.0.0.1:8080`，可从本机访问远端服务。
+3. 如需从服务器访问本机服务，新建 s2c 转发，设置远端监听端口 `13425` 和本机目标 `127.0.0.1:3425`。服务器应用可通过 `127.0.0.1:13425` 访问本机 Magpie 网关，仍需提供网关要求的认证信息。
+4. 需要下次连接时再次使用的转发，创建时勾选「保存为预设」。操作完成后可停止单条转发，或断开连接以释放全部转发。
 
 ## 文档和验证
 
-- [文档导航](docs/README.md)：配置、工具参数、架构、开发发布和验证记录。
+- [文档导航](docs/README.md)：使用、架构、开发发布和验证记录。
 - [操作指南](docs/usage.md)：认证、主机公钥、双向转发与常见问题。
-- [工具接口](docs/tools.md)：22 个工具的参数与状态语义。
 - [远程 Magpie 管理](docs/remote.md)：安装、更新、配置归档、恢复结果、任务历史与官方 Web 入口。
 - [SSH 配置导入](docs/ssh-import.md)：预览与选择导入、支持范围及页面接入约定。
 - [验证记录](docs/verification.md)：已完成的测试及尚未验证的部署场景。
@@ -129,7 +70,6 @@ http://127.0.0.1:3425/mcp/magpie/tools
 
 `npm run check:release` 统一运行静态、Node、隔离 POSIX 脚本、两套 iframe 页面、可用的 Bun 与显式提供的实际宿主检查，并生成含包文件清单的 `.local/release-check.json`。缺少外部验收时明确标为 `not_run`；`npm run check:release:strict` 要求全部通过。Ubuntu/Windows × Node 22/24 的 CI 已配置，真实 Linux 生命周期有[专用账户验收入口](docs/linux-acceptance.md)。本机回归使用临时配置、回环 SSH 与受控响应，未替代真实 Linux/systemd 验收；结果见[验证记录](docs/verification.md)。
 
-插件依据[官方中文插件规范](https://usemagpie.ai/docs/zh/plugins)开发；本次中文版访问失败时，使用了[官方英文版](https://usemagpie.ai/docs/plugins)核对入口、工具接口与运行边界。
-窗口里的页面开发参考https://usemagpie.ai/docs/zh/plugins#pages
+插件依据[官方插件规范](https://usemagpie.ai/docs/plugins)开发；页面接入参考[页面文档](https://usemagpie.ai/docs/zh/plugins#pages)。
 
 许可证：[MIT](LICENSE)。

@@ -1,7 +1,7 @@
 {
   "name": "migpie-remote",
   "version": "0.3.0",
-  "description": "Magpie SSH connection manager with c2s (-L) and s2c (-R) TCP forwarding tools",
+  "description": "Magpie page for SSH connections, TCP forwarding, and remote Magpie management",
   "repository": { "type": "git", "url": "git+https://github.com/zhaoyi2018/migpie-remote.git" },
   "type": "module",
   "main": "./index.mjs",
@@ -22,7 +22,7 @@
       "icon": "page/icon.svg"
     }
   },
-  "keywords": ["magpie-plugin", "opencode", "opencode-plugin", "ssh", "tools", "port-forwarding"],
+  "keywords": ["magpie-plugin", "ssh", "port-forwarding", "remote-management"],
   "engines": { "node": ">=22" },
   "scripts": {
     "icons": "node scripts/generate-icon.mjs",

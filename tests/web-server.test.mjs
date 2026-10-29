@@ -232,7 +232,7 @@ test("the authenticated page can preview a local SSH file and import only its se
   assert.equal(web.sessions.status("selected").state, "disconnected");
 });
 
-test("HTTP edits and MCP edits share revisions and conflicts preserve the newer configuration", async (t) => {
+test("concurrent page edits use revisions and conflicts preserve the newer configuration", async (t) => {
   const web = await service(t);
   const original = { id: "shared", name: "Original", host: "host.example", username: "dev" };
   const created = await web.call("save_connection", { connection: original, expectedRevision: null });
@@ -240,15 +240,14 @@ test("HTTP edits and MCP edits share revisions and conflicts preserve the newer 
   const response = await fetch(new URL("api/snapshot", web.url), { headers: web.headers });
   const { connections: [editing] } = await response.json();
   assert.equal(editing.revision, created.revision);
-  const tools = createTools(web.store, web.sessions);
-  const updated = await tools.save_connection.execute({ connection: { ...editing.connection, name: "Changed through MCP" }, expectedRevision: editing.revision });
+  const updated = await web.call("save_connection", { connection: { ...editing.connection, name: "Changed in another page" }, expectedRevision: editing.revision });
   const conflict = await fetch(new URL("api/call", web.url), {
     method: "POST", headers: web.headers,
     body: JSON.stringify({ method: "save_connection", args: { connection: { ...editing.connection, host: "stale.example" }, expectedRevision: editing.revision } }),
   });
   assert.equal(conflict.status, 400);
   assert.equal((await conflict.json()).code, "CONFIG_CONFLICT");
-  assert.equal((await web.store.get(original.id)).name, "Changed through MCP");
+  assert.equal((await web.store.get(original.id)).name, "Changed in another page");
   const saved = await web.call("forward_save", { connectionId: original.id, forward: { id: "web", direction: "c2s", bindPort: 0, targetPort: 8080 }, expectedRevision: updated.revision });
   assert.equal(saved.forward.id, "web");
   assert.notEqual(saved.revision, updated.revision);

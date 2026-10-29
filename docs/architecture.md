@@ -4,10 +4,8 @@
 
 ```mermaid
 flowchart TD
-  Agent[支持 MCP 的 Agent] --> Gateway[Magpie Plugin tools]
-  Gateway --> Host[Bun 插件宿主]
-  Host --> Entry[index.mjs / default server]
-  Entry --> Tools[src/plugin.mjs / 22 个工具]
+  Host[Bun 插件宿主] --> Entry[index.mjs / default server]
+  Entry --> Tools[src/plugin.mjs / 页面后台操作]
   Page[Magpie 内嵌启动页] --> UI[本机管理服务与页面]
   Entry --> UI
   UI --> Tools
@@ -36,8 +34,8 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-  participant A as Agent
-  participant T as 工具入口
+  participant A as 管理页面
+  participant T as 后台操作
   participant P as ProfileStore
   participant M as SessionManager
   participant S as SSH 服务器
@@ -60,9 +58,9 @@ sequenceDiagram
   end
 ```
 
-工具入口按连接 id 串行处理修改、连接与转发操作，独立连接可以并行。断开操作会立即取消同一连接等待中的连接请求。配置写入另有进程内串行队列；临时文件写完后重命名替换，避免留下半个 JSON。
+后台操作按连接 id 串行处理修改、连接与转发，独立连接可以并行。断开操作会立即取消同一连接等待中的连接请求。配置写入另有进程内串行队列；临时文件写完后重命名替换，避免留下半个 JSON。
 
-连接列表额外返回每条规范化配置的内容 revision。普通替换、预设保存和删除携带 expectedRevision，在写入队列中重新比较，防止旧页面或 MCP 覆盖新修改。新建仅允许不存在的 id；没有版本的旧更新会明确拒绝。版本不写入 version 1 配置或备份。页面编辑基线在弹窗打开时固定，保存成功返回新版本供下一次操作使用；跨进程写锁仍不在当前范围内。
+连接列表额外返回每条规范化配置的内容 revision。普通替换、预设保存和删除携带 expectedRevision，在写入队列中重新比较，防止旧页面覆盖新修改。新建仅允许不存在的 id；没有版本的旧更新会明确拒绝。版本不写入 version 1 配置或备份。页面编辑基线在弹窗打开时固定，保存成功返回新版本供下一次操作使用；跨进程写锁仍不在当前范围内。
 
 `forwardFailurePolicy: "continue"` 可选择在可恢复的预设错误后继续启动后续规则，失败原因放入独立的 `forwardErrors` 快照，不伪装成正在运行的转发。服务器明确回复请求失败时，仅移除失败规则；远程分配超时、取消或传输失败仍终止会话，避免遗留状态未知的监听。默认策略保持全部回滚。
 
@@ -151,6 +149,6 @@ stateDiagram-v2
 
 删除连接先完成带版本校验的配置写入，再取消对应意图、等待资源清理并移除会话映射。写入失败时保留运行记录；普通断开仍保留日志。会话回调继续校验当前意图和会话身份，已删除记录不能被旧回调重新注册。
 
-Magpie 公开页面桥接只提供受限读取和插件选项操作。启动页完成握手后，在当前 iframe 内导航到独立回环管理服务。服务通过自己的随机访问标识与 API 认证调用共用工具，不调用 Magpie 管理 API，也不修改其 iframe 沙箱。页面支持原生主题消息、配置管理、连接控制和转发操作。插件宿主具备网络和文件权限，主机信任由本插件显式校验。
+Magpie 公开页面桥接只提供受限读取和插件选项操作。启动页完成握手后，在当前 iframe 内导航到独立回环管理服务。服务通过自己的随机访问标识与 API 认证调用内部操作，不向 Magpie 注册 MCP 工具，也不调用 Magpie 管理 API 或修改其 iframe 沙箱。页面支持原生主题消息、配置管理、连接控制和转发操作。插件宿主具备网络和文件权限，主机信任由本插件显式校验。
 
-源码依据：[入口](../index.mjs)、[工具](../src/plugin.mjs)、[校验](../src/config.mjs)、[存储](../src/store.mjs)、[会话](../src/sessions.mjs)、[主机公钥](../src/host-keys.mjs)。官方运行边界见 [Magpie 插件文档](https://usemagpie.ai/docs/plugins)。返回[文档导航](README.md)。
+源码依据：[入口](../index.mjs)、[后台操作](../src/plugin.mjs)、[校验](../src/config.mjs)、[存储](../src/store.mjs)、[会话](../src/sessions.mjs)、[主机公钥](../src/host-keys.mjs)。官方运行边界见 [Magpie 插件文档](https://usemagpie.ai/docs/plugins)。返回[文档导航](README.md)。

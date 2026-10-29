@@ -1,6 +1,6 @@
 # 系统 SSH 配置的预览与选择导入
 
-`ssh_config_preview`、`ssh_config_import` 两个工具由 MCP 与本机管理页共用。管理页已接入预览、勾选和导入流程，并在隔离环境完成联调；验证范围见[验证记录](verification.md)。
+管理页提供 SSH 配置的预览、勾选和导入流程。以下同时记录页面使用的内部操作，供开发维护参考；它们不注册为 MCP 工具。验证范围见[验证记录](verification.md)。
 
 ## 读取范围
 
@@ -42,7 +42,7 @@
 
 ## 预览接口
 
-MCP 工具名为 `migpie-remote_ssh_config_preview`。管理页通过现有的认证入口 `POST api/call` 调用，不能直接从 Magpie 初始启动页跨沙箱请求。
+管理页通过本机服务的认证入口 `POST api/call` 调用内部操作 `ssh_config_preview`，不能直接从 Magpie 初始启动页跨沙箱请求。
 
 ```json
 {
@@ -53,7 +53,7 @@ MCP 工具名为 `migpie-remote_ssh_config_preview`。管理页通过现有的�
 }
 ```
 
-`configPath` 可省略；结果在 HTTP 响应的 `result` 中，MCP 调用则直接返回工具结果。
+`configPath` 可省略；结果在 HTTP 响应的 `result` 中。
 
 | 返回字段 | 含义 |
 | --- | --- |
@@ -70,7 +70,7 @@ MCP 工具名为 `migpie-remote_ssh_config_preview`。管理页通过现有的�
 
 ## 导入接口
 
-MCP 工具名为 `migpie-remote_ssh_config_import`。`revision` 必须使用上一次预览实际返回的值：
+内部操作 `ssh_config_import` 的 `revision` 必须使用上一次预览实际返回的值：
 
 ```js
 const preview = await call("ssh_config_preview", { configPath: "~/.ssh/config" });

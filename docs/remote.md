@@ -68,9 +68,11 @@ systemctl --user is-active magpie.service
 
 预览与哈希复核可以发现部分并发变化，但不是与其他 Magpie 进程共享的事务锁。操作期间不要同时从另一个客户端修改同一安装。后台只调用固定操作，不提供任意 shell 工具。
 
-## 工具接口
+## 页面内部操作
 
-| 工具 | 参数 | 结果 |
+以下操作供管理页调用，不注册为 MCP 工具。
+
+| 内部操作 | 参数 | 结果 |
 | --- | --- | --- |
 | `remote_status` | `connectionId`、可选 `refresh` | 缓存环境、当前任务与历史；`refresh: true` 连接后探测并核实未知任务 |
 | `remote_preview` | `connectionId`、`action`；恢复或删除时加 `backupId` | `revision`、变更清单、提示、归档备份方式 |

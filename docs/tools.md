@@ -1,31 +1,31 @@
-# 工具接口
+# 页面内部操作
 
-插件通过 OpenCode v1 的 `tool` hook 注册工具，Magpie 将其提供为 MCP。包名是 `migpie-remote`，因此标准完整名称带 `migpie-remote_` 前缀。若宿主实际显示的名称不同，以工具列表为准。
+页面通过本机管理服务调用以下内部操作。插件不向 Magpie 注册 MCP 工具；这些操作和参数供页面开发维护参考，不是独立公开接口。
 
-| 工具 | 必填参数 | 返回与行为 |
+| 内部操作 | 必填参数 | 返回与行为 |
 | --- | --- | --- |
-| `migpie-remote_config_backups` | 无 | 列出备份标识、时间、来源、连接数量及有效性；当前配置损坏时仍可用 |
-| `migpie-remote_config_backup` | 无 | 手动保存当前有效配置，返回备份元数据 |
-| `migpie-remote_config_restore_preview` | `backupId` | 预览恢复连接、将移除的连接及当前文件有效性，返回 revision；不改变配置和会话 |
-| `migpie-remote_config_restore` | `backupId`, `revision`；可选 `stopConnections` | 保留旧配置后恢复；有活跃连接、连接请求或重试时需明确传 true，否则拒绝；恢复后保持停止 |
-| `migpie-remote_ssh_config_preview` | 无；可选 `configPath` | 只读预览系统 SSH 配置，返回 revision、候选主机及是否已存在 |
-| `migpie-remote_ssh_config_import` | `revision`, `aliases`；可选 `configPath`, `includeForwards` | 仅新增选中且支持的连接；原子保存，跳过已存在 id，不连接 SSH |
-| `migpie-remote_connections` | 无，传 `{}` | 返回 `{connection, revision, session}` 数组；不创建连接 |
-| `migpie-remote_save_connection` | `connection`；更新时必填 `expectedRevision` | 新建或完整替换一条配置，返回 `{connection, revision}`；已有活跃会话时拒绝修改 |
-| `migpie-remote_remove_connection` | `connectionId`, `expectedRevision` | 删除已断开的配置并清理其运行记录，返回 `removed: true` |
-| `migpie-remote_connect` | `connectionId` | 认证后建立会话，并启动保存的预设转发；已连接时返回现有会话 |
-| `migpie-remote_disconnect` | `connectionId` | 断开会话并释放全部转发；保留配置 |
-| `migpie-remote_status` | 无；可选 `connectionId` | 单个会话或全部运行记录 |
-| `migpie-remote_forward_add` | `connectionId`, `forward` | 创建临时转发，返回实际绑定端口 |
-| `migpie-remote_forward_remove` | `connectionId`, `forwardId` | 停止单条转发和通道，返回 `stopped: true` |
-| `migpie-remote_forward_save` | `connectionId`, `forward`, `expectedRevision` | 保存转发预设，返回 `{forward, revision}`，不启动监听；可在 SSH 已连接时保存 |
-| `migpie-remote_forward_delete` | `connectionId`, `forwardId`, `expectedRevision` | 先删除预设再停止转发；版本冲突或配置写入失败保留原隧道，停止失败明确报告部分结果 |
-| `migpie-remote_remote_status` | `connectionId`；可选 `refresh` | 读取环境缓存、最新任务（含运行阶段与下载字节 / 速度）及各操作可用性与原因；显式刷新探测命令能力并核实未知结果 |
-| `migpie-remote_remote_preview` | `connectionId`, `action`；恢复/删除加 `backupId` | 返回变更清单、提示和短时 revision；备份统一使用普通配置归档，不执行变更 |
-| `migpie-remote_remote_apply` | `connectionId`, `action`, `revision` | 提交预览的固定操作，立即返回后台任务；配置归档不要求口令 |
-| `migpie-remote_remote_operation` | `connectionId`；可选 `operationId` 或 `history` | 默认返回最新任务；按 ID 查当前或历史；`history: true` 返回当前与最多 20 条旧终态摘要，不包含原始命令输出或凭据 |
-| `migpie-remote_remote_backups` | `connectionId` | 列出远端备份格式、大小、版本与校验值，不读取配置内容；恢复和删除须另行预览 |
-| `migpie-remote_remote_web` | `connectionId`；可选 `port` | 显式读取官方管理链接并建立临时回环 SSH 转发；返回的链接含管理密钥 |
+| `config_backups` | 无 | 列出备份标识、时间、来源、连接数量及有效性；当前配置损坏时仍可用 |
+| `config_backup` | 无 | 手动保存当前有效配置，返回备份元数据 |
+| `config_restore_preview` | `backupId` | 预览恢复连接、将移除的连接及当前文件有效性，返回 revision；不改变配置和会话 |
+| `config_restore` | `backupId`, `revision`；可选 `stopConnections` | 保留旧配置后恢复；有活跃连接、连接请求或重试时需明确传 true，否则拒绝；恢复后保持停止 |
+| `ssh_config_preview` | 无；可选 `configPath` | 只读预览系统 SSH 配置，返回 revision、候选主机及是否已存在 |
+| `ssh_config_import` | `revision`, `aliases`；可选 `configPath`, `includeForwards` | 仅新增选中且支持的连接；原子保存，跳过已存在 id，不连接 SSH |
+| `connections` | 无，传 `{}` | 返回 `{connection, revision, session}` 数组；不创建连接 |
+| `save_connection` | `connection`；更新时必填 `expectedRevision` | 新建或完整替换一条配置，返回 `{connection, revision}`；已有活跃会话时拒绝修改 |
+| `remove_connection` | `connectionId`, `expectedRevision` | 删除已断开的配置并清理其运行记录，返回 `removed: true` |
+| `connect` | `connectionId` | 认证后建立会话，并启动保存的预设转发；已连接时返回现有会话 |
+| `disconnect` | `connectionId` | 断开会话并释放全部转发；保留配置 |
+| `status` | 无；可选 `connectionId` | 单个会话或全部运行记录 |
+| `forward_add` | `connectionId`, `forward` | 创建临时转发，返回实际绑定端口 |
+| `forward_remove` | `connectionId`, `forwardId` | 停止单条转发和通道，返回 `stopped: true` |
+| `forward_save` | `connectionId`, `forward`, `expectedRevision` | 保存转发预设，返回 `{forward, revision}`，不启动监听；可在 SSH 已连接时保存 |
+| `forward_delete` | `connectionId`, `forwardId`, `expectedRevision` | 先删除预设再停止转发；版本冲突或配置写入失败保留原隧道，停止失败明确报告部分结果 |
+| `remote_status` | `connectionId`；可选 `refresh` | 读取环境缓存、最新任务（含运行阶段与下载字节 / 速度）及各操作可用性与原因；显式刷新探测命令能力并核实未知结果 |
+| `remote_preview` | `connectionId`, `action`；恢复/删除加 `backupId` | 返回变更清单、提示和短时 revision；备份统一使用普通配置归档，不执行变更 |
+| `remote_apply` | `connectionId`, `action`, `revision` | 提交预览的固定操作，立即返回后台任务；配置归档不要求口令 |
+| `remote_operation` | `connectionId`；可选 `operationId` 或 `history` | 默认返回最新任务；按 ID 查当前或历史；`history: true` 返回当前与最多 20 条旧终态摘要，不包含原始命令输出或凭据 |
+| `remote_backups` | `connectionId` | 列出远端备份格式、大小、版本与校验值，不读取配置内容；恢复和删除须另行预览 |
+| `remote_web` | `connectionId`；可选 `port` | 显式读取官方管理链接并建立临时回环 SSH 转发；返回的链接含管理密钥 |
 
 远程生命周期的操作范围、配置归档、断线核实和卸载边界见[远程 Magpie 管理](remote.md)。
 
@@ -60,9 +60,9 @@
 | `hostFingerprint` | 可选 `SHA256:…` 公钥指纹，43 位 Base64，无末尾 `=` |
 | `forwards` | 可选预设转发数组，默认 `[]`；其中的 id 不能重复 |
 
-至少配置一种可用认证来源。未知连接字段会被拒绝。`save_connection` 为完整替换，因此更新时需带上要保留的公开配置；密码密文由后端保留和管理，不接收调用方提交的 `encryptedPassword`。管理页通过独立的 `credentials.password` 请求字段提交要加密保存的新密码，不把密码放入 `connection` 或工具参数。MCP 可以连接和编辑已有密码连接；首次设置或更换密码在管理页完成。密码认证下省略新密码会保留原密码，切换到其他认证方式会移除当前密文。
+至少配置一种可用认证来源。未知连接字段会被拒绝。`save_connection` 为完整替换，因此更新时需带上要保留的公开配置；密码密文由后端保留和管理，不接收调用方提交的 `encryptedPassword`。管理页通过独立的 `credentials.password` 请求字段提交要加密保存的新密码，不把密码放入 `connection` 或操作参数。首次设置或更换密码在管理页完成。密码认证下省略新密码会保留原密码，切换到其他认证方式会移除当前密文。
 
-`connections` 和 `save_connection` 返回的连接配置均去除密码密文，通过同级 `hasSavedPassword` 布尔值表示是否已保存密码。明文和密文均不进入页面快照或工具结果。配置备份保留密文，不包含本机的 `connections.json.key`；恢复到其他机器时需另行安全迁移密钥或重新填写密码。
+`connections` 和 `save_connection` 返回的连接配置均去除密码密文，通过同级 `hasSavedPassword` 布尔值表示是否已保存密码。明文和密文均不进入页面快照或操作结果。配置备份保留密文，不包含本机的 `connections.json.key`；恢复到其他机器时需另行安全迁移密钥或重新填写密码。
 
 ### 并发修改与版本校验
 
@@ -79,7 +79,7 @@ const saved = await call("save_connection", {
 
 新建连接可省略 `expectedRevision` 或传 `null`，两者都仅允许创建不存在的 id。更新已有配置省略版本会返回 `CONFIG_REVISION_REQUIRED`；版本格式无效返回 `CONFIG_REVISION_INVALID`；内容已变化、已删除或新建 id 已存在时返回 `CONFIG_CONFLICT`。冲突不写入文件，不生成备份，也不会停止正在运行的转发。遇到冲突应保留草稿，重新读取并对照配置，再由调用方提交修改，不能自动取得新版本后覆盖。
 
-升级后需刷新 Agent 的工具定义。旧的无版本更新、预设保存和删除调用会被拒绝；`save_connection` 和 `forward_save` 的返回结构也已增加包装，分别读取 `connection` / `forward` 与 `revision`。配置文件仍为 version 1，既有配置和备份无需迁移。本保护依赖同一个宿主的写入队列，未增加跨进程锁。
+无版本的更新、预设保存和删除调用会被拒绝；`save_connection` 和 `forward_save` 分别返回 `connection` / `forward` 与 `revision`。配置文件仍为 version 1，既有配置和备份无需迁移。本保护依赖同一个宿主的写入队列，未增加跨进程锁。
 
 ## 转发配置
 
@@ -99,9 +99,9 @@ const saved = await call("save_connection", {
 
 `id`、`direction`、`bindPort`、`targetPort` 必填。可选 `name` 为 1–100 个字符的显示名称，支持中文；省略时管理页显示 `id`。`direction` 为 `c2s` 或 `s2c`；绑定端口允许 0–65535，目标端口允许 1–65535。省略两个主机字段时均使用 `127.0.0.1`。同一连接不能存在重复转发 id，也不能重复占用相同方向的同一监听地址和非零端口。
 
-两侧地址的解释见[操作指南](usage.md)。该工具仅创建当前会话的转发；把同一对象放入连接的 `forwards` 数组才能持久保存。
+两侧地址的解释见[操作指南](usage.md)。`forward_add` 仅创建当前会话的转发；把同一对象放入连接的 `forwards` 数组才能持久保存。
 
-也可以使用 `forward_save` 单独保存预设，需携带所属连接的 `expectedRevision`，成功后返回 `{forward, revision}`。若同 id 转发正在运行，需先停止再编辑。管理页新建转发时，已连接 SSH 可「创建并启动」，取消「保存为预设」只创建当前会话的临时转发；未连接时可「保存预设」，连接成功后按自动启动设置运行。预设保存成功但启动失败时会保留预设并提示错误。管理页与 MCP 共用会话。
+也可以使用 `forward_save` 单独保存预设，需携带所属连接的 `expectedRevision`，成功后返回 `{forward, revision}`。若同 id 转发正在运行，需先停止再编辑。管理页新建转发时，已连接 SSH 可「创建并启动」，取消「保存为预设」只创建当前会话的临时转发；未连接时可「保存预设」，连接成功后按自动启动设置运行。预设保存成功但启动失败时会保留预设并提示错误。
 
 ## 配置恢复流程
 
@@ -123,12 +123,12 @@ const saved = await call("save_connection", {
 
 取消连接会终止正在连接的会话。取消或超时发生在远程转发分配期间时，会关闭 SSH 会话以释放可能已经建立的远程监听。已完成的 `connect` 调用之后，旧调用的取消信号不会断开长期会话。
 
-错误以工具异常返回，由 Magpie 转换为 MCP 错误。配置文件损坏时会报错，保存操作不会覆盖损坏文件。工具使用 JSON Schema 声明参数，并在插件内部再次校验配置、标识符及端口。
+后台操作的异常由本机管理服务转换为 HTTP 错误。配置文件损坏时会报错，保存操作不会覆盖损坏文件。插件内部校验配置、标识符及端口。
 
 已创建会话额外返回 `reconnect: {enabled, state, attempts, nextRetryAt?, reason?}`。重连状态为 `idle`、`connecting`、`waiting`、`paused`、`stopped`，页面的「等待重连」由 `waiting` 派生，原会话状态枚举不变。等待和重连中的配置仍算活跃，修改前需断开。计数为本轮已安排的自动尝试次数，稳定连接 30 秒后归零；手动停止清除下一次尝试。失败时的 `error` 为 `{code, message, category, retryable}`，另保留原 `lastError`。
 
 管理 HTTP API 的操作错误体为 `{error, code, message, category, retryable}`；缺少可用凭据时还返回 `credentialFields`（`password` / `passphrase`），页面据此提示本次输入。`category` 区分 `network`、`authentication`、`credentials`、`trust`、`forward`、`configuration`、`cancelled` 和其他 `operation`。只有已识别的网络中断、连接拒绝、网络不可达、临时 DNS 故障及 SSH 超时可重试；未知握手错误与无法解析的主机名不会无限重试。
 
-常见代码包括 `SSH_NETWORK`、`SSH_DISCONNECTED`、`SSH_TIMEOUT`、`SSH_AUTH_FAILED`、`SSH_CONNECTION_FAILED`、`CREDENTIALS_REQUIRED`、`KEY_INVALID`、`KEY_UNAVAILABLE`、`HOST_KEY_REJECTED`、`HOST_KEY_UNAVAILABLE`、`FORWARD_BIND_FAILED`、`FORWARD_REJECTED`、`FORWARD_TIMEOUT`、`CONFIG_INVALID`、`CONFIG_UNREADABLE`、`CONFIG_BACKUP_FAILED`、`CONFIG_BACKUP_INVALID` 和 `OPERATION_CANCELLED`。管理地址过期仍返回 `MANAGEMENT_EXPIRED`。这些代码不保证在宿主转换后的 MCP 错误中保留相同结构。
+常见代码包括 `SSH_NETWORK`、`SSH_DISCONNECTED`、`SSH_TIMEOUT`、`SSH_AUTH_FAILED`、`SSH_CONNECTION_FAILED`、`CREDENTIALS_REQUIRED`、`KEY_INVALID`、`KEY_UNAVAILABLE`、`HOST_KEY_REJECTED`、`HOST_KEY_UNAVAILABLE`、`FORWARD_BIND_FAILED`、`FORWARD_REJECTED`、`FORWARD_TIMEOUT`、`CONFIG_INVALID`、`CONFIG_UNREADABLE`、`CONFIG_BACKUP_FAILED`、`CONFIG_BACKUP_INVALID` 和 `OPERATION_CANCELLED`。管理地址过期仍返回 `MANAGEMENT_EXPIRED`。
 
 接口定义来源：[plugin.mjs](../src/plugin.mjs)；运行校验来源：[config.mjs](../src/config.mjs)。返回[文档导航](README.md)。

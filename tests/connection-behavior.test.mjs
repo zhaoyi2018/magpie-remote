@@ -4,10 +4,9 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import ssh2 from "ssh2";
 import { validateProfile } from "../src/config.mjs";
-import { createPlugin, closePlugin } from "../src/plugin.mjs";
 import { ProfileStore } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
-import { echoServer, exchange, keys, sshServer, temporary, until } from "./helpers.mjs";
+import { echoServer, exchange, keys, sshServer, startPagePlugin, temporary, until } from "./helpers.mjs";
 
 test("connection authentication and behavior settings survive reload and reject invalid values", async (t) => {
   const store = new ProfileStore(join(await temporary(t), "connections.json"));
@@ -92,16 +91,16 @@ test("host startup reconnects only opted-in profiles and respects automatic-forw
   await store.save(profile);
   await store.save({ ...profile, id: "manual", autoConnect: false });
   await store.save({ ...profile, id: "no-forwards", autoStartForwards: false });
-  const hooks = await createPlugin({ directory }, { webUI: false });
-  t.after(() => closePlugin(hooks));
-  await until(async () => (await hooks.tool.connections.execute({})).filter((row) => row.session.state === "connected").length === 2);
-  const rows = await hooks.tool.connections.execute({});
+  const { hooks, call, close } = await startPagePlugin(t, directory);
+  assert.deepEqual(hooks, {});
+  await until(async () => (await call("connections")).filter((row) => row.session.state === "connected").length === 2);
+  const rows = await call("connections");
   assert.equal(rows.find((row) => row.connection.id === "manual").session.state, "disconnected");
   assert.deepEqual(rows.find((row) => row.connection.id === "no-forwards").session.forwards, []);
-  await until(async () => (await hooks.tool.status.execute({ connectionId: profile.id })).forwards.length === 1);
-  const forward = (await hooks.tool.status.execute({ connectionId: profile.id })).forwards[0];
+  await until(async () => (await call("status", { connectionId: profile.id })).forwards.length === 1);
+  const forward = (await call("status", { connectionId: profile.id })).forwards[0];
   assert.deepEqual(await exchange(forward.bindPort), Buffer.from("SSH tunnel round trip"));
-  await closePlugin(hooks);
+  await close();
   await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
 });
 
@@ -112,10 +111,8 @@ test("closing the host cancels an automatic connection still waiting for authent
   await writeFile(file, keys.private, { mode: 0o600 });
   const store = new ProfileStore(join(directory, "migpie-remote", "connections.json"));
   await store.save({ ...fixture.profile, passwordEnv: undefined, identityFile: file, autoConnect: true });
-  const hooks = await createPlugin({ directory }, { webUI: false });
-  t.after(() => closePlugin(hooks));
+  const { close } = await startPagePlugin(t, directory);
   await until(() => fixture.clients.size > 0);
-  await closePlugin(hooks);
-  assert.equal((await hooks.tool.status.execute({ connectionId: fixture.profile.id })).state, "disconnected");
+  await close();
   await until(() => fixture.clients.size === 0);
 });

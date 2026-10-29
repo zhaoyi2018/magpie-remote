@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
-import { echoServer, exchange, sshServer, until } from "../tests/helpers.mjs";
+import { echoServer, exchange, managementClient, sshServer, until } from "../tests/helpers.mjs";
 import { createHostSandbox } from "./host-sandbox.mjs";
 import { startUIHarness } from "./ui-harness.mjs";
 
@@ -60,10 +60,11 @@ try {
   });
   assert.equal(loaded.plugins.length, 1);
   assert.equal(loaded.plugins[0].error, undefined, loaded.plugins[0].error);
-  assert.equal(loaded.plugins[0].tools.length, 22);
+  assert.deepEqual(loaded.plugins[0].tools ?? [], [], "The SSH page must not register MCP tools");
   assert.deepEqual(loaded.plugins[0].provides ?? [], [], "The SSH page must not register model providers");
-  assert.deepEqual(await rpc("providers", {}), [], "The tools-only backend must leave the provider list empty");
-  const call = async (name, args = {}) => JSON.parse((await rpc("tool", { spec: root, name, args, ms: 5000 })).text);
+  assert.deepEqual(await rpc("providers", {}), [], "The page backend must leave the provider list empty");
+  await assert.rejects(rpc("tool", { spec: root, name: "connections", args: {}, ms: 5000 }), /has no tool/);
+  const call = managementClient(sandbox.getEndpoint());
   const initial = await call("save_connection", { connection: { ...fixture.profile, autoReconnect: true } });
   assert.match(initial.revision, /^[a-f0-9]{64}$/);
   const edited = await call("save_connection", { connection: { ...initial.connection, name: "Host smoke updated" }, expectedRevision: initial.revision });
@@ -103,7 +104,7 @@ try {
   await call("remove_connection", { connectionId: fixture.profile.id, expectedRevision: saved.revision });
   assert.deepEqual(await call("connections"), []);
   assert.deepEqual(await call("status"), []);
-  console.log("Magpie host: 22 tools and no model providers registered; versioned edits and stale rejection, SSH authentication, c2s/s2c diagnostics/recovery and data round trips, backup/restore, retry cancellation, port release and runtime deletion passed.");
+  console.log("Magpie host: no MCP tools or model providers registered; page backend versioned edits and stale rejection, SSH authentication, c2s/s2c diagnostics/recovery and data round trips, backup/restore, retry cancellation, port release and runtime deletion passed.");
   if (process.argv.includes("--ui")) {
     const harness = await startUIHarness({ getEndpoint: sandbox.getEndpoint });
     cleanup.unshift(() => harness.close());

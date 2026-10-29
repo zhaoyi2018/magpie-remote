@@ -22,7 +22,7 @@ npm test
 
 `tests/reconnect.test.mjs` 通过停止 / 重开本机 SSH 服务及 `tests/network-proxy.mjs` 的双向丢包代理，验证显式断线、静默断网、恢复、退避上限、手动停止、临时凭据缺失和跨连接隔离。测试缩短保活与重试间隔，不修改系统网卡、防火墙或日常连接。`tests/backups.test.mjs` 验证快照轮换、无变化不轮换、损坏文件原样保留、过期预览、备份失败、并发恢复和连接停止；HTTP 测试覆盖主配置损坏时的已认证恢复入口。
 
-`tests/consistency.test.mjs` 验证旧版本写入与删除保护、同连接排队冲突、独立连接互不冲突、无变化版本稳定，以及删除失败保护和运行记录清理。`tests/forward-diagnostics.test.mjs` 使用本机 SSH 服务、迟到通道回调及可注入的本地目标连接，验证双向目标超时、真实拒绝与恢复、旧请求不覆盖新结果和快照隔离；不使用外部不可达地址模拟超时。HTTP 测试还覆盖页面和 MCP 共用版本保护。
+`tests/consistency.test.mjs` 验证旧版本写入与删除保护、同连接排队冲突、独立连接互不冲突、无变化版本稳定，以及删除失败保护和运行记录清理。`tests/forward-diagnostics.test.mjs` 使用本机 SSH 服务、迟到通道回调及可注入的本地目标连接，验证双向目标超时、真实拒绝与恢复、旧请求不覆盖新结果和快照隔离；不使用外部不可达地址模拟超时。HTTP 测试还覆盖并发页面编辑的版本保护。
 
 `tests/remote-results.test.mjs` 覆盖恢复协议的空尾字段、Base64 路径、重复/矛盾记录与摘要字段白名单；`tests/remote.test.mjs` 另验证派发前重启、派发边界保存失败、旧记录保守核实、历史查询/轮换、损坏历史保护与恢复结果跨重启保留。`tests/sessions.test.mjs` 注入远端取消监听的拒绝、超时和断链，要求关闭受影响 SSH、释放双向监听且独立连接仍能传输。
 
@@ -53,18 +53,15 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 | --- | --- |
 | 包入口可由 `exports["./server"]`、`main` 等定位 | 两者均指向根目录 `index.mjs` |
 | 入口支持 `export default { id, server }` | 仅导出该对象，辅助函数位于 `src/` |
-| 插件函数接收 `input, options`，返回 hooks | `createPlugin` 返回 `{ tool }` |
-| 工具参数支持 JSON Schema | 22 个工具声明 JSON Schema，内部另有运行校验 |
-| `ctx.abort` 是取消信号 | 连接和新增转发将其传入会话层 |
+| 插件函数接收 `input, options`，返回 hooks | `createPlugin` 启动页面后台并返回空对象，不注册 MCP 工具或模型供应商 |
+| 页面操作可以取消 | 本机 HTTP 请求中断时将取消信号传入会话层 |
 | npm 安装不会运行依赖安装脚本 | 纯 JavaScript 路径已在禁用脚本、排除可选原生包的安装下测试 |
 | Git / 目录安装需要已存在的入口文件 | 全部运行源码随 Git 跟踪，无 `dist` 依赖 |
-| 工具通过 `/mcp/magpie/tools` 暴露 | 由 Magpie 自身注册，本包无需另开 HTTP 服务 |
-| 工具插件无需注册模型供应商 | 仅返回 `{ tool }`；隔离宿主验证 `provides` 和供应商列表均为空 |
 | 页面与插件卡片的图标字段不同 | `magpie.page.icon` 使用包内路径，`magpie.icon` 使用内嵌 SVG data URI |
 
 规范来源：[官方中文文档](https://usemagpie.ai/docs/zh/plugins)、[官方英文文档](https://usemagpie.ai/docs/plugins)。SSH 接口来源：[ssh2 官方仓库](https://github.com/mscdex/ssh2)。类型与图标配置核对日期为 2026-10-23，后续升级应复核宿主接口。
 
-「页面＋工具」的类型由宿主实际发现的工具决定，无需添加未受支持的 `magpie.kind` 字段。Magpie 当前在插件停用、加载失败或 GitHub「发现」卡片尚未运行工具时，仍可能按通用服务端入口显示「供应商」标签；这是宿主的分类规则，不代表本插件注册了模型供应商。重新加载后应核对已启用插件的工具列表。不要为隐藏标签而删除 `main` / `exports`，否则纯页面路径会跳过宿主，SSH 后台也不会启动。
+本插件仅作为用户管理页面使用；服务端入口是页面后台的启动方式，不应为隐藏标签而删除 `main` / `exports`，否则宿主会跳过 SSH 后台。Magpie 当前的「已安装」卡片判断将有服务端入口、但没有工具或其他受支持类型的页面回退标成「供应商」；该标签不表示本插件注册了供应商。要让此类插件只显示「页面」，需由 Magpie 修改类型判断。升级后重新加载插件；不同 Magpie 版本的具体展示以实际界面为准。
 
 ## 独立宿主验证
 
@@ -74,7 +71,7 @@ Magpie 的缓存 Bun 未加入 PATH 时，可使用其可执行文件的绝对�
 node scripts/host-smoke.mjs 'C:/path/to/bun.exe' 'C:/path/to/host-current.js'
 ```
 
-脚本自动把入口、src、page 和清单复制到临时源码目录，排除原目录的 `page/.runtime/`，通过目录链接复用已安装依赖。子进程使用独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入该隔离副本。随后通过宿主 RPC 检查 22 个工具、保存测试配置、SSH 认证、双向转发数据往返、断线自动重连、备份预览恢复、取消重连意图、释放端口与删除配置。测试结束后关闭该子进程并清理其临时目录及依赖链接，不删除源依赖。该脚本只用于开发验证，内部宿主协议变化时需要复核。
+脚本自动把入口、src、page 和清单复制到临时源码目录，排除原目录的 `page/.runtime/`，通过目录链接复用已安装依赖。子进程使用独立 HOME、USERPROFILE、XDG 目录和认证文件，只装入该隔离副本。随后通过宿主 RPC 检查没有注册工具或供应商，并通过该宿主启动的页面后台验证测试配置、SSH 认证、双向转发数据往返、断线自动重连、备份预览恢复、取消重连意图、释放端口与删除配置。测试结束后关闭该子进程并清理其临时目录及依赖链接，不删除源依赖。该脚本只用于开发验证，内部宿主协议变化时需要复核。
 
 宿主只向临时副本的 `page/.runtime/` 发布启动地址，日常源码的启动文件不会被覆盖；无需事先手动复制源码。`--ui` 通过 `getEndpoint` 回调读取该副本的地址；纯页面验证同样通过 `startUIHarness({getEndpoint})` 使用隔离管理服务。`tests/host-sandbox.test.mjs` 验证发布与清理前后源启动文件、源码和依赖均保持不变。
 
@@ -92,6 +89,6 @@ npm pack --dry-run
 
 远程仓库为 `git@github.com:zhaoyi2018/migpie-remote.git`，尚未执行 npm 发布。Git 安装所需的 `package.json` 和运行源码保留在仓库中；社区列表登记和 npm 发布需单独执行。
 
-可视化管理页由 `page/` 和 `src/web-server.mjs` 实现，服务与工具共用会话。开发时可给宿主验证脚本追加 `--ui`，它会提供带 Magpie iframe 沙箱策略的浏览器测试入口；输入 `check` 验证页面所创建转发的数据往返，输入 `close` 退出。启动信息 `page/.runtime/` 不应提交或发布。
+可视化管理页由 `page/` 和 `src/web-server.mjs` 实现，页面后台操作共用会话。开发时可给宿主验证脚本追加 `--ui`，它会提供带 Magpie iframe 沙箱策略的浏览器测试入口；输入 `check` 验证页面所创建转发的数据往返，输入 `close` 退出。启动信息 `page/.runtime/` 不应提交或发布。
 
 源码依据：[package.json](../package.json)、Git 仓库中的 `scripts/check.mjs` 和 `scripts/host-smoke.mjs`；这些开发脚本不随 npm 包发布。返回[文档导航](README.md)。

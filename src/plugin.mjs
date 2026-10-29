@@ -346,12 +346,13 @@ export async function createPlugin(input = {}, options) {
   const store = new ProfileStore(join(config.dataDirectory, "connections.json"));
   const sessions = new SessionManager(config);
   const remote = new RemoteManager({ store, sessions });
-  const hooks = { tool: createTools(store, sessions, remote) };
+  const tools = createTools(store, sessions, remote);
+  const hooks = {};
   let web;
   if (config.webUI) {
     try {
       const recovery = await loadRecoveryKey(join(config.dataDirectory, "management-recovery.key"));
-      web = await startManagementServer({ tools: hooks.tool, port: config.uiPort, recovery });
+      web = await startManagementServer({ tools, port: config.uiPort, recovery });
       const file = fileURLToPath(new URL("../page/.runtime/endpoint.js", import.meta.url));
       const unpublish = await publishEndpoint(file, web.url, recovery);
       const close = web.close;
@@ -364,7 +365,7 @@ export async function createPlugin(input = {}, options) {
   const startup = new AbortController();
   const startupTask = store.list().then((profiles) => Promise.allSettled(profiles
     .filter((profile) => profile.autoConnect)
-    .map((profile) => hooks.tool.connect.execute({ connectionId: profile.id }, { abort: startup.signal })))).catch(() => {});
+    .map((profile) => tools.connect.execute({ connectionId: profile.id }, { abort: startup.signal })))).catch(() => {});
   runtimes.set(hooks, { sessions, remote, web, startup, startupTask });
   return hooks;
 }

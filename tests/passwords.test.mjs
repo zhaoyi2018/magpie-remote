@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { PasswordVault } from "../src/passwords.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
-import { createPlugin, closePlugin, createTools } from "../src/plugin.mjs";
+import { createTools } from "../src/plugin.mjs";
 import { startManagementServer } from "../src/web-server.mjs";
-import { sshServer, temporary, until } from "./helpers.mjs";
+import { sshServer, startPagePlugin, temporary, until } from "./helpers.mjs";
 
 const profile = { id: "password-server", host: "host.example", username: "dev", authMethod: "password" };
 const secret = "  密码 with spaces  ";
@@ -122,14 +122,13 @@ test("host restart and network reconnect use the encrypted saved password", asyn
   const store = new ProfileStore(join(directory, "migpie-remote", "connections.json"));
   const connection = { ...fixture.profile, passwordEnv: undefined, authMethod: "password", autoConnect: true, autoReconnect: true };
   await store.save(connection, { password: "local-test-secret" });
-  const hooks = await createPlugin({ directory }, { webUI: false });
-  t.after(() => closePlugin(hooks));
-  const state = async () => hooks.tool.status.execute({ connectionId: connection.id });
+  const { call } = await startPagePlugin(t, directory);
+  const state = async () => call("status", { connectionId: connection.id });
   await until(async () => (await state()).state === "connected");
   const previous = new Set(fixture.clients);
   for (const client of previous) client.end();
   await until(async () => [...fixture.clients].some((client) => !previous.has(client)) && (await state()).state === "connected");
-  assert.ok(!JSON.stringify(await hooks.tool.connections.execute()).includes("local-test-secret"));
+  assert.ok(!JSON.stringify(await call("connections")).includes("local-test-secret"));
 });
 
 test("a missing saved-password key requests credentials and permits a temporary login without replacing the key", async (t) => {
