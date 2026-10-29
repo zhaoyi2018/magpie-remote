@@ -8,12 +8,21 @@
 #remote-observed { color: var(--muted); font-size: 11px; }
 #remote-observed.is-stale, .remote-workbench .is-warning { color: var(--warn); }
 .remote-notice { max-width: 76ch; margin-bottom: 22px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.remote-layout { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(200px, 1fr); gap: 28px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.remote-layout { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
 .remote-controls, .remote-environment-rail { min-width: 0; }
 .remote-controls > section + section { border-top: 1px solid var(--line); }
-.remote-environment-rail { padding: 22px 0 20px 24px; border-left: 1px solid var(--line); }
-.remote-environment-rail > h4 { color: var(--muted); font-size: 12px; }
-.remote-environment { margin-top: 8px; }
+.remote-service-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.remote-disclosure { border-top: 1px solid var(--line); }
+.remote-disclosure > summary { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 14px 0; cursor: pointer; list-style: none; font-size: 13px; font-weight: 500; }
+.remote-disclosure > summary::-webkit-details-marker { display: none; }
+.remote-disclosure > summary:hover { color: var(--accent); }
+.remote-disclosure > summary > [data-icon] { margin-left: auto; color: var(--muted); }
+.remote-disclosure > summary .icon { width: 16px; height: 16px; transform: rotate(-90deg); }
+.remote-disclosure[open] > summary .icon { transform: rotate(0); }
+.disclosure-caption { color: var(--muted); font-size: 11px; font-weight: 400; }
+.remote-disclosure-body { padding: 0 0 20px; }
+.remote-environment { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; margin-top: 8px; }
+.remote-web-section { border-left: 2px solid var(--accent); padding-left: 20px; margin: 22px 0; }
 .remote-environment > div { padding: 9px 0; font-size: 12px; }
 .remote-environment dt { font-size: 11px; margin-bottom: 3px; }
 .remote-environment dd { min-width: 0; }
@@ -23,7 +32,7 @@
 #remote-version { display: block; margin-top: 3px; }
 .remote-command-copy { flex: 1 1 230px; min-width: 0; }
 .remote-command-copy p { color: var(--muted); font-size: 12px; margin-top: 4px; max-width: 65ch; overflow-wrap: anywhere; }
-.remote-program-section { padding: 22px 0; }
+.remote-program-section { padding: 0; }
 .remote-update-check { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px 20px; padding: 14px 16px; margin: 16px 0; background: var(--accent-soft); border-radius: 6px; }
 .remote-update-copy { min-width: 0; }
 .remote-update-copy strong { font-size: 15px; line-height: 1.5; font-weight: 500; overflow-wrap: anywhere; }
@@ -31,11 +40,12 @@
 .remote-update-copy p { font-size: 11px; color: var(--muted); margin-top: 4px; max-width: 52ch; overflow-wrap: anywhere; }
 .remote-update-check .text-button { flex-shrink: 0; margin-top: -5px; }
 .remote-command-section { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px 24px; padding: 22px 0; }
-.remote-controls .remote-command-section { flex-direction: column; gap: 13px; }
+.remote-controls .remote-command-section { align-items: center; }
+.remote-controls .remote-command-section > .remote-command-copy { flex: 1 1 220px; }
 .remote-controls .remote-command-copy { flex-basis: auto; }
 .remote-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .remote-actions .button { min-height: 38px; padding: 6px 12px; font-size: 12px; }
-.remote-web-section { padding: 22px 0; }
+.remote-web-section { padding-top: 0; padding-bottom: 0; }
 .remote-web-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px 12px; margin: 16px 0 8px; }
 .remote-web-controls label { flex: 0 1 148px; max-width: 100%; margin: 0; font-size: 12px; }
 .remote-web-controls input { margin-top: 5px; font-variant-numeric: tabular-nums; }
@@ -47,7 +57,7 @@
 .remote-web-result p { color: var(--muted); font-size: 11px; max-width: 76ch; overflow-wrap: anywhere; }
 .remote-web-result-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; }
 #remote-web-address { min-width: 0; font-size: 11px; color: var(--accent); overflow-wrap: anywhere; text-underline-offset: 3px; }
-.remote-backups { padding: 23px 0 0; }
+.remote-backups { padding: 0; }
 .remote-backups-heading { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 10px; }
 .remote-backups-heading .remote-command-copy { flex-basis: 280px; }
 #remote-backups-state { max-width: 80ch; }
@@ -66,7 +76,12 @@
 .remote-backup-actions { justify-content: flex-end; flex: 0 0 auto; gap: 4px 12px; }
 .remote-task-link { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 3px 18px; padding: 0 0 14px; }
 .remote-task-link p { flex: 1 1 200px; }
-.remote-uninstall { border-top: 1px solid var(--line); padding-top: 20px; padding-bottom: 8px; }
+.remote-uninstall { padding: 0; }
+.remote-uninstall > summary { color: var(--muted); }
+.remote-uninstall .remote-command-section { padding-top: 0; }
+.remote-task-link:has(#remote-task-summary[hidden]) { justify-content: flex-end; padding-bottom: 8px; }
+.remote-notice[hidden] + .field-error[hidden] + .remote-task-link { margin-top: -6px; }
+#remote-open-web:not(:disabled) { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
 .remote-uninstall .remote-command-copy p { max-width: 70ch; }
 .remote-preview { width: min(600px, calc(100vw - 28px)); }
 .remote-preview .dialog-content { padding-bottom: 16px; }
@@ -81,9 +96,6 @@
 .remote-preview .dialog-actions { flex-wrap: wrap; }
 .remote-workbench button, .remote-workbench input, .remote-preview button { transition: none; }
 @container (max-width: 760px) {
-  .remote-layout { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .remote-environment-rail { border-left: 0; border-top: 1px solid var(--line); padding: 18px 0; }
-  .remote-environment { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
   .remote-environment-note { max-width: none; margin-top: 8px; }
 }
 @container (max-width: 620px) {
@@ -109,7 +121,10 @@
   .remote-web-controls > .button { min-height: 44px; }
   .remote-web-controls label { flex-basis: 130px; }
   .remote-command-section { flex-direction: column; gap: 12px; }
-  .remote-command-copy { flex-basis: auto; }
+  .remote-command-copy, .remote-controls .remote-command-section > .remote-command-copy { flex-basis: auto; }
+  .remote-controls .remote-command-section { align-items: flex-start; }
+  .remote-disclosure > summary { flex-wrap: wrap; gap: 4px 10px; }
+  .remote-disclosure > summary .disclosure-caption { max-width: 65%; overflow-wrap: anywhere; }
   .remote-backups-heading .remote-command-copy { flex-basis: 100%; }
   .remote-web-result { padding: 12px; }
 }

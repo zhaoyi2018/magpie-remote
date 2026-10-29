@@ -166,7 +166,13 @@ try {
   const waitEnabled = (id) => until(() => field(id).isEnabled(), id + " stayed disabled");
   const waitOperation = (value) => until(async () => (await field("remote-task-state").textContent()).includes(value), "Remote operation did not become " + value);
   const detect = async () => { await waitEnabled("remote-detect"); await field("remote-detect").click(); await waitEnabled("remote-detect"); };
+  const expand = async (id) => {
+    if (!(await field(id).evaluate((node) => node.open))) await field(id).locator(":scope > summary").click();
+  };
   const preview = async (action) => {
+    if (["install", "update"].includes(action)) await expand("remote-program-details");
+    if (action === "uninstall") await expand("remote-maintenance-details");
+    if (action === "backup") await expand("remote-backups");
     await waitEnabled("remote-action-" + action); await field("remote-action-" + action).click();
     await until(async () => (await ui.locator("#remote-preview-changes li").count()) > 0, "Missing action preview");
   };
@@ -184,6 +190,10 @@ try {
   assert.equal(count("remote_status"), 0);
   await openRemote(); assert.equal(await field("remote-action-install").isDisabled(), true);
   await detect(); await waitEnabled("remote-action-install");
+  assert.equal(await field("connection-overview").evaluate((node) => node.open), false);
+  assert.equal(await field("remote-program-details").evaluate((node) => node.open), true, "Missing installations must expose the next step");
+  for (const id of ["remote-environment-details", "remote-backups", "remote-maintenance-details"]) assert.equal(await field(id).evaluate((node) => node.open), false);
+  assert.equal(await field("remote-task-summary").isVisible(), false, "Idle task explanation should not compete with actions");
   assert.equal(await field("remote-action-update").isDisabled(), true);
   await preview("install");
   const installGate = fixture.holdAction(); releases.push(installGate.resolve);
@@ -219,7 +229,12 @@ try {
   assert.equal(await field("remote-action-update").isVisible(), false);
   assert.match(await field("remote-update-state").textContent(), /最新版/);
   fixture.state.version = "0.1.1327"; await detect();
+  assert.match(await field("remote-program-summary").textContent(), /发现新版本/);
+  await expand("remote-program-details");
   assert.equal(await field("remote-action-update").isVisible(), true);
+  await field("remote-program-details").locator(":scope > summary").click();
+  await page.waitForTimeout(2200);
+  assert.equal(await field("remote-program-details").evaluate((node) => node.open), false, "Polling must preserve the user's disclosure choice");
   await preview("update");
   assert.equal(await field("remote-backup-passphrase").count(), 0);
   assert.ok((await field("remote-preview-warnings").textContent()).includes("未加密"));
@@ -339,6 +354,7 @@ try {
   fixture.state.capabilities = capabilities; await detect();
   console.log("Remote UI: legacy archive backup preview, no passphrase submission and action-specific capability reasons passed.");
 
+  await expand("remote-backups");
   await field("remote-refresh-backups").click();
   await until(async () => (await ui.locator("#remote-backup-list [data-backup-id]").count()) > 0, "Backup inventory stayed empty");
   const beforeBackup = fixture.state.backups.length;
@@ -433,6 +449,7 @@ try {
   console.log("Remote UI: explicit Web access, key cleanup and polling after cached-page restoration passed.");
 
   const heldPreview = gateTool("remote_preview");
+  await expand("remote-program-details");
   await field("remote-action-update").click(); await heldPreview.entered;
   await closePreview(); await selectedRow("测试服务器").click(); await openRemote(); heldPreview.release();
   await page.waitForTimeout(150); assert.equal(await field("remote-preview").evaluate((node) => node.open), false);
@@ -480,8 +497,13 @@ try {
   console.log("Remote UI: a lost apply response remains locked through management-service reconnection and connection changes.");
 
   const screenshots = resolve(process.env.MIGPIE_REMOTE_UI_ARTIFACTS ?? ".local/remote-ui-regression"); await mkdir(screenshots, { recursive: true });
-  await field("connection-detail").evaluate((node) => { node.scrollTop = 220; });
+  await page.setViewportSize({ width: 1280, height: 1100 });
+  await field("connection-detail").evaluate((node) => { node.scrollTop = 0; });
   await page.screenshot({ path: join(screenshots, "desktop.png"), fullPage: true });
+  await page.locator("#theme").click();
+  await field("panel-remote").evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  await page.screenshot({ path: join(screenshots, "desktop-dark.png"), fullPage: true });
+  await page.locator("#theme").click();
   await page.setViewportSize({ width: 555, height: 900 });
   await field("toggle-list").waitFor();
   await field("toggle-list").evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));

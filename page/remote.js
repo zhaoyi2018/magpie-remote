@@ -22,6 +22,7 @@ export function createRemoteManager({ call, toast }) {
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
   let history = [], historySignature = "";
+  let programDisclosureInitialized = false;
 
   function drawHistory() {
     const filter = $("history-filter").value;
@@ -171,6 +172,12 @@ export function createRemoteManager({ call, toast }) {
     if (update?.checkedAt) detail += " 检测于 " + time(update.checkedAt) + "。";
     if (status && !fresh()) detail += " 当前显示缓存，请重新检测。";
     text("remote-update-state", label); text("remote-update-detail", detail);
+    text("remote-program-summary", instance ? !instance.installed ? "尚未安装" : state === "available" ? label : currentVersion || "已安装" : "安装与更新");
+    $("remote-program-summary").classList.toggle("is-warning", state === "available" || Boolean(update?.error));
+    if (instance && !programDisclosureInitialized) {
+      $("remote-program-details").open = !instance.installed;
+      programDisclosureInitialized = true;
+    }
     $("remote-update-state").className = state === "available" ? "is-available" : update?.error ? "is-warning" : "";
     $("remote-action-update").hidden = state !== "available";
     $("remote-action-install").hidden = Boolean(instance?.installed || instance?.service?.installed);
@@ -196,6 +203,7 @@ export function createRemoteManager({ call, toast }) {
     if (uncertain()) notice = "上次操作结果未知。请点击「检测环境」核实远端结果；结果明确前不会允许重复操作。";
     text("remote-notice", notice);
     $("remote-notice").classList.toggle("is-warning", stale || uncertain());
+    $("remote-notice").hidden = Boolean(fresh() && !uncertain());
     $("remote-environment").hidden = !instance;
     text("remote-platform", instance ? [instance.platform, instance.architecture, instance.container ? "容器环境" : ""].filter(Boolean).join(" / ") : "—");
     text("remote-user", instance ? [instance.username, instance.home].filter(Boolean).join(" / ") : "—");
@@ -205,6 +213,8 @@ export function createRemoteManager({ call, toast }) {
     const service = instance?.service;
     text("remote-service", !instance?.systemd ? "无 systemd" : !service?.installed ? "尚未安装用户服务" : serviceLabels[service.state] ?? "待核实");
     $("remote-service").className = "badge" + (service?.state === "running" ? " connected" : service?.state === "unknown" ? " connecting" : "");
+    text("remote-service-summary", instance ? $("remote-service").textContent : "尚未检测");
+    $("remote-service-summary").className = $("remote-service").className;
     text("remote-web-state", instance?.web?.enabled ? "已启用 · 远端端口 " + instance.web.port : "尚未启用");
     const detecting = Boolean(reading?.forced || reading?.queued);
     $("remote-detect").disabled = !sshReady() || detecting || running() || submitting || pendingSubmissions.has(row?.connection.id);
@@ -351,6 +361,7 @@ export function createRemoteManager({ call, toast }) {
       }
     }
     text("remote-task-state", message);
+    $("remote-task-summary").hidden = !operation && !submitting && !submissionUncertain;
     $("remote-task-summary").classList.toggle("is-warning", uncertain() || state === "failed");
   }
 
@@ -374,6 +385,8 @@ export function createRemoteManager({ call, toast }) {
     const wasReady = sshReady(), wasActive = active, wasOnline = online, wasRemoteActive = remoteActive;
     if (changed) {
       generation++; dataRevision++; backupSequence++; reading = null; backupsLoading = null;
+      programDisclosureInitialized = false;
+      for (const id of ["connection-overview", "remote-program-details", "remote-environment-details", "remote-backups", "remote-maintenance-details"]) $(id).open = false;
       status = null; operation = null; history = []; historySignature = ""; readError = actionError = "";
       uncertainSubmission = uncertainSubmissions.get(nextRow?.connection.id) ?? null;
       submissionUncertain = Boolean(uncertainSubmission); submitting = false;

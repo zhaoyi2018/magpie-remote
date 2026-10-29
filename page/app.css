@@ -125,6 +125,20 @@ h1, h2, h3, h4, p, dl { margin: 0; }
 .detail-identity { display: flex; align-items: center; gap: 13px; min-width: 0; flex-wrap: wrap; }
 .detail-identity h2 { font-size: 23px; line-height: 1.5; font-weight: 500; max-width: 100%; overflow-wrap: anywhere; }
 .detail-identity .badge { padding: 3px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-muted); }
+.detail-server { min-width: 0; }
+.detail-address { margin-top: 3px; color: var(--muted); font: 12px/1.6 var(--mono); overflow-wrap: anywhere; }
+.connection-overview { margin: 14px 0 12px; }
+.connection-overview > summary { display: inline-flex; align-items: center; gap: 8px; padding: 5px 0; color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
+.connection-overview > summary::-webkit-details-marker { display: none; }
+.connection-overview > summary:hover { color: var(--accent); }
+.connection-overview > summary .icon { width: 14px; height: 14px; transform: rotate(-90deg); }
+.connection-overview[open] > summary .icon { transform: rotate(0); }
+.connection-overview .connection-route { margin: 10px 0 16px; }
+.connection-overview .connection-meta { margin-bottom: 16px; }
+.detail-heading + .connection-overview:not([open]) { border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.connection-controls #connect:not(.primary) { border-color: transparent; background: transparent; color: var(--muted); }
+.connection-controls #disconnect:not(:disabled) { color: var(--fg); }
+.detail > .operation-error { margin-top: 12px; }
 .connection-route { display: grid; grid-template-columns: minmax(105px, 1fr) minmax(100px, 1.5fr) minmax(145px, 1fr); align-items: center; gap: 20px; padding: 24px; margin: 23px 0 20px; border-radius: 10px; background: var(--surface-muted); }
 .route-node { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .route-node > div { min-width: 0; }
