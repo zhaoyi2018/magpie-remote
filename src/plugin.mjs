@@ -123,6 +123,13 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
         return remote.operation(connectionId, operationId, { history });
       },
     },
+    remote_recover: {
+      description: "End an unknown remote task after the user explicitly confirms the task and its child processes have stopped and verifies the actual installation/configuration. Removes only its residual operation lock; refuses a live owner or another task's lock, retains failure history and never repeats the deployment.",
+      args: args({ connectionId: idSchema, operationId: { type: "string", pattern: "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$" }, confirmed: { type: "boolean", enum: [true] } }),
+      execute({ connectionId, operationId, confirmed }, ctx = {}) {
+        return serial(connectionId, () => remote.recover(connectionId, operationId, { confirmed, signal: ctx.abort }));
+      },
+    },
     remote_backups: {
       description: "List remote Magpie backup metadata without reading configuration contents or credentials. Restore and delete require a fresh remote_preview with the selected backupId.",
       args: args({ connectionId: idSchema }),

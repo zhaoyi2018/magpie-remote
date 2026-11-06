@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, access } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm, rmdir, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, basename, dirname } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { actionScript, probeScript, shellQuote } from "../src/remote-scripts.mjs";
+import { actionScript, probeScript, recoveryScript, shellQuote } from "../src/remote-scripts.mjs";
 import { parseProbe } from "../src/remote.mjs";
 import { backupInventoryScript, parseBackups } from "../src/remote-backups.mjs";
 
@@ -37,6 +37,14 @@ case "$1" in
   --help) if [ -f "$HOME/limited-help" ]; then cat "$HOME/limited-help"; else printf '%s\\n' 'magpie update [check]' 'magpie backup [--no-keys] [file]' 'magpie restore [file]' 'magpie healthcheck' 'magpie daemon [install|uninstall|start|stop|restart|status]' 'magpie daemon install [--web] [--addr host:port]' 'magpie daemon web [on|off]'; fi ;;
   backup|restore) printf 'Official encrypted backup commands must not run\\n' >&2; exit 99 ;;
   update) if [ -e "$HOME/fail-update" ]; then printf 'download failed: dial tcp: no such host; isolated-private-output\\n' >&2; exit 1; fi
+    if [ -e "$HOME/interrupt-download" ]; then
+      # Let the progress loop enter its wait before signalling the parent shell.
+      sleep 1
+      kill -HUP "$PPID"
+      sleep 1
+      if [ -d "$HOME/.config/magpie-remote/operation.lock" ]; then printf kept > "$HOME/interrupted-child-lock"; else printf missing > "$HOME/interrupted-child-lock"; fi
+      exit 0
+    fi
     if [ -e "$HOME/slow-update" ]; then
       dd if=/dev/zero of="$0.new" bs=1024 count=1 2>/dev/null
       sleep 2
@@ -303,7 +311,53 @@ exec ${shellQuote(realMove)} "$@"
   await mkdir(join(home, ".config", "magpie-remote", "operation.lock"));
   const locked = await execute("stop", randomUUID(), undefined, observed);
   assert.equal(locked.code, 75); assert.equal(await readFile(join(home, "service-state"), "utf8"), "running");
-  await rm(join(home, ".config", "magpie-remote", "operation.lock"), { recursive: true });
+  const recoveryId = randomUUID(), lockPath = join(home, ".config", "magpie-remote", "operation.lock");
+  const legacyRecovery = await run(recoveryScript(recoveryId));
+  assert.equal(legacyRecovery.code, 0, legacyRecovery.stderr);
+  assert.equal(legacyRecovery.stdout.trim(), `MIGPIE_RECOVERED_V1\t${recoveryId}`);
+  await assert.rejects(access(lockPath));
+  assert.equal((await run(recoveryScript(recoveryId))).code, 0, "Recovery without a residual lock must be retryable");
+  await mkdir(lockPath); await writeFile(join(lockPath, "unexpected"), "keep");
+  assert.notEqual((await run(recoveryScript(recoveryId))).code, 0);
+  assert.equal(await readFile(join(lockPath, "unexpected"), "utf8"), "keep");
+  await rm(join(lockPath, "unexpected"));
+  const foreignOwner = randomUUID() + ":99999999";
+  await writeFile(join(lockPath, "owner"), foreignOwner);
+  assert.equal((await run(recoveryScript(recoveryId))).code, 75);
+  assert.equal(await readFile(join(lockPath, "owner"), "utf8"), foreignOwner);
+  const liveOwner = await run(`printf '%s:%s' '${recoveryId}' "$$" > "$HOME/.config/magpie-remote/operation.lock/owner"\n` + recoveryScript(recoveryId));
+  assert.equal(liveOwner.code, 75, "A live process must keep its lock");
+  assert.ok(await readFile(join(lockPath, "owner"), "utf8"));
+  await writeFile(join(lockPath, "owner"), recoveryId + ":not-a-pid");
+  assert.equal((await run(recoveryScript(recoveryId))).code, 78);
+  await writeFile(join(lockPath, "owner"), recoveryId + ":99999999");
+  assert.equal((await run(recoveryScript(recoveryId))).code, 0);
+  await assert.rejects(access(lockPath));
+  const recoveryLock = join(home, ".config", "magpie-remote", "recovery.lock");
+  await mkdir(recoveryLock); await writeFile(join(recoveryLock, "owner"), "99999999");
+  assert.equal((await run(recoveryScript(recoveryId))).code, 0, "A crashed recovery must not leave another permanent lock");
+  await assert.rejects(access(recoveryLock));
+  await mkdir(join(home, ".config", "magpie-remote", "recovery.lock"));
+  assert.equal((await execute("stop")).code, 75, "A recovery guard must exclude deployments");
+  await rmdir(join(home, ".config", "magpie-remote", "recovery.lock"));
+  // Trigger HUP/TERM/PIPE in the actual generated shell after it owns the lock.
+  // The exit trap must persist a failure and release both the lock and its owner.
+  for (const [signal, code] of [["HUP", 129], ["INT", 130], ["TERM", 143], ["PIPE", 141]]) {
+    const operationId = randomUUID();
+    const interrupted = await run(actionScript("stop", observed, operationId).replace('set_step verifying\n', () => `kill -${signal} $$\nset_step verifying\n`));
+    assert.equal(interrupted.code, code, interrupted.stderr + interrupted.stdout);
+    assert.match(interrupted.stdout, new RegExp(`MIGPIE_RESULT_V1\\t${operationId}\\tpreparing\\t${code}\\tcommand_failed\\tfalse`));
+    assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", operationId, "state"), "utf8"), "failed");
+    await assert.rejects(access(lockPath));
+  }
+  await writeFile(join(home, "interrupt-download"), "enabled");
+  const interruptedDownloadId = randomUUID(), interruptedDownload = await execute("update", interruptedDownloadId, undefined, observed);
+  assert.equal(interruptedDownload.code, 129, interruptedDownload.stderr + interruptedDownload.stdout);
+  assert.equal(await readFile(join(home, "interrupted-child-lock"), "utf8"), "kept", "Keep the lock until the background download ends");
+  assert.match(interruptedDownload.stdout, new RegExp(`MIGPIE_RESULT_V1\\t${interruptedDownloadId}\\tupdating\\t129\\tcommand_failed\\ttrue`));
+  await assert.rejects(access(lockPath));
+  await rm(join(home, "interrupt-download"));
+  console.log("Remote recovery: legacy/dead-owner locks, live/foreign-owner refusal, unexpected-file preservation, recovery exclusion, stale recovery retry, HUP/INT/TERM/PIPE failure persistence and waiting for an interrupted download passed.");
   console.log(`Remote scripts: help capabilities, POSIX probe, checksum install, ${symlinked ? "symlinked" : "directory"}/absent config restore, stopped-service preservation, classified failures without secret output, service actions, lock exclusion and uninstall retaining backups passed.`);
 } finally {
   if (dirname(resolve(directory)) === resolve(tmpdir()) && basename(directory).startsWith("migpie-script-smoke-")) await rm(directory, { recursive: true, force: true, maxRetries: 3 });

@@ -11,13 +11,13 @@ const stepLabels = { checking: "复核环境", executing: "执行变更", prepar
 const serviceLabels = { running: "运行中", stopped: "已停止", unavailable: "不可用", unknown: "待核实" };
 const backupFormatLabels = { encrypted: "历史加密备份", archive: "配置归档", absent: "无配置目录快照", incomplete: "备份不完整" };
 
-export function createRemoteManager({ call, toast }) {
+export function createRemoteManager({ call, confirmAction, toast }) {
   const $ = (id) => document.getElementById(id);
   const dialog = $("remote-preview");
   let row = null, online = false, active = false, remoteActive = false, closed = false;
   let generation = 0, dataRevision = 0, previewSequence = 0, webSequence = 0, backupSequence = 0;
   let status = null, operation = null, reading = null, polling = null;
-  let preview = null, previewAction = null, previewBackupId = null, previewLoading = false, submitting = false, webLoading = false;
+  let preview = null, previewAction = null, previewBackupId = null, previewLoading = false, submitting = false, webLoading = false, recovering = false;
   let readError = "", actionError = "", webError = "", submissionUncertain = false, uncertainSubmission = null;
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
@@ -93,6 +93,7 @@ export function createRemoteManager({ call, toast }) {
     if (!row) return "请先选择 SSH 服务器。";
     if (!online) return "管理服务不可用，当前仅显示缓存。";
     if (!sshReady()) return "请先建立 SSH 连接，服务状态与 SSH 连接状态分别显示。";
+    if (recovering) return "正在核实并解除旧任务的操作限制，请稍候。";
     if (submitting || pendingSubmissions.has(row.connection.id)) return "正在提交远端任务，请稍候。";
     if (running()) return "远端任务仍在执行，可在运行日志查看进度。";
     if (uncertain()) return "上次操作结果未知。请先检测环境核实；结果明确前不要重复操作。";
@@ -200,7 +201,7 @@ export function createRemoteManager({ call, toast }) {
       : !sshReady() ? "SSH 尚未连接，保留的远端状态仅供参考。请先连接服务器。"
       : stale ? "当前显示缓存，请检测环境后再进行变更。"
       : !instance ? "先检测环境，确认安装位置、版本与用户服务状态。" : "SSH 通道与 Magpie 用户服务各自独立；服务启停不会断开 SSH 连接。";
-    if (uncertain()) notice = "上次操作结果未知。请点击「检测环境」核实远端结果；结果明确前不会允许重复操作。";
+    if (uncertain()) notice = "上次操作结果未知。请先连接并检测环境；若任务已中断且没有完成记录，核实远端进程已结束后可点击「解除待核实」。";
     text("remote-notice", notice);
     $("remote-notice").classList.toggle("is-warning", stale || uncertain());
     $("remote-notice").hidden = Boolean(fresh() && !uncertain());
@@ -217,7 +218,7 @@ export function createRemoteManager({ call, toast }) {
     $("remote-service-summary").className = $("remote-service").className;
     text("remote-web-state", instance?.web?.enabled ? "已启用 · 远端端口 " + instance.web.port : "尚未启用");
     const detecting = Boolean(reading?.forced || reading?.queued);
-    $("remote-detect").disabled = !sshReady() || detecting || running() || submitting || pendingSubmissions.has(row?.connection.id);
+    $("remote-detect").disabled = !sshReady() || detecting || running() || submitting || recovering || pendingSubmissions.has(row?.connection.id);
     $("remote-detect").title = running() ? "远端任务执行中，请在运行日志查看进度；结束后可检测环境。" : "通过 SSH 读取远端环境并检查最新版本";
     text("remote-detect-label", detecting ? "正在检测…" : "检测环境");
     showError("remote-error", actionError || readError);
@@ -363,6 +364,9 @@ export function createRemoteManager({ call, toast }) {
     text("remote-task-state", message);
     $("remote-task-summary").hidden = !operation && !submitting && !submissionUncertain;
     $("remote-task-summary").classList.toggle("is-warning", uncertain() || state === "failed");
+    $("remote-recover").hidden = state !== "unknown";
+    $("remote-recover").disabled = !sshReady() || recovering || Boolean(reading) || submitting;
+    text("remote-recover", recovering ? "正在解除…" : "解除待核实");
   }
 
   function syncPreview() {
@@ -389,7 +393,7 @@ export function createRemoteManager({ call, toast }) {
       for (const id of ["connection-overview", "remote-program-details", "remote-environment-details", "remote-backups", "remote-maintenance-details"]) $(id).open = false;
       status = null; operation = null; history = []; historySignature = ""; readError = actionError = "";
       uncertainSubmission = uncertainSubmissions.get(nextRow?.connection.id) ?? null;
-      submissionUncertain = Boolean(uncertainSubmission); submitting = false;
+      submissionUncertain = Boolean(uncertainSubmission); submitting = false; recovering = false;
       backups = null; backupError = ""; backupsDirty = false; backupRefreshDue = false; completedBackupOperation = null;
       backupRows.clear(); $("remote-backup-list").replaceChildren();
       closePreview(); clearWeb(); $("remote-web-port").value = "3430";
@@ -404,7 +408,7 @@ export function createRemoteManager({ call, toast }) {
   }
 
   function refresh({ force = false } = {}) {
-    if (closed || !active || !row || !online || document.hidden || submitting) return Promise.resolve();
+    if (closed || !active || !row || !online || document.hidden || submitting || recovering) return Promise.resolve();
     if (force && (!sshReady() || running())) return Promise.resolve();
     if (reading) {
       if (force && !reading.forced) reading.queued = true;
@@ -547,6 +551,25 @@ export function createRemoteManager({ call, toast }) {
     }
   }
 
+  async function recoverOperation() {
+    if (!sshReady() || operation?.state !== "unknown" || recovering || reading || submitting) return;
+    const id = row.connection.id, epoch = generation, operationId = operation.id;
+    const accepted = await confirmAction("解除待核实任务", "请先在服务器确认「" + (actionLabels[operation.action] ?? "远端任务") + "」（任务 " + operationId + "）及其子进程已结束，并核对程序、服务与配置。确认后将清理该任务的残留锁并将记录标为失败，随后可重新预览操作。", "已核实，解除限制");
+    if (!accepted || !current(id, epoch) || operation?.id !== operationId || operation.state !== "unknown" || !sshReady()) return;
+    recovering = true; dataRevision++; actionError = ""; draw();
+    try {
+      const result = await call("remote_recover", { connectionId: id, operationId, confirmed: true });
+      if (!current(id, epoch)) return;
+      if (result?.id !== operationId) throw new Error("恢复结果与当前任务不匹配，请重新检测。");
+      observeOperation(result);
+      toast("旧任务已结束，请检测当前环境后继续操作。");
+    } catch (error) {
+      if (current(id, epoch)) actionError = errorMessage(error);
+    } finally {
+      if (current(id, epoch)) { recovering = false; draw(); void refresh({ force: true }); }
+    }
+  }
+
   for (const action of panelActions) $("remote-action-" + action).addEventListener("click", () => { void openPreview(action); });
   $("remote-detect").addEventListener("click", () => { void refresh({ force: true }); });
   $("remote-check-update").addEventListener("click", () => { void refresh({ force: true }); });
@@ -556,6 +579,7 @@ export function createRemoteManager({ call, toast }) {
     if (button && !button.disabled) void openPreview(button.dataset.action, button.dataset.backupId);
   });
   $("remote-view-logs").addEventListener("click", () => { $("tab-logs").click(); $("tab-logs").focus(); });
+  $("remote-recover").addEventListener("click", () => { void recoverOperation(); });
   $("history-filter").addEventListener("change", drawHistory);
   $("remote-open-web").addEventListener("click", () => { void openWeb(); });
   $("remote-web-port").addEventListener("input", () => { clearWeb(); draw(); });

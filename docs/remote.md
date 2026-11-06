@@ -39,7 +39,23 @@
 
 本地 `connections.json.remote.json` 保存最近环境、每个连接的当前任务和最多 20 条旧终态摘要，仍使用 version 1；旧文件没有历史字段时兼容读取。开始新任务时才归档旧终态，未知任务不能被轮换。历史可在「运行日志 → 远程任务历史」按全部、失败和待核实筛选，或用操作 ID 查询；历史轮换不删除服务器上的操作目录或备份。文件损坏、历史重复或非终态历史会明确报错，不覆盖旧内容。新任务先记录 `dispatch: pending`，复核后在执行前持久化 `possible`；重启时仅 `pending` 且仍为 `checking` 的任务标为 `failed` / `REMOTE_NOT_DISPATCHED`，可重新预览。其他原运行任务，包括缺少派发字段的旧记录，均标为结果待核实。远端使用 `magpie-remote/operation.lock` 互斥，将状态写入 `magpie-remote/operations/<UUID>/state`，并在 `result` 中记录操作标识、失败步骤、退出码、可识别的错误类别与备份完成标记。只有固定字段返回页面，不保存命令的原始输出或口令。
 
-SSH 断开、超时、通道没有明确退出码时，变更任务标为结果待核实。重新连接后检测环境，只有取得远端明确的完成记录并确认操作锁已释放，才解除状态。不根据版本或服务看似正常就自动重试。若锁残留或记录缺失，请在服务器核实进程与变更，不要直接重复部署。关闭 SSH 通道不能保证远端进程一定终止。
+SSH 断开、超时、通道没有明确退出码时，变更任务标为结果待核实。重新连接后点击「检测环境」，取得远端明确的完成记录且操作锁已释放时，恢复任务结果。不根据版本或服务看似正常就自动重试。关闭 SSH 通道不能保证远端进程一定终止。
+
+如果检测后始终显示结果未知，可点击任务摘要旁的「解除待核实」。**先在服务器确认该任务及其子进程均已结束，并核对程序、配置与服务的实际状态**，再在弹窗中确认。后台会再次检测并优先采用新出现的完成记录；仍无结果时，仅清理旧任务的残留锁，将本地任务标为失败并保留历史，不重新执行安装或更新。重新检测后，未安装时可重新预览安装，已安装时使用现有安装。恢复请求超时或断线可再次解除，部署不会被重放。
+
+新任务在锁内记录任务 UUID 和 Shell PID，并在收到 HUP、INT、TERM 或 PIPE 时尽量保存失败结果后释放锁；若下载子进程尚未结束，会先等待它结束。解除时遇到仍存在的 PID、其他任务的锁或目录中的未知文件会拒绝清理。恢复本身使用短时互斥锁，记录进程归属，异常退出后可在下次解除时清理已结束进程的残留锁。旧版操作锁没有进程归属信息，必须由用户核实进程及子进程已结束；不能仅凭页面显示断线判断可清锁。
+
+核实中断任务时，可以通过独立 SSH 终端查看锁归属、任务记录与当前用户进程；将 `<操作 UUID>` 替换为页面显示的任务标识：
+
+```sh
+base="${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote"
+cat "$base/operation.lock/owner"
+cat "$base/operations/<操作 UUID>/state"
+cat "$base/operations/<操作 UUID>/result"
+ps -u "$(id -u)" -o pid,ppid,stat,args --forest
+```
+
+旧任务可能没有 `owner` 或 `result` 文件。核对任务 Shell 和它派生的 `curl`、`magpie update` 等进程均已结束后再确认解除；这些命令只查看状态。
 
 有运行中或待核实任务时不能删除连接或恢复全局 SSH 配置。待核实任务允许更新同一服务器的 SSH 凭据以便重新连接，不能把这条连接改指向另一台服务器。
 
@@ -78,6 +94,7 @@ systemctl --user is-active magpie.service
 | `remote_preview` | `connectionId`、`action`；恢复或删除时加 `backupId` | `revision`、变更清单、提示、归档备份方式 |
 | `remote_apply` | `connectionId`、`action`、预览的 `revision` | 立即返回后台任务，后续查询状态 |
 | `remote_operation` | `connectionId`、可选 `operationId` 或 `history: true` | 最新任务或 `null`；按 ID 查当前/历史；历史模式返回 `{connectionId, limit: 20, operations}`，当前加旧终态最多 21 条 |
+| `remote_recover` | `connectionId`、当前 `operationId`、`confirmed: true` | 用户核实任务及子进程结束后解除待核实状态；优先核实完成记录，否则清理残留锁并保留失败任务，不重放部署 |
 | `remote_web` | `connectionId`、可选 `port` | 临时本地访问地址和带管理 key 的登录链接 |
 | `remote_backups` | `connectionId` | 此连接的远端备份元数据列表 |
 

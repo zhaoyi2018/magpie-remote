@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { identifier } from "./config.mjs";
 import { OperationError, errorDetails } from "./errors.mjs";
 import { profileRevision } from "./store.mjs";
-import { actionScript, backupActions, probeScript, remoteActions, webLinkCommand } from "./remote-scripts.mjs";
+import { actionScript, backupActions, probeScript, recoveryScript, remoteActions, webLinkCommand } from "./remote-scripts.mjs";
 import { backupIdPattern, backupInventoryScript, parseBackups } from "./remote-backups.mjs";
 import { operationHistoryLimit, operationSummary, parseRestoreResult, restoreResultMessage, terminalOperation } from "./remote-results.mjs";
 
@@ -251,7 +251,7 @@ export class RemoteManager {
         : operation.diagnostic ? actionFailure(operation.action, operation.diagnostic.exitCode, operation.diagnostic).message : "执行失败，请查看任务详情";
     const backup = operation.result?.backupDirectory ? "；远端备份目录：" + operation.result.backupDirectory : "";
     const restore = restoreResultMessage(operation.restore);
-    this.sessions.recordLog?.(id, level, "远程 Magpie：" + labels[operation.action] + " · " + (reconciled ? "检测确认：" : "") + (operation.error?.code === "REMOTE_NOT_DISPATCHED" ? operation.message : message) + backup + (restore ? "；" + restore : "") + "（任务 " + operation.id + "）");
+    this.sessions.recordLog?.(id, level, "远程 Magpie：" + labels[operation.action] + " · " + (reconciled ? "检测确认：" : "") + (["REMOTE_NOT_DISPATCHED", "REMOTE_RECOVERED"].includes(operation.error?.code) ? operation.message : message) + backup + (restore ? "；" + restore : "") + "（任务 " + operation.id + "）");
   }
 
   async #closeWebForward(id) {
@@ -511,6 +511,38 @@ export class RemoteManager {
     const operation = operationId ? [record.operation, ...record.history].find((item) => item?.id === operationId) : record.operation;
     if (operationId && !operation) throw new OperationError("REMOTE_OPERATION_MISSING", "未找到此连接的操作记录，历史记录可能已轮换");
     return copy(operation ?? null);
+  }
+
+  async recover(id, operationId, { confirmed = false, signal } = {}) {
+    const profile = await this.#profile(id), record = this.#record(id, profile);
+    const operation = record.operation;
+    if (!operation || operation.id !== operationId) throw new OperationError("REMOTE_OPERATION_MISSING", "当前任务已变化，请重新读取后再解除待核实状态");
+    if (operation.state === "failed" && operation.error?.code === "REMOTE_RECOVERED") return copy(operation);
+    if (operation.state !== "unknown") throw new OperationError("REMOTE_BUSY", "仅结果待核实的任务可以手动解除，请先等待当前任务结束");
+    if (confirmed !== true) throw new OperationError("REMOTE_RECOVERY_CONFIRMATION", "请先在服务器确认该任务及其子进程已结束，并核对程序与配置的实际状态");
+    // Prefer an actual completion record if it became available during recovery.
+    await this.status(id, { refresh: true, signal });
+    if (operation.state !== "unknown") return copy(operation);
+    this.#connected(id);
+    const response = await this.sessions.execute(id, "sh -s", { input: recoveryScript(operationId), signal, timeoutMs: 10000 });
+    if (response.code === 75) throw new OperationError("REMOTE_BUSY", "远端任务进程仍存在、操作锁属于其他任务或正在恢复，请等待并核实，未解除限制");
+    if (response.code !== 0 || response.stdout.trim() !== `MIGPIE_RECOVERED_V1\t${operationId}`) throw new OperationError("REMOTE_RECOVERY_FAILED", "无法安全清理远端操作锁，请在服务器检查锁的归属和目录权限后重试");
+    // No deployment command is replayed. Keep this task visibly unsuccessful.
+    const previous = copy(operation);
+    operation.state = "failed"; operation.step = "failed";
+    operation.updatedAt = new Date().toISOString();
+    operation.message = "已由用户确认远端任务及其子进程结束，解除待核实限制；原任务未确认成功，请核对当前环境后重新预览操作";
+    operation.error = errorDetails(new OperationError("REMOTE_RECOVERED", operation.message));
+    delete operation.progress;
+    this.#previews.delete(id);
+    record.instance.locked = false;
+    try { await this.#save(); }
+    catch (cause) {
+      record.operation = previous;
+      throw new OperationError("REMOTE_STATE_WRITE_FAILED", "远端操作锁已清理，但本地恢复记录保存失败，请重试解除待核实状态", { cause });
+    }
+    this.#logOperation(id, operation);
+    return copy(operation);
   }
 
   async web(id, { port } = {}) {

@@ -63,6 +63,7 @@ class FakeSessions {
     if (command === "sh -s" && input === probeScript) kind = "probe";
     else if (command === "sh -s" && input === backupInventoryScript) kind = "backups";
     else if (command === "sh -s" && /cat "\$base\/operations\/[a-f0-9-]+\/state"/.test(input ?? "")) kind = "reconcile";
+    else if (command === "sh -s" && input?.includes("MIGPIE_RECOVERED_V1")) kind = "recover";
     else if (/ daemon web$/.test(command)) kind = "web";
     else if (command === "sh -s" && input?.includes("MIGPIE_DONE")) kind = "action";
     else throw new Error("Unexpected fixture command: " + command);
@@ -72,6 +73,7 @@ class FakeSessions {
     if (kind === "action") return this.onAction ? this.onAction(call) : success();
     if (kind === "backups") return response("MIGPIE_BACKUPS_V1\n" + this.backupRows.join("\n") + (this.backupRows.length ? "\n" : ""));
     if (kind === "reconcile") return this.onReconcile ? this.onReconcile(call) : response(this.remoteState + "\n");
+    if (kind === "recover") return this.onRecover ? this.onRecover(call) : response(`MIGPIE_RECOVERED_V1\t${input.match(/printf 'MIGPIE_RECOVERED_V1[^\n]+ '([a-f0-9-]{36})'/)[1]}\n`);
     return this.webResponse;
   }
 
@@ -732,6 +734,80 @@ test("unknown operations permit credential recovery on the same endpoint but can
   await assert.rejects(h.remote.assertProfileChange({ ...h.profile, host: "different.invalid" }), { code: "REMOTE_BUSY" });
   await assert.rejects(h.remote.assertAllIdle(), { code: "REMOTE_BUSY" });
   await assert.rejects(h.remote.forget(h.profile.id), { code: "REMOTE_BUSY" });
+});
+
+test("explicit recovery releases a legacy interrupted install while keeping its failure in history and never replaying it", async (t) => {
+  const h = await fixture(t, { installed: "false", binary: "", binaryHash: "", serviceInstalled: "false", unitHash: "" });
+  h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection"); };
+  const { operation } = await start(h, "install"); await completed(h);
+  h.sessions.fields.locked = "true";
+  assert.equal((await h.remote.status(h.profile.id, { refresh: true })).operation.state, "unknown");
+  await assert.rejects(h.remote.recover(h.profile.id, operation.id), { code: "REMOTE_RECOVERY_CONFIRMATION" });
+  await assert.rejects(h.remote.recover(h.profile.id, "00000000-0000-0000-0000-000000000000", { confirmed: true }), { code: "REMOTE_OPERATION_MISSING" });
+  h.sessions.state = "disconnected";
+  await assert.rejects(h.remote.recover(h.profile.id, operation.id, { confirmed: true }), { code: "REMOTE_NOT_CONNECTED" });
+  assert.equal(h.sessions.calls.filter((call) => call.kind === "recover").length, 0);
+  h.sessions.state = "connected";
+  const recovered = await h.remote.recover(h.profile.id, operation.id, { confirmed: true });
+  assert.equal(recovered.state, "failed"); assert.equal(recovered.error.code, "REMOTE_RECOVERED");
+  assert.match(recovered.message, /未确认成功/);
+  assert.match(h.sessions.logs.at(-1).message, /解除待核实限制/);
+  assert.equal(h.sessions.actions().length, 1);
+  assert.equal((await h.remote.recover(h.profile.id, operation.id, { confirmed: true })).state, "failed");
+  assert.equal(h.sessions.calls.filter((call) => call.kind === "recover").length, 1, "Retrying recovery must be idempotent");
+  h.sessions.fields.locked = "false"; h.sessions.onAction = undefined;
+  await start(h, "install"); assert.equal((await completed(h)).state, "succeeded");
+  const history = await h.remote.operation(h.profile.id, undefined, { history: true });
+  assert.equal(history.operations[1].id, operation.id);
+  assert.equal(history.operations[1].error.code, "REMOTE_RECOVERED");
+  await h.remote.close();
+  const reloaded = new RemoteManager(h.options); t.after(() => reloaded.close());
+  assert.equal((await reloaded.operation(h.profile.id, operation.id)).state, "failed");
+});
+
+test("manual recovery refuses running tasks and retains unknown after a live lock, invalid response, or transport loss", async (t) => {
+  const h = await fixture(t), entered = deferred(), releaseAction = deferred();
+  t.after(() => releaseAction.resolve());
+  h.sessions.onAction = async () => { entered.resolve(); await releaseAction.promise; throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection"); };
+  const { operation } = await start(h); await entered.promise;
+  await assert.rejects(h.remote.recover(h.profile.id, operation.id, { confirmed: true }), { code: "REMOTE_BUSY" });
+  releaseAction.resolve(); await completed(h);
+  for (const [onRecover, code] of [
+    [() => response("", 75), "REMOTE_BUSY"],
+    [() => response("", 78), "REMOTE_RECOVERY_FAILED"],
+    [() => response("MIGPIE_RECOVERED_V1\t00000000-0000-0000-0000-000000000000\n"), "REMOTE_RECOVERY_FAILED"],
+    [() => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost recovery response"); }, "REMOTE_DISCONNECTED"],
+  ]) {
+    h.sessions.onRecover = onRecover;
+    await assert.rejects(h.remote.recover(h.profile.id, operation.id, { confirmed: true }), { code });
+    assert.equal((await h.remote.operation(h.profile.id)).state, "unknown");
+    await assert.rejects(h.remote.assertIdle(h.profile.id), { code: "REMOTE_BUSY" });
+  }
+  assert.equal(h.sessions.actions().length, 1);
+});
+
+test("recovery preserves a completion record that appears after reconnection", async (t) => {
+  const h = await fixture(t);
+  h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection"); };
+  const { operation } = await start(h); await completed(h);
+  h.sessions.remoteState = `succeeded\nMIGPIE_RESULT_V1\t${operation.id}\tcompleted\t0\tnone\tfalse`;
+  assert.equal((await h.remote.recover(h.profile.id, operation.id, { confirmed: true })).state, "succeeded");
+  assert.equal(h.sessions.calls.filter((call) => call.kind === "recover").length, 0);
+  assert.equal(h.sessions.actions().length, 1);
+});
+
+test("failed local recovery persistence keeps the task unknown and permits retrying only recovery", async (t) => {
+  const h = await fixture(t);
+  h.sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "fixture lost connection"); };
+  const { operation } = await start(h); await completed(h);
+  const renameFile = h.remote.renameFile;
+  h.sessions.onRecover = () => { h.remote.renameFile = async () => { throw new Error("fixture write failed"); }; return response(`MIGPIE_RECOVERED_V1\t${operation.id}\n`); };
+  await assert.rejects(h.remote.recover(h.profile.id, operation.id, { confirmed: true }), { code: "REMOTE_STATE_WRITE_FAILED" });
+  assert.equal((await h.remote.operation(h.profile.id)).state, "unknown");
+  assert.equal(JSON.parse(await readFile(h.remote.file, "utf8")).records[0].operation.state, "unknown");
+  h.remote.renameFile = renameFile; h.sessions.onRecover = undefined;
+  assert.equal((await h.remote.recover(h.profile.id, operation.id, { confirmed: true })).state, "failed");
+  assert.equal(h.sessions.actions().length, 1);
 });
 
 test("a malformed persisted management file is preserved and never replaced by a fresh operation", async (t) => {

@@ -28,7 +28,7 @@ async function remoteFixture(context) {
     platform: "Linux", architecture: "x86_64", container: false,
     installed: false, systemd: true, serviceInstalled: false,
     serviceActive: "inactive", webEnabled: false, webTLS: false,
-    version: "0.1.1327", locked: false, reconcile: "", nextUnknown: false, nextFailure: null, backups: [],
+    version: "0.1.1327", locked: false, recoveryBusy: false, reconcile: "", nextUnknown: false, nextFailure: null, backups: [],
     capabilities: "update backup restore healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
   };
   const executions = [];
@@ -62,6 +62,13 @@ async function remoteFixture(context) {
           }
           if (command === "sh -s" && input.includes("cat \"$base/operations/")) {
             executions.push({ kind: "reconcile" }); finish(state.reconcile + "\n"); return;
+          }
+          if (command === "sh -s" && input.includes("MIGPIE_RECOVERED_V1")) {
+            executions.push({ kind: "recover" });
+            if (state.recoveryBusy) { finish("", 75); return; }
+            const operationId = input.match(/printf 'MIGPIE_RECOVERED_V1[^\n]+ '([a-f0-9-]{36})'/)?.[1];
+            assert.ok(operationId); state.locked = false;
+            finish(`MIGPIE_RECOVERED_V1\t${operationId}\n`); return;
           }
           if (command.endsWith(" daemon web")) {
             executions.push({ kind: "web" }); finish("http://127.0.0.1:3430/?k=fixture-management-key-1234567890\n"); return;
@@ -152,6 +159,7 @@ try {
   const browser = await chromium.launch({ ...options, headless: true }); cleanup.unshift(() => browser.close());
   const browserContext = await browser.newContext({ viewport: { width: 1280, height: 1000 }, permissions: ["local-network-access"] });
   const page = await browserContext.newPage(), errors = [], counts = new Map(), requests = [];
+  const screenshots = resolve(process.env.MIGPIE_REMOTE_UI_ARTIFACTS ?? ".local/remote-ui-regression"); await mkdir(screenshots, { recursive: true });
   page.on("pageerror", (error) => errors.push(error.message));
   const api = new URL("api/call", web.url).href;
   page.on("request", (request) => {
@@ -318,6 +326,30 @@ try {
   fixture.state.reconcile = "succeeded"; await detect(); await waitOperation("已完成");
   await waitEnabled("remote-action-update");
   console.log("Remote UI: unknown stays locked after a probe and only explicit remote completion records restore actions.");
+
+  fixture.state.nextUnknown = true; fixture.state.reconcile = "";
+  await preview("update"); await field("remote-apply").click(); await waitOperation("结果未知");
+  fixture.state.locked = true; await detect();
+  const actionsBeforeRecovery = fixture.executions.filter((item) => item.kind === "action").length;
+  const recoveriesBefore = count("remote_recover");
+  await waitEnabled("remote-recover"); await field("remote-recover").click();
+  await field("confirm-dialog").waitFor(); assert.match(await field("confirm-description").textContent(), /子进程已结束/);
+  await page.screenshot({ path: join(screenshots, "recovery-confirmation.png"), fullPage: true });
+  await field("confirm-cancel").click();
+  assert.equal(count("remote_recover"), recoveriesBefore);
+  fixture.state.recoveryBusy = true;
+  await field("remote-recover").click(); await field("confirm-accept").click();
+  await field("remote-error").filter({ hasText: "远端任务进程仍存在" }).waitFor();
+  assert.equal((await remote.operation("remote-alpha")).state, "unknown");
+  assert.equal(await field("remote-action-update").isDisabled(), true);
+  fixture.state.recoveryBusy = false;
+  await waitEnabled("remote-recover"); await field("remote-recover").click(); await field("confirm-accept").click();
+  await waitOperation("失败"); await waitEnabled("remote-action-update");
+  assert.equal(await field("remote-recover").isVisible(), false);
+  assert.equal((await remote.operation("remote-alpha")).error.code, "REMOTE_RECOVERED");
+  assert.equal(fixture.executions.filter((item) => item.kind === "action").length, actionsBeforeRecovery);
+  await preview("update"); await closePreview();
+  console.log("Remote UI: interrupted task recovery requires confirmation, refuses live owners, restores previews and never replays deployment.");
 
   fixture.state.container = true; await detect();
   assert.equal(await field("remote-action-update").isDisabled(), true); assert.match(await field("remote-action-hint").textContent(), /容器/);
@@ -496,7 +528,6 @@ try {
   await page.reload(); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor(); await openRemote();
   console.log("Remote UI: a lost apply response remains locked through management-service reconnection and connection changes.");
 
-  const screenshots = resolve(process.env.MIGPIE_REMOTE_UI_ARTIFACTS ?? ".local/remote-ui-regression"); await mkdir(screenshots, { recursive: true });
   await page.setViewportSize({ width: 1280, height: 1100 });
   await field("connection-detail").evaluate((node) => { node.scrollTop = 0; });
   await page.screenshot({ path: join(screenshots, "desktop.png"), fullPage: true });

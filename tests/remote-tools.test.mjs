@@ -26,6 +26,14 @@ test("remote_operation exposes history without changing latest or id lookup cont
   assert.throws(() => tools.remote_operation.execute({ connectionId: "server", history: true, operationId: "task-id" }));
 });
 
+test("remote_recover forwards task identity, explicit confirmation, and cancellation", async () => {
+  const calls = [], remote = { recover(...args) { calls.push(args); return { state: "failed" }; } };
+  const tools = createTools({}, {}, remote), controller = new AbortController();
+  const operationId = "79e2990d-4a82-45e5-951d-1d1a581ff756";
+  assert.deepEqual(await tools.remote_recover.execute({ connectionId: "server", operationId, confirmed: true }, { abort: controller.signal }), { state: "failed" });
+  assert.deepEqual(calls, [["server", operationId, { confirmed: true, signal: controller.signal }]]);
+});
+
 test("configuration restore waits for an accepted remote submission and refuses to disconnect its session", async () => {
   const entered = deferred(), release = deferred();
   let busy = false, disconnected = 0, restored = 0;

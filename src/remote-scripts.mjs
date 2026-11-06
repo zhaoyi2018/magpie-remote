@@ -71,9 +71,56 @@ umask 077
 base="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote"
 mkdir -p "$base"
 lock="$base/operation.lock"
+[ ! -e "$base/recovery.lock" ] || exit 75
 mkdir "$lock" 2>/dev/null || { printf 'MIGPIE_LOCKED\\n'; exit 75; }
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+[ ! -e "$base/recovery.lock" ] || exit 75
 `;
+
+// Recovery is explicit: the user must verify that the task and its children have
+// ended. Legacy locks have no owner; never infer their safety from a probe alone.
+export function recoveryScript(operationId) {
+  if (!backupIdPattern.test(operationId ?? "")) throw new Error("操作标识无效");
+  return `set -eu
+umask 077
+base="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote"
+lock="$base/operation.lock"
+[ ! -L "$base" ] && [ ! -L "$lock" ] || exit 78
+mkdir -p "$base"
+if [ -d "$base/recovery.lock" ] && [ ! -L "$base/recovery.lock" ]; then
+  recovery_pid=$(cat "$base/recovery.lock/owner" 2>/dev/null || true)
+  case "$recovery_pid" in ''|0|*[!0-9]*) exit 75 ;; esac
+  if kill -0 "$recovery_pid" 2>/dev/null || [ -d "/proc/$recovery_pid" ]; then exit 75; fi
+  [ "$(cat "$base/recovery.lock/owner")" = "$recovery_pid" ] || exit 75
+  rm "$base/recovery.lock/owner"
+  rmdir "$base/recovery.lock" || exit 78
+fi
+mkdir "$base/recovery.lock" 2>/dev/null || exit 75
+trap 'rm -f "$base/recovery.lock/owner"; rmdir "$base/recovery.lock" 2>/dev/null || true' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 141' PIPE
+printf '%s' "$$" > "$base/recovery.lock/owner"
+if [ -e "$lock" ]; then
+  [ -d "$lock" ] || exit 78
+  if [ -e "$lock/owner" ] || [ -L "$lock/owner" ]; then
+    [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] || exit 78
+    owner=$(cat "$lock/owner")
+    owner_id=\${owner%%:*}
+    owner_pid=\${owner#*:}
+    [ "$owner_id" = '${operationId}' ] || exit 75
+    case "$owner_pid" in ''|0|*[!0-9]*) exit 78 ;; esac
+    # A reused PID also blocks recovery, conservatively leaving the lock intact.
+    if kill -0 "$owner_pid" 2>/dev/null || [ -d "/proc/$owner_pid" ]; then exit 75; fi
+    [ "$(cat "$lock/owner")" = "$owner" ] || exit 75
+    rm "$lock/owner"
+  fi
+  rmdir "$lock" || exit 78
+fi
+printf 'MIGPIE_RECOVERED_V1\\t%s\\n' '${operationId}'
+`;
+}
 
 export function actionScript(action, instance, operationId, release, selectedBackup) {
   if (["restore", "delete_backup"].includes(action) && (!backupIdPattern.test(selectedBackup?.id ?? "") || !/^[a-f0-9]{64}$/.test(selectedBackup?.fingerprint ?? ""))) throw new Error("备份标识或校验值无效");
@@ -103,12 +150,16 @@ step=preparing
 reason=command_failed
 backup_ready=false
 stage=''
+command_pid=''
 restore_stage=''
 restore_applied=false
 ${action === "restore" ? "restore_config_state=not_applied\nrestore_service_state=unchanged\nrestore_rollback_state=not_needed\n" : ""}finish() {
   code=$?
   trap - EXIT
+  trap '' HUP INT TERM PIPE
   set +e
+  # A lost SSH channel must not release the lock while a download still runs.
+  if [ -n "$command_pid" ]; then wait "$command_pid" 2>/dev/null; fi
   rm -f "$job/output"
   if [ -n "$stage" ]; then rm -f "$stage/magpie"; rmdir "$stage"; fi
 ${restoreCleanup}  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
@@ -120,11 +171,17 @@ ${restoreResult}  if [ -d "$job" ]; then
     printf '%s\\n' "$result" > "$job/result.tmp" && mv "$job/result.tmp" "$job/result"
     printf '%s' "$state" > "$job/state"
   fi
-  rmdir "$lock" 2>/dev/null || true
+  if [ "$(cat "$lock/owner" 2>/dev/null)" = '${operationId}:'"$$" ]; then rm -f "$lock/owner"; rmdir "$lock" 2>/dev/null || true; fi
   printf '%s\\n' "$result"
   exit "$code"
 }
 trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 141' PIPE
+printf '%s:%s' '${operationId}' "$$" > "$lock/owner"
+[ ! -e "$base/recovery.lock" ] || exit 75
 mkdir -p "$job"
 printf running > "$job/state"
 emit_progress() { printf 'MIGPIE_PROGRESS_V1\\t%s\\t%s\\t%s\\t%s\\n' '${operationId}' "$1" "$2" "$3"; }
@@ -156,7 +213,8 @@ run_step() {
     command_pid=$!
     while kill -0 "$command_pid" 2>/dev/null; do sample_download; sleep 1; done
     sample_download
-    if wait "$command_pid"; then rm -f "$job/output"; return 0; else code=$?; fi
+    if wait "$command_pid"; then command_pid=''; rm -f "$job/output"; return 0; else code=$?; fi
+    command_pid=''
     output=$(tail -c 16384 "$job/output")
     rm -f "$job/output"
   elif output=$("$@" 2>&1); then return 0; else code=$?; fi
