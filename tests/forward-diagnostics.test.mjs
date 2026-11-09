@@ -4,9 +4,13 @@ import { Socket, connect as connectTCP } from "node:net";
 import { SessionManager } from "../src/sessions.mjs";
 import { echoServer, exchange, sshServer, until } from "./helpers.mjs";
 
+const normalTimeoutMs = 2000;
+const blockedTargetTimeoutMs = 80;
+const normalReplyDelayMs = 120;
+
 test("a channel-open timeout is visible, recovers on the next request and ignores its late reply", async (t) => {
   const fixture = await sshServer(t), echo = await echoServer(t), independent = await echoServer(t);
-  const sessions = new SessionManager({ env: { MIGPIE_TEST_PASSWORD: "local-test-secret" }, forwardTimeoutMs: 80 });
+  const sessions = new SessionManager({ env: { MIGPIE_TEST_PASSWORD: "local-test-secret" }, forwardTimeoutMs: normalTimeoutMs });
   t.after(() => sessions.close());
   await sessions.connect(fixture.profile);
   let blocked = true, lateReject;
@@ -15,14 +19,19 @@ test("a channel-open timeout is visible, recovers on the next request and ignore
     client.removeListener("tcpip", original);
     client.on("tcpip", (accept, reject, info) => {
       if (blocked && info.destPort === echo.port) { lateReject = reject; return; }
-      original(accept, reject, info);
+      // A healthy reply may legitimately take longer than the deliberately
+      // short timeout used for the blocked request, especially on Linux CI.
+      setTimeout(() => original(accept, reject, info), normalReplyDelayMs);
     });
   }
   const forward = await sessions.addForward(fixture.profile.id, { id: "diagnosed", direction: "c2s", bindPort: 0, targetPort: echo.port });
   const other = await sessions.addForward(fixture.profile.id, { id: "independent", direction: "c2s", bindPort: 0, targetPort: independent.port });
   const view = () => sessions.status(fixture.profile.id).forwards.find((item) => item.id === forward.id);
   assert.equal(view().targetConnection.state, "unknown");
+  sessions.forwardTimeoutMs = blockedTargetTimeoutMs;
   await assert.rejects(exchange(forward.bindPort));
+  sessions.forwardTimeoutMs = normalTimeoutMs;
+  await until(() => lateReject, "The blocked SSH channel request did not arrive");
   const failed = view();
   assert.equal(failed.state, "listening");
   assert.equal(failed.targetConnection.state, "failed");
@@ -50,13 +59,23 @@ test("remote forwarding reports local target timeouts and recovery without resta
   const fixture = await sshServer(t), echo = await echoServer(t);
   let blocked = true;
   const sessions = new SessionManager({
-    env: { MIGPIE_TEST_PASSWORD: "local-test-secret" }, forwardTimeoutMs: 80,
+    env: { MIGPIE_TEST_PASSWORD: "local-test-secret" }, forwardTimeoutMs: normalTimeoutMs,
     connectTarget: (options) => blocked ? new Socket() : connectTCP(options),
   });
   t.after(() => sessions.close());
   await sessions.connect(fixture.profile);
+  for (const client of fixture.clients) {
+    const [original] = client.listeners("request");
+    client.removeListener("request", original);
+    client.on("request", (...args) => {
+      if (args[2] === "tcpip-forward") setTimeout(() => original(...args), normalReplyDelayMs);
+      else original(...args);
+    });
+  }
   const forward = await sessions.addForward(fixture.profile.id, { id: "remote", direction: "s2c", bindPort: 0, targetPort: echo.port });
+  sessions.forwardTimeoutMs = blockedTargetTimeoutMs;
   await assert.rejects(exchange(forward.bindPort));
+  sessions.forwardTimeoutMs = normalTimeoutMs;
   let snapshot = sessions.status(fixture.profile.id);
   assert.equal(snapshot.forwards[0].targetConnection.error.code, "FORWARD_TARGET_TIMEOUT");
   assert.equal(snapshot.forwards[0].state, "listening");

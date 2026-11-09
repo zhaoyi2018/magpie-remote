@@ -18,3 +18,10 @@ test("CI annotations escape workflow commands, remove ANSI codes and cap diagnos
   assert.ok(!annotation.includes("\x1b"));
   assert.ok(annotation.length < 8500);
 });
+
+test("CI annotations use Node spec failure details instead of the earlier progress line", () => {
+  const log = "✖ a channel-open timeout (500ms)\n" + "✔ later passing test\n".repeat(100) + "✖ failing tests:\n\ntest at tests/forward-diagnostics.test.mjs:7:1\n✖ a channel-open timeout\n  Error: TCP data truncated\n";
+  const annotation = failureAnnotation({ id: "node-tests", code: 1 }, log);
+  assert.ok(annotation.includes("Error: TCP data truncated"));
+  assert.ok(annotation.includes("tests/forward-diagnostics.test.mjs:7:1"));
+});
