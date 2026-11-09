@@ -36,7 +36,9 @@ Linux JSON 是受信任验收操作者提供的证据文件，并非签名证明
 
 ## CI 覆盖
 
-[verify.yml](../.github/workflows/verify.yml) 的 Node 矩阵为 Ubuntu、Windows × Node 22、24。每格安装精确 Bun **1.4.3**，执行无安装脚本的 `npm ci`，运行门禁的非 UI 部分，包括 Node 与 Bun 测试、单列 Node SSH 回归、生成脚本替身和包清单。Linux 单独一个 Node 24 job 安装锁定 Playwright 的 Chromium 并运行两项浏览器回归。日志/JSON 与截图分别上传为工作流 artifacts。
+[verify.yml](../.github/workflows/verify.yml) 的 Node 矩阵为 Ubuntu **24.04**、Windows × Node 22、24。Linux 固定镜像，避免 `ubuntu-latest` 自动迁移改变验收环境；checkout、setup-node 和 upload-artifact 使用运行于 Node 24 的 v7，测试矩阵仍保留 Node 22。每格安装精确 Bun **1.4.3**，临时下载失败最多尝试三次，持续失败仍阻断任务。随后执行无安装脚本的 `npm ci`，运行门禁的非 UI 部分，包括 Node 与 Bun 测试、单列 Node SSH 回归、生成脚本替身和包清单。Linux 单独一个 Node 24 job 安装锁定 Playwright 的 Chromium 并运行两项浏览器回归。
+
+日志/JSON 与截图只在文件实际生成后上传为工作流 artifacts；安装阶段失败时不再产生缺少报告的重复告警。门禁中的失败检查另外生成 GitHub 注释，包含检查名称、退出码和首个失败附近的诊断，完整内容仍保留在日志中；这不会将失败改成通过。
 
 CI 缺实际宿主与专用 Linux 会话时如实保留未验收项。矩阵结果和单独 UI job 可供审阅，当前脚本不会自动合并不同 job 的 JSON 为一份完整 strict 结果。GitHub 托管 runner 上的 Linux 替身回归也不会被标为真实生命周期验收。
 

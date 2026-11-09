@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { arch, release } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { failureAnnotation } from "./ci-annotations.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const options = {
@@ -178,6 +179,12 @@ try {
   report.gatePassed = !report.checks.some((check) => check.status === "failed") && (!options.strict || report.complete);
   report.status = report.complete ? "passed" : report.checks.some((check) => check.status === "failed") ? "failed" : "incomplete";
   await writeFile(output, JSON.stringify(report, null, 2) + "\n", { mode: 0o600 });
+  if (process.env.GITHUB_ACTIONS === "true") {
+    for (const check of report.checks.filter((entry) => entry.status === "failed")) {
+      const log = check.log ? await readFile(check.log, "utf8").catch(() => "") : "";
+      console.log(failureAnnotation(check, log));
+    }
+  }
   console.log(`Release checks: ${report.status}; gate ${report.gatePassed ? "passed" : "failed"}; report: ${output}`);
   process.exitCode = report.gatePassed ? 0 : 1;
 }
