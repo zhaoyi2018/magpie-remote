@@ -8,7 +8,7 @@
     "identityFile": "~/.ssh/id_ed25519",
     "forwards": [
       { "id": "server-web", "direction": "c2s", "bindPort": 18080, "targetPort": 8080 },
-      { "id": "local-magpie", "direction": "s2c", "bindPort": 13425, "targetPort": 3425 }
+      { "id": "local-magpie", "direction": "s2c", "bindPort": 13425, "targetHost": "192.168.1.20", "targetPort": 3425 }
     ]
   }
 }

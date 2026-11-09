@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
+import { networkInterfaces } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ProviderLink } from "../src/provider-link.mjs";
@@ -12,8 +16,11 @@ import { listen, sshServer, temporary, until } from "./helpers.mjs";
 
 const webKey = "fixture-web-sign-in-key-123456789";
 const json = (response, value, code = 200) => { response.writeHead(code, { "Content-Type": "application/json" }); response.end(JSON.stringify(value)); };
+const lanHost = Object.values(networkInterfaces()).flat().find((entry) => !entry.internal && entry.family === "IPv4" && /^(10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(entry.address))?.address;
+const fakeInterfaces = { Ethernet: [{ address: "192.168.10.2", internal: false, family: "IPv4" }] };
 
 async function fixture(t) {
+  assert.ok(lanHost, "The LAN integration fixture needs an assigned private IPv4 address");
   const directory = await temporary(t), ssh = await sshServer(t);
   const store = new ProfileStore(join(directory, "connections.json"));
   await store.save(ssh.profile);
@@ -21,8 +28,10 @@ async function fixture(t) {
   t.after(() => sessions.close());
   await sessions.connect(ssh.profile);
   const gatewayCalls = [], providers = [], writes = [];
+  const control = { loseSaveReply: false, running: true, busy: false, gatewayKey: randomBytes(24).toString("base64url") };
   const gateway = createServer((request, response) => {
-    gatewayCalls.push({ method: request.method, url: request.url, authorization: request.headers.authorization });
+    gatewayCalls.push({ method: request.method, url: request.url, authorization: request.headers.authorization, host: request.headers.host, peer: request.socket.remoteAddress });
+    if (request.headers.authorization !== "Bearer " + control.gatewayKey) return json(response, { error: "LAN gateway key required" }, 401);
     if (request.url === "/") return json(response, { name: "magpie", version: "0.1.3357" });
     if (request.url === "/v1/models") return json(response, { data: [{ id: "local/model-a", name: "本机模型 𠮷" }] });
     if (request.url === "/v1/chat/completions") {
@@ -32,9 +41,10 @@ async function fixture(t) {
     }
     json(response, { unexpected: true }, 404);
   });
-  const gatewayPort = await listen(gateway);
+  const gatewayPort = await listen(gateway, lanHost);
   t.after(() => { gateway.closeAllConnections(); return new Promise((resolve) => gateway.close(resolve)); });
-  const control = { loseSaveReply: false, running: true, busy: false };
+  await writeFile(join(directory, "settings.json"), JSON.stringify({ lan: true, port: gatewayPort, lanKeyId: "lan-default" }));
+  await writeFile(join(directory, "caller-keys.json"), JSON.stringify([{ id: "lan-default", lan: true, secret: control.gatewayKey }]));
   const admin = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     if (url.pathname === "/" && url.searchParams.get("k") === webKey) {
@@ -65,17 +75,73 @@ async function fixture(t) {
   const options = { store, sessions, remote, directory, env: { MAGPIE_ADDR: `127.0.0.1:${gatewayPort}` } };
   const link = new ProviderLink(options);
   t.after(() => link.close());
-  return { directory, store, sessions, ssh, profile: ssh.profile, providers, writes, gatewayCalls, gatewayPort, control, link, options };
+  return { directory, store, sessions, ssh, profile: ssh.profile, providers, writes, gatewayCalls, gatewayHost: lanHost, gatewayPort, control, link, options };
 }
 
-test("local gateway discovery follows the host's MAGPIE_ADDR, saved port and loopback defaults", async (t) => {
+test("gateway discovery uses LAN interfaces and the actual port instead of the host loopback address", async (t) => {
   const directory = await temporary(t);
-  assert.equal((await localGateway(directory, {})).port, 3425);
-  await writeFile(join(directory, "settings.json"), JSON.stringify({ port: 4567 }));
-  assert.equal((await localGateway(directory, {})).port, 4567);
-  assert.equal((await localGateway(directory, { MAGPIE_ADDR: "0.0.0.0:7654" })).url, "http://127.0.0.1:7654");
-  assert.equal((await localGateway(directory, { MAGPIE_ADDR: "[::1]:7654" })).host, "::1");
-  for (const address of ["http://remote.example:3425", "http://127.0.0.1:3425/api", "https://127.0.0.1:3425", "http://127.0.0.1:3425?key=bad"]) await assert.rejects(localGateway(directory, { MAGPIE_ADDR: address }), { code: "LOCAL_MAGPIE_CONFIG" });
+  const discover = (env = {}, interfaces = fakeInterfaces) => localGateway(directory, env, { interfaces });
+  await assert.rejects(discover(), { code: "LOCAL_MAGPIE_LAN_REQUIRED" });
+  await writeFile(join(directory, "settings.json"), JSON.stringify({ lan: true, lanKey: "legacy-sharing-key" }));
+  assert.equal((await discover()).url, "http://192.168.10.2:3425");
+  await writeFile(join(directory, "settings.json"), JSON.stringify({ lan: true, port: 4567, lanKey: "legacy-sharing-key" }));
+  assert.equal((await discover()).port, 4567);
+  for (const host of ["127.0.0.1", "localhost", "0.0.0.0", "[::1]", "[::]"]) assert.equal((await discover({ MAGPIE_ADDR: host + ":7654" })).url, "http://192.168.10.2:7654");
+  assert.equal((await discover({ MAGPIE_ADDR: "192.168.10.2:7654" })).host, "192.168.10.2");
+  assert.equal((await discover({ MAGPIE_PUBLIC_URL: "http://192.168.10.2:8765" })).port, 8765);
+  const ipv6 = { Ethernet: [{ address: "fd12::1", internal: false, family: "IPv6" }] };
+  assert.equal((await discover({ MAGPIE_ADDR: "[fd12::1]:7654" }, ipv6)).url, "http://[fd12::1]:7654");
+  for (const address of ["http://remote.example:3425", "http://127.0.0.1:3425/api", "https://127.0.0.1:3425", "http://127.0.0.1:3425?key=bad"]) await assert.rejects(discover({ MAGPIE_ADDR: address }), { code: "LOCAL_MAGPIE_CONFIG" });
+  await assert.rejects(discover({ MAGPIE_PUBLIC_URL: "http://127.0.0.1:3425" }), { code: "LOCAL_MAGPIE_CONFIG" });
+  await assert.rejects(discover({}, { Tun: [{ address: "198.18.0.1", internal: false, family: "IPv4" }] }), { code: "LOCAL_MAGPIE_LAN_REQUIRED" });
+});
+
+test("LAN discovery respects the named sharing key and never falls back to a disabled or revoked key", async (t) => {
+  const directory = await temporary(t), settings = { lan: true, lanKeyId: "default", lanKey: "stale-legacy-key" };
+  const discover = () => localGateway(directory, {}, { interfaces: fakeInterfaces });
+  await writeFile(join(directory, "settings.json"), JSON.stringify(settings));
+  await assert.rejects(discover(), { code: "LOCAL_MAGPIE_KEY" });
+  for (const caller of [{ id: "default", secret: "current-key", off: true }, { id: "other", secret: "other-key" }]) {
+    await writeFile(join(directory, "caller-keys.json"), JSON.stringify([caller]));
+    await assert.rejects(discover(), { code: "LOCAL_MAGPIE_KEY" });
+  }
+  await writeFile(join(directory, "caller-keys.json"), JSON.stringify([{ id: "default", secret: "current-key" }]));
+  assert.equal((await discover()).key, "current-key");
+  await writeFile(join(directory, "settings.json"), JSON.stringify({ ...settings, lan: false }));
+  await assert.rejects(discover(), { code: "LOCAL_MAGPIE_LAN_REQUIRED" });
+  await writeFile(join(directory, "caller-keys.json"), "[]");
+  await writeFile(join(directory, "settings.json"), JSON.stringify({ lan: true, lanKey: "sk-magpie-revoked-old-key" }));
+  await assert.rejects(discover(), { code: "LOCAL_MAGPIE_KEY" });
+});
+
+test("LAN probes, Web sign-in and model relays bypass a globally enabled environment proxy", async () => {
+  const moduleURL = new URL("../src/local-gateway.mjs", import.meta.url).href;
+  const script = `import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { magpieJSON, magpieSignIn, startProviderRelay } from ${JSON.stringify(moduleURL)};
+const upstream = createServer((request, response) => {
+  if (request.url.startsWith("/?k=")) { response.writeHead(303, { "Set-Cookie": "session=fixture-cookie", Location: "/" }); response.end(); return; }
+  if (request.headers.authorization !== "Bearer lan-fixture-key") { response.writeHead(401).end(); return; }
+  response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify({ name: "magpie", data: [{ id: "fixture-model" }] }));
+});
+await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+const url = "http://127.0.0.1:" + upstream.address().port;
+let relay;
+try {
+  assert.equal((await magpieJSON(url, { headers: { Authorization: "Bearer lan-fixture-key" } })).name, "magpie");
+  const signedIn = await magpieSignIn(url + "/?k=fixture");
+  assert.equal(signedIn.status, 303); assert.deepEqual(signedIn.cookies, ["session=fixture-cookie"]);
+  relay = await startProviderRelay(); relay.set("fixture", "relay-fixture-key", { url, key: "lan-fixture-key" });
+  const models = await magpieJSON("http://127.0.0.1:" + relay.port + "/fixture/v1/models", { headers: { Authorization: "Bearer relay-fixture-key" } });
+  assert.equal(models.data[0].id, "fixture-model");
+  console.log("direct LAN transport passed");
+} finally { await relay?.close(); upstream.closeAllConnections(); await new Promise((resolve) => upstream.close(resolve)); }
+`;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://127.0.0.1:1", HTTPS_PROXY: "http://127.0.0.1:1", http_proxy: "http://127.0.0.1:1", https_proxy: "http://127.0.0.1:1", NO_PROXY: "", no_proxy: "" },
+    timeout: 15000,
+  });
+  assert.equal(stdout.trim(), "direct LAN transport passed");
 });
 
 test("automatic integration adds one remote-magpie provider and serves models through a real reverse SSH tunnel", async (t) => {
@@ -89,16 +155,19 @@ test("automatic integration adds one remote-magpie provider and serves models th
   assert.equal(saved.chat, state.endpoint + "/v1");
   const forward = h.sessions.status(id).forwards.find((item) => item.id === "magpie-local-provider");
   assert.equal(forward.direction, "s2c"); assert.equal(forward.bindHost, "127.0.0.1");
+  assert.equal(state.gatewayAddress, `http://${h.gatewayHost}:${h.gatewayPort}`);
   const response = await fetch(saved.chat + "/models", { headers: { "x-api-key": saved.key } });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).data[0].name, "本机模型 𠮷");
   const stream = await fetch(saved.chat + "/chat/completions", { method: "POST", headers: { Authorization: "Bearer " + saved.key, "Content-Type": "application/json" }, body: JSON.stringify({ model: "local/model-a", stream: true }) });
   assert.match(await stream.text(), /data: fixture-stream[\s\S]*\[DONE\]/);
-  assert.equal(h.gatewayCalls.at(-1).authorization, "Bearer magpie");
+  assert.equal(h.gatewayCalls.at(-1).authorization, "Bearer " + h.control.gatewayKey);
+  assert.equal(h.gatewayCalls.at(-1).host, h.gatewayHost + ":" + h.gatewayPort);
+  assert.equal(h.gatewayCalls.at(-1).peer, h.gatewayHost);
   assert.equal((await h.link.sync(id)).state, "ready");
   assert.equal(h.writes.length, 1, "Repeated detection must not add duplicate providers");
   const publicData = JSON.stringify([h.link.status(id), h.sessions.status(id).logs, JSON.parse(await readFile(h.link.file, "utf8"))]);
-  for (const secret of [saved.key, webKey]) assert.ok(!publicData.includes(secret));
+  for (const secret of [saved.key, webKey, h.control.gatewayKey]) assert.ok(!publicData.includes(secret));
 });
 
 test("the automatic tunnel refuses missing credentials and local administration routes", async (t) => {
@@ -138,12 +207,53 @@ test("a lost save reply is reconciled by reading providers before any retry", as
 
 test("manual reverse forwarding and an existing local supplier are reused without creating a second supplier", async (t) => {
   const h = await fixture(t);
-  const forward = await h.sessions.addForward(h.profile.id, { id: "manual-local", direction: "s2c", bindHost: "127.0.0.1", bindPort: 0, targetHost: "127.0.0.1", targetPort: h.gatewayPort });
+  const forward = await h.sessions.addForward(h.profile.id, { id: "manual-local", direction: "s2c", bindHost: "127.0.0.1", bindPort: 0, targetHost: h.gatewayHost, targetPort: h.gatewayPort });
   h.providers.push({ id: "my-local", preset: "remote-magpie", chat: `http://127.0.0.1:${forward.bindPort}/v1` });
   const state = await h.link.sync(h.profile.id);
   assert.equal(state.state, "ready"); assert.equal(state.providerId, "my-local");
   assert.equal(h.writes.length, 0);
   assert.equal(h.sessions.status(h.profile.id).forwards.length, 1);
+});
+
+test("an old localhost gateway forward is not reused as a LAN gateway", async (t) => {
+  const h = await fixture(t);
+  const legacy = await h.sessions.addForward(h.profile.id, { id: "legacy-loopback", direction: "s2c", bindPort: 0, targetHost: "127.0.0.1", targetPort: h.gatewayPort });
+  h.providers.push({ id: "old-localhost", preset: "remote-magpie", chat: `http://127.0.0.1:${legacy.bindPort}/v1` });
+  const state = await h.link.sync(h.profile.id);
+  assert.equal(state.state, "ready", JSON.stringify(state));
+  assert.notEqual(state.providerId, "old-localhost");
+  assert.equal(state.gatewayAddress, `http://${h.gatewayHost}:${h.gatewayPort}`);
+  assert.equal(h.writes.length, 1);
+  assert.ok(h.sessions.status(h.profile.id).forwards.some((forward) => forward.id === legacy.id));
+});
+
+test("sharing key rotation updates the LAN relay without changing the remote supplier or its port", async (t) => {
+  const h = await fixture(t), id = h.profile.id;
+  const first = await h.link.sync(id), remoteKey = h.writes[0].key;
+  h.control.gatewayKey = randomBytes(24).toString("base64url");
+  await writeFile(join(h.directory, "caller-keys.json"), JSON.stringify([{ id: "lan-default", lan: true, secret: h.control.gatewayKey }]));
+  const next = await h.link.sync(id);
+  assert.equal(next.state, "ready", JSON.stringify(next));
+  assert.equal(next.endpoint, first.endpoint);
+  assert.equal(h.writes.length, 1);
+  const response = await fetch(next.endpoint + "/v1/models", { headers: { Authorization: "Bearer " + remoteKey } });
+  assert.equal(response.status, 200);
+  assert.equal(h.gatewayCalls.at(-1).authorization, "Bearer " + h.control.gatewayKey);
+  assert.ok(!JSON.stringify(h.link.status(id)).includes(h.control.gatewayKey));
+});
+
+test("turning LAN sharing off disables the old relay instead of falling back to localhost", async (t) => {
+  const h = await fixture(t), id = h.profile.id;
+  const first = await h.link.sync(id), remoteKey = h.writes[0].key;
+  await writeFile(join(h.directory, "settings.json"), JSON.stringify({ lan: false, port: h.gatewayPort, lanKeyId: "lan-default" }));
+  const callsBefore = h.gatewayCalls.length;
+  const next = await h.link.sync(id);
+  assert.equal(next.state, "error");
+  assert.match(next.message, /局域网共享/);
+  const response = await fetch(first.endpoint + "/v1/models", { headers: { Authorization: "Bearer " + remoteKey } });
+  assert.equal(response.status, 401);
+  assert.equal(h.gatewayCalls.length, callsBefore);
+  assert.equal(h.writes.length, 1);
 });
 
 test("lifecycle operations, stopped services and disabled automation never write providers", async (t) => {

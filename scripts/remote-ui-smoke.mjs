@@ -155,7 +155,7 @@ try {
   } });
   cleanup.unshift(() => remote.close());
   const providerLink = {
-    status(id) { return fixture.state.webEnabled ? { state: "ready", message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture", endpoint: "http://127.0.0.1:23425/" + id } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
+    status(id) { return fixture.state.webEnabled ? { state: "ready", message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture", endpoint: "http://127.0.0.1:23425/" + id, gatewayAddress: "http://192.168.10.2:4567" } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
     async sync(id) { return this.status(id); },
   };
   const tools = createTools(store, sessions, remote, providerLink);
@@ -400,6 +400,7 @@ try {
   await waitOperation("已完成"); await waitEnabled("remote-open-web");
   console.log("Remote UI: legacy 0.1.1327 can enable its first service; platform, container, systemd, service and TLS checks passed.");
   await field("remote-local-provider-state").filter({ hasText: "本机 Magpie 已对接 · remote-alpha" }).waitFor();
+  assert.match(await field("remote-local-provider-address").textContent(), /局域网网关 http:\/\/192\.168\.10\.2:4567/);
   const heldProvider = gateTool("remote_provider_sync");
   await field("remote-local-provider-sync").click(); await heldProvider.entered;
   await selectedRow("测试服务器").click(); await openRemote(); heldProvider.release();

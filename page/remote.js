@@ -239,7 +239,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     const linked = status?.localProvider;
     text("remote-local-provider-state", providerSyncing ? "正在检测并对接本机 Magpie…" : row?.connection.autoLinkLocalMagpie === false ? "已关闭自动对接，可在连接设置中开启" : !sshReady() ? "SSH 未连接，本机 Magpie 对接通道已停止" : linked?.message || "SSH 连接后自动检测并对接");
     $("remote-local-provider-state").classList.toggle("is-warning", linked?.state === "error");
-    text("remote-local-provider-address", linked?.endpoint ? "远端供应商 " + linked.providerId + " · " + linked.endpoint : "");
+    text("remote-local-provider-address", linked?.endpoint ? (linked.gatewayAddress ? "局域网网关 " + linked.gatewayAddress + " → " : "") + "远端供应商 " + linked.providerId + " · " + linked.endpoint : "");
     $("remote-local-provider-address").hidden = !linked?.endpoint;
     $("remote-local-provider-sync").disabled = !sshReady() || !linked || row?.connection.autoLinkLocalMagpie === false || providerSyncing || running() || uncertain() || submitting;
     drawBackups(); drawTaskSummary(); drawHistory(); syncPreview();

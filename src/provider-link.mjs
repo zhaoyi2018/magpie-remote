@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { OperationError } from "./errors.mjs";
 import { loadRecoveryKey } from "./web-server.mjs";
-import { localGateway, magpieJSON, startProviderRelay } from "./local-gateway.mjs";
+import { localGateway, magpieJSON, magpieSignIn, startProviderRelay } from "./local-gateway.mjs";
 
 const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const forwardId = "magpie-local-provider";
@@ -112,14 +112,22 @@ export class ProviderLink {
       const instance = await this.remote.inspect(id, { signal: abort });
       if (instance.locked) return this.#state(id, "waiting", "等待远端管理操作结束后自动对接本机 Magpie");
       if (!instance.installed || !instance.web.enabled || instance.web.tls || instance.service.state !== "running") return this.#state(id, "waiting", "等待远端 Magpie 的回环 HTTP 管理服务就绪；请先启用 Web");
-      const local = await localGateway(this.directory, this.env);
-      const info = await magpieJSON(local.url + "/", { signal: abort });
-      if (info?.name !== "magpie" || typeof info.version !== "string") throw new OperationError("LOCAL_MAGPIE_UNAVAILABLE", "检测地址未返回本机 Magpie 网关信息");
+      const discovered = await localGateway(this.directory, this.env);
+      let local;
+      for (const address of [discovered.url, ...discovered.alternatives]) {
+        if (abort.aborted) break;
+        try {
+          const info = await magpieJSON(address + "/", { signal: abort, timeoutMs: 3000, headers: { Authorization: "Bearer " + discovered.key, "x-api-key": discovered.key } });
+          if (info?.name !== "magpie" || typeof info.version !== "string") continue;
+          const url = new URL(address);
+          local = { ...discovered, url: address, host: url.hostname.replace(/^\[|\]$/g, ""), port: Number(url.port) || 80 };
+          break;
+        } catch { /* Try the next assigned LAN interface, never loopback. */ }
+      }
+      if (!local) throw new OperationError("LOCAL_MAGPIE_UNAVAILABLE", "无法通过局域网地址与共享网关密钥访问本机 Magpie，请检查局域网共享、网关端口及密钥；不会改用 localhost");
       const web = await this.remote.web(id);
-      const signIn = await fetch(web.url, { signal: AbortSignal.any([abort, AbortSignal.timeout(15000)]), redirect: "manual" });
-      await signIn.body?.cancel();
-      const cookies = signIn.headers.getSetCookie?.() ?? [signIn.headers.get("set-cookie") ?? ""];
-      const cookie = cookies.map((value) => value.split(";")[0]).find((value) => /^[A-Za-z0-9_-]{1,128}=[A-Za-z0-9._~-]{16,256}$/.test(value));
+      const signIn = await magpieSignIn(web.url, { signal: abort });
+      const cookie = signIn.cookies.map((value) => value.split(";")[0]).find((value) => /^[A-Za-z0-9_-]{1,128}=[A-Za-z0-9._~-]{16,256}$/.test(value));
       if (signIn.status !== 303 || !cookie) throw new OperationError("PROVIDER_LINK_AUTH", "无法通过 SSH 登录远端 Magpie 管理接口，请检查服务版本后重试");
       const api = (path, body) => magpieJSON(new URL(path, web.address), { signal: abort, headers: { Cookie: cookie }, ...(body && { method: "POST", body }) });
       const providers = (await api("/api/providers"))?.providers;
@@ -128,9 +136,9 @@ export class ProviderLink {
       // without inferring identity from a provider's display name or a LAN IP.
       const forwards = this.sessions.status(id).forwards;
       for (const forward of forwards) {
-        if (forward.direction !== "s2c" || forward.state !== "listening" || forward.bindHost !== "127.0.0.1" || ![local.host, "localhost", "127.0.0.1", "::1"].includes(forward.targetHost) || forward.targetPort !== local.port) continue;
+        if (forward.direction !== "s2c" || forward.state !== "listening" || forward.bindHost !== "127.0.0.1" || forward.targetHost !== local.host || forward.targetPort !== local.port) continue;
         const existing = providers.find((item) => item.preset === "remote-magpie" && rootOf(item) === "http://127.0.0.1:" + forward.bindPort);
-        if (existing) return this.#state(id, existing.off ? "disabled" : "ready", existing.off ? "远端已存在本机 Magpie 供应商，但已停用；保留当前设置" : "远端已配置本机 Magpie，已复用现有反向转发", { providerId: existing.id, forwardId: forward.id, endpoint: rootOf(existing), localAddress: local.url });
+        if (existing) return this.#state(id, existing.off ? "disabled" : "ready", existing.off ? "远端已存在本机 Magpie 供应商，但已停用；保留当前设置" : "远端已配置本机 Magpie 的局域网网关，已复用现有反向转发", { providerId: existing.id, forwardId: forward.id, endpoint: rootOf(existing), localAddress: local.url, gatewayAddress: local.url });
       }
       const providerId = "local-magpie-" + this.#identity;
       const token = createHmac("sha256", this.#secret).update("provider-relay:" + providerId).digest("base64url");
@@ -167,12 +175,13 @@ export class ProviderLink {
         const currentProfile = await this.store.get(id);
         if (this.sessions.status(id).state !== "connected" || digest([currentProfile.id, currentProfile.host, currentProfile.port, currentProfile.username]) !== binding) throw new OperationError("PROVIDER_LINK_CONFLICT", "连接配置已变化，本次未写入远端供应商，请重新检测");
         await this.remote.assertIdle(id);
-        await api("/api/provider/save", { id: providerId, name: "本机 Magpie（SSH）", preset: "remote-magpie", chat: endpoint + "/v1", responses: endpoint + "/v1", anthropic: endpoint, key: token, proxy: "direct", new: false });
+        await api("/api/provider/save", { id: providerId, name: "局域网 Magpie（SSH）", preset: "remote-magpie", chat: endpoint + "/v1", responses: endpoint + "/v1", anthropic: endpoint, key: token, proxy: "direct", new: false });
         const verified = (await api("/api/providers"))?.providers;
         if (!Array.isArray(verified) || !verified.some((item) => item.id === providerId && item.preset === "remote-magpie" && rootOf(item) === endpoint)) throw new OperationError("PROVIDER_LINK_API", "尚未确认远端已保存本机 Magpie 供应商，将在下次检测时核实");
       }
-      return this.#state(id, "ready", existing ? "本机 Magpie 已对接，SSH 反向通道正常" : "已将本机 Magpie 加入远端供应商，并建立 SSH 反向通道", { providerId, forwardId, endpoint, localAddress: local.url });
+      return this.#state(id, "ready", existing ? "本机 Magpie 局域网网关已对接，SSH 反向通道正常" : "已将本机 Magpie 的局域网网关加入远端供应商，并建立 SSH 反向通道", { providerId, forwardId, endpoint, localAddress: local.url, gatewayAddress: local.url });
     } catch (error) {
+      if (error.code?.startsWith("LOCAL_MAGPIE_")) this.#relay?.remove("local-magpie-" + this.#identity);
       if (this.#closed) return this.status(id);
       if (error.code === "REMOTE_BUSY") return this.#state(id, "waiting", "等待远端任务结束后自动对接本机 Magpie");
       const message = error instanceof OperationError ? error.message : "自动对接暂未完成，请检查本机网关、远端 Web 服务和 SSH 转发权限；稍后自动重试";

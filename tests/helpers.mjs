@@ -27,8 +27,8 @@ export async function temporary(t) {
   return directory;
 }
 
-export async function listen(server) {
-  server.listen(0, "127.0.0.1");
+export async function listen(server, host = "127.0.0.1") {
+  server.listen(0, host);
   await once(server, "listening");
   return server.address().port;
 }

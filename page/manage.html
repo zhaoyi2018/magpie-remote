@@ -81,7 +81,7 @@
             <div class="remote-layout">
               <div class="remote-controls">
                 <section class="remote-command-section" aria-labelledby="remote-local-provider-title">
-                  <div class="remote-command-copy"><h4 id="remote-local-provider-title">本机 Magpie 对接</h4><p>自动把本机 Magpie 加入远端供应商，通过 SSH 反向通道访问，无需处于同一局域网。远端需先启用 Web 管理服务。</p></div>
+                  <div class="remote-command-copy"><h4 id="remote-local-provider-title">局域网网关对接</h4><p>自动将本机 Magpie 的局域网共享网关加入远端供应商，通过 SSH 反向通道访问。本机需开启局域网共享，远端需启用 Web 管理服务。</p></div>
                   <p id="remote-local-provider-state" class="remote-secondary" role="status">SSH 连接后自动检测并对接</p>
                   <p id="remote-local-provider-address" class="remote-secondary remote-path" hidden></p>
                   <div class="remote-actions"><button id="remote-local-provider-sync" class="button" type="button" disabled>重新检测对接</button></div>
@@ -184,7 +184,7 @@
         <label class="check-label"><input id="profile-continue-forwards" type="checkbox">个别预设启动失败时保留连接，继续启动其他预设</label>
         <label class="check-label"><input id="profile-auto-connect" type="checkbox">应用启动时尝试重新连接</label>
         <label class="check-label"><input id="profile-auto-reconnect" type="checkbox">网络中断后自动重连</label>
-        <label class="check-label"><input id="profile-auto-local-magpie" type="checkbox" checked>自动将本机 Magpie 对接到远端供应商</label>
+        <label class="check-label"><input id="profile-auto-local-magpie" type="checkbox" checked>自动将本机 Magpie 的局域网网关对接到远端供应商</label>
         <p class="profile-storage-note">仅网络故障会重试；手动断开后停止。已保存的密码可用于自动重连，临时凭据需要重新填写。</p>
         <p class="profile-storage-note">仅保存配置与转发预设；当前 SSH 会话不写入磁盘。</p>
       </section>
