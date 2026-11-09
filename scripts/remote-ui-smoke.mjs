@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
 import { ProfileStore } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { RemoteManager } from "../src/remote.mjs";
+import { OperationError } from "../src/errors.mjs";
 import { probeScript } from "../src/remote-scripts.mjs";
 import { backupInventoryScript } from "../src/remote-backups.mjs";
 import { createTools } from "../src/plugin.mjs";
@@ -28,6 +29,7 @@ async function remoteFixture(context) {
     platform: "Linux", architecture: "x86_64", container: false,
     installed: false, systemd: true, serviceInstalled: false,
     serviceActive: "inactive", webEnabled: false, webTLS: false,
+    serviceScope: "loopback", serviceRebuildSafe: true,
     version: "0.1.1327", locked: false, recoveryBusy: false, reconcile: "", nextUnknown: false, nextFailure: null, backups: [],
     capabilities: "update backup restore healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
   };
@@ -53,6 +55,8 @@ async function remoteFixture(context) {
         channel.on("data", (chunk) => { input += chunk.toString(); });
         channel.on("end", () => { void (async () => {
           const finish = (stdout, code = 0) => { channel.write(stdout); channel.exit(code); channel.end(); };
+          const listenerReply = fixture.listenerReply(command);
+          if (listenerReply !== undefined) { finish(listenerReply); return; }
           if (command === "sh -s" && input === probeScript) {
             executions.push({ kind: "probe" }); finish(probe()); return;
           }
@@ -73,12 +77,12 @@ async function remoteFixture(context) {
           if (command.endsWith(" daemon web")) {
             executions.push({ kind: "web" }); finish("http://127.0.0.1:3430/?k=fixture-management-key-1234567890\n"); return;
           }
-          const script = command === "sh -s" ? input : command;
+          const script = command.startsWith("sh -c '") ? command.slice(7, -1).replaceAll("'\\''", "'") : command === "sh -s" ? input : command;
           let action;
-          if (script.includes("download.XXXXXXXX")) action = "install";
+          if (script.includes("upload.XXXXXXXX") && !script.includes("tar -czf")) action = "install";
           else if (script.includes("set_step deleting_backup")) action = "delete_backup";
           else if (script.includes("run_step restoring")) action = "restore";
-          else if (script.includes('"$bin" update')) action = "update";
+          else if (script.includes("upload.XXXXXXXX") && script.includes("tar -czf")) action = "update";
           else if (script.includes("config.magpie") || script.includes("config.tar.gz")) action = "backup";
           else if (script.includes("daemon install --web")) action = "enable_web";
           else if (script.includes("daemon restart")) action = "restart";
@@ -143,9 +147,18 @@ try {
   const store = new ProfileStore(join(directory, "connections.json"));
   const sessions = new SessionManager({ env: { MIGPIE_TEST_PASSWORD: "local-test-secret" } });
   cleanup.unshift(() => sessions.close());
-  const remote = new RemoteManager({ store, sessions, release: async () => ({ version: releasedVersion, sha256: "a".repeat(64), url: "https://github.com/yetone/magpie-releases/releases/download/test/magpie-cli-linux-amd64" }) });
+  const releasePath = join(directory, "release.bin");
+  await writeFile(releasePath, Buffer.alloc(4194304, 123));
+  const remote = new RemoteManager({ store, sessions, release: async () => ({ version: releasedVersion, sha256: "a".repeat(64), url: "https://github.com/yetone/magpie-releases/releases/download/test/magpie-cli-linux-amd64" }), download: async (_asset, { onProgress }) => {
+    onProgress?.(4194304, 4194304);
+    return { path: releasePath, size: 4194304, cleanup: async () => {} };
+  } });
   cleanup.unshift(() => remote.close());
-  const tools = createTools(store, sessions, remote);
+  const providerLink = {
+    status(id) { return fixture.state.webEnabled ? { state: "ready", message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture", endpoint: "http://127.0.0.1:23425/" + id } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
+    async sync(id) { return this.status(id); },
+  };
+  const tools = createTools(store, sessions, remote, providerLink);
   for (const [id, name] of [["remote-alpha", "生产服务器"], ["remote-beta", "测试服务器"]]) {
     await tools.save_connection.execute({ connection: { ...fixture.profile, id, name } });
     await tools.connect.execute({ connectionId: id });
@@ -198,11 +211,26 @@ try {
   assert.equal(count("remote_status"), 0);
   await openRemote(); assert.equal(await field("remote-action-install").isDisabled(), true);
   await detect(); await waitEnabled("remote-action-install");
+  await field("remote-local-provider-state").filter({ hasText: "等待远端启用 Web" }).waitFor();
+  await waitEnabled("remote-local-provider-sync");
+  const providerChecks = count("remote_provider_sync");
+  await field("remote-local-provider-sync").click();
+  await until(() => count("remote_provider_sync") === providerChecks + 1);
+  await waitEnabled("remote-local-provider-sync");
   assert.equal(await field("connection-overview").evaluate((node) => node.open), false);
   assert.equal(await field("remote-program-details").evaluate((node) => node.open), true, "Missing installations must expose the next step");
   for (const id of ["remote-environment-details", "remote-backups", "remote-maintenance-details"]) assert.equal(await field(id).evaluate((node) => node.open), false);
   assert.equal(await field("remote-task-summary").isVisible(), false, "Idle task explanation should not compete with actions");
   assert.equal(await field("remote-action-update").isDisabled(), true);
+  const release = remote.release;
+  remote.release = async () => { throw new OperationError("REMOTE_RELEASE_INVALID", "官方版本清单结构不受支持，未执行安装"); };
+  await field("remote-action-install").click();
+  await field("remote-preview-error").filter({ hasText: "官方版本清单结构不受支持" }).waitFor();
+  assert.equal(await field("remote-preview-summary").textContent(), "未能读取变更预览，请关闭后重试。");
+  assert.equal(await field("remote-apply").isDisabled(), true);
+  assert.equal(await field("remote-preview").getAttribute("aria-busy"), "false");
+  assert.equal(fixture.executions.filter((item) => item.kind === "action").length, 0);
+  await closePreview(); remote.release = release;
   await preview("install");
   const installGate = fixture.holdAction(); releases.push(installGate.resolve);
   const applyBefore = count("remote_apply");
@@ -227,6 +255,9 @@ try {
   await page.reload(); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor(); await openRemote();
   await waitOperation("已下载 2 MB / 4 MB（50%）");
   assert.equal(await field("remote-operation").count(), 0);
+  await installGate.progress("uploading", 4194304, 4194304);
+  await waitOperation("已上传 4 MB / 4 MB（100%）");
+  assert.match(await field("remote-task-state").textContent(), /上传程序到服务器/);
   installGate.resolve(); await waitOperation("已完成");
   assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"));
   await field("remote-install-state").filter({ hasText: "已安装" }).waitFor();
@@ -270,7 +301,7 @@ try {
   assert.ok(!(await field("remote-task-state").textContent()).includes("已下载"));
   await until(() => fixture.executions.some((item) => item.action === "update"));
   const updateExecution = fixture.executions.find((item) => item.action === "update");
-  assert.equal(updateExecution.command, "sh -s");
+  assert.ok(updateExecution.command.startsWith("sh -c '"));
   assert.ok(updateExecution.script.includes("tar -czf"));
   assert.ok(!updateExecution.script.includes('"$bin" backup'));
   assert.ok(requests.filter((item) => item.method === "remote_apply").every((item) => !Object.hasOwn(item, "credentials")));
@@ -368,6 +399,15 @@ try {
   await preview("enable_web"); await field("remote-apply").click();
   await waitOperation("已完成"); await waitEnabled("remote-open-web");
   console.log("Remote UI: legacy 0.1.1327 can enable its first service; platform, container, systemd, service and TLS checks passed.");
+  await field("remote-local-provider-state").filter({ hasText: "本机 Magpie 已对接 · remote-alpha" }).waitFor();
+  const heldProvider = gateTool("remote_provider_sync");
+  await field("remote-local-provider-sync").click(); await heldProvider.entered;
+  await selectedRow("测试服务器").click(); await openRemote(); heldProvider.release();
+  await field("remote-local-provider-address").filter({ hasText: "remote-beta" }).waitFor();
+  assert.ok(!(await field("remote-local-provider-address").textContent()).includes("remote-alpha"), "Late provider integration responses must stay with their connection");
+  await selectedRow("生产服务器").click(); await openRemote();
+  await field("remote-local-provider-address").filter({ hasText: "remote-alpha" }).waitFor();
+  console.log("Remote UI: automatic local-provider status, explicit retry and late connection response isolation passed.");
 
   const capabilities = fixture.state.capabilities;
   fixture.state.capabilities = capabilities.replace("backup ", ""); await detect();
@@ -380,8 +420,7 @@ try {
   await waitOperation("已完成");
   await until(() => fixture.executions.filter((item) => item.action === "update").at(-1)?.script.includes("config.tar.gz"), "Archive update was not dispatched");
   fixture.state.capabilities = capabilities.replace("update ", ""); await detect();
-  assert.equal(await field("remote-action-update").isDisabled(), true);
-  assert.match(await field("remote-update-detail").textContent(), /magpie update/);
+  assert.equal(await field("remote-action-update").isDisabled(), false, "Uploading an update must not require the native online updater");
   assert.equal(await field("remote-action-stop").isEnabled(), true);
   fixture.state.capabilities = capabilities; await detect();
   console.log("Remote UI: legacy archive backup preview, no passphrase submission and action-specific capability reasons passed.");

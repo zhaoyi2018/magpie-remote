@@ -10,13 +10,14 @@ import { echoServer, exchange, keys, sshServer, startPagePlugin, temporary, unti
 
 test("connection authentication and behavior settings survive reload and reject invalid values", async (t) => {
   const store = new ProfileStore(join(await temporary(t), "connections.json"));
-  const profile = { id: "configured", host: "host.example", username: "dev", authMethod: "agent", autoStartForwards: false, autoConnect: true };
+  const profile = { id: "configured", host: "host.example", username: "dev", authMethod: "agent", autoStartForwards: false, autoConnect: true, autoLinkLocalMagpie: false };
   await store.save(profile);
   const reloaded = await new ProfileStore(store.file).get(profile.id);
   assert.equal(reloaded.authMethod, "agent");
   assert.equal(reloaded.autoStartForwards, false);
   assert.equal(reloaded.autoConnect, true);
-  for (const field of ["autoStartForwards", "autoConnect"]) {
+  assert.equal(reloaded.autoLinkLocalMagpie, false);
+  for (const field of ["autoStartForwards", "autoConnect", "autoLinkLocalMagpie"]) {
     assert.throws(() => validateProfile({ ...profile, [field]: "false" }), /布尔值/);
   }
   assert.throws(() => validateProfile({ ...profile, authMethod: "unknown" }), /authMethod/);

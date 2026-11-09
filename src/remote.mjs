@@ -1,19 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { identifier } from "./config.mjs";
 import { OperationError, errorDetails } from "./errors.mjs";
 import { profileRevision } from "./store.mjs";
-import { actionScript, backupActions, probeScript, recoveryScript, remoteActions, webLinkCommand } from "./remote-scripts.mjs";
+import { actionScript, backupActions, probeScript, recoveryScript, remoteActions, scriptCommand, webLinkCommand } from "./remote-scripts.mjs";
+import { downloadRelease } from "./release-download.mjs";
 import { backupIdPattern, backupInventoryScript, parseBackups } from "./remote-backups.mjs";
 import { operationHistoryLimit, operationSummary, parseRestoreResult, restoreResultMessage, terminalOperation } from "./remote-results.mjs";
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const copy = (value) => value === undefined ? undefined : structuredClone(value);
 const labels = { install: "安装 Magpie", update: "更新 Magpie", start: "启动服务", stop: "停止服务", restart: "重启服务", enable_web: "启用管理页面", backup: "创建备份", restore: "恢复配置", delete_backup: "删除备份", uninstall: "卸载 Magpie" };
-const uncertain = new Set(["REMOTE_TIMEOUT", "REMOTE_DISCONNECTED", "REMOTE_CANCELLED", "REMOTE_RESULT_UNKNOWN", "REMOTE_OUTPUT_LIMIT"]);
-const steps = { preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "下载程序", installing: "安装程序", updating: "执行官方更新", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", restoring: "恢复配置", deleting_backup: "删除备份", healthcheck: "检查服务健康状态", completed: "执行完成" };
+const uncertain = new Set(["REMOTE_TIMEOUT", "REMOTE_DISCONNECTED", "REMOTE_CANCELLED", "REMOTE_RESULT_UNKNOWN", "REMOTE_OUTPUT_LIMIT", "REMOTE_INPUT_FAILED"]);
+const steps = { preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "本机下载程序", uploading: "上传程序到服务器", checking_upload: "检查上传程序", installing: "安装程序", updating: "执行官方更新", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", restoring: "恢复配置", deleting_backup: "删除备份", healthcheck: "检查服务健康状态", completed: "执行完成" };
 const reasons = {
   command_failed: "请在服务器核对该步骤的命令及运行环境。",
   permission: "远端报告权限不足或文件系统只读，请检查程序和配置目录的写入权限。",
@@ -21,6 +23,7 @@ const reasons = {
   network: "远端报告网络、代理或证书错误，请检查服务器到官方发布源和下载地址的连接。",
   interactive: "远端命令要求口令或交互终端，请核对该版本的非交互命令支持。",
   unsupported: "远端报告命令或参数不受支持，请核对当前版本的命令用法。",
+  loopback_required: "无法确认网关与 Web 均仅监听服务器回环地址，已拒绝启动；请先启用 Web 重建回环服务，并检查 systemd 覆盖配置和实际监听。",
   none: "",
 };
 
@@ -38,7 +41,7 @@ function actionFailure(action, exitCode, result) {
   const step = result && steps[result.step];
   let message = (step ? step + "失败" : "远端操作未成功结束") + "（退出码 " + exitCode + "）。";
   message += result ? reasons[result.reason] : "此任务未返回具体失败阶段，请检测实际版本和服务状态。";
-  if (action === "update" && ["preparing", "verifying", "preparing_backup", "backing_up", "saving_binary"].includes(result?.step)) message += "本次尚未执行更新。";
+  if (action === "update" && ["preparing", "verifying", "uploading", "checking_upload", "preparing_backup", "backing_up", "saving_binary"].includes(result?.step)) message += "本次尚未执行更新。";
   if (action === "update" && ["restarting", "checking_version", "healthcheck"].includes(result?.step)) message += "更新命令已完成，请检查当前程序版本和服务状态，避免重复更新。";
   return new OperationError("REMOTE_ACTION_FAILED", message);
 }
@@ -67,7 +70,7 @@ export function parseProbe(stdout) {
     home: fields.home, container: fields.container === "true", binary: fields.binary ?? "", managedBinary: fields.managedBinary,
     version: fields.version ?? "", binaryHash: fields.binaryHash ?? "", configDirectory: fields.configDirectory, unit: fields.unit,
     unitHash: fields.unitHash ?? "", installed: fields.installed === "true", systemd: fields.systemd === "true",
-    service: { installed: fields.serviceInstalled === "true", state: fields.systemd !== "true" ? "unavailable" : fields.serviceActive === "active" ? "running" : ["inactive", "failed", ""].includes(fields.serviceActive ?? "") ? "stopped" : "unknown" },
+    service: { installed: fields.serviceInstalled === "true", state: fields.systemd !== "true" ? "unavailable" : fields.serviceActive === "active" ? "running" : ["inactive", "failed", ""].includes(fields.serviceActive ?? "") ? "stopped" : "unknown", scope: fields.systemd === "true" && fields.serviceScope === "loopback" ? "loopback" : "unknown", rebuildSafe: fields.systemd === "true" && fields.serviceRebuildSafe === "true" },
     web: { enabled: fields.webEnabled === "true", port: Number(fields.webPort) || 3430, tls: fields.webTLS === "true" },
     linger: fields.linger === "yes", locked: fields.locked === "true", tools: (fields.tools ?? "").trim().split(/\s+/).filter(Boolean),
     capabilities: (fields.capabilities ?? "").trim().split(/\s+/).filter(Boolean),
@@ -79,9 +82,29 @@ export function releaseVersion(value) {
   return match ? match.slice(1).map(Number) : null;
 }
 
-export async function latestRelease(architecture) {
+function releaseAssetName(architecture) {
   const arch = { x86_64: "amd64", aarch64: "arm64", amd64: "amd64", arm64: "arm64" }[architecture];
   if (!arch) throw new OperationError("REMOTE_UNSUPPORTED", "首版安装支持 Linux amd64 和 arm64");
+  return `magpie-cli-linux-${arch}`;
+}
+
+export function parseRelease(data, architecture) {
+  const name = releaseAssetName(architecture);
+  const version = typeof data?.version === "string" && /^v?\d+\.\d+\.\d+$/.test(data.version) ? data.version : undefined;
+  const asset = data?.assets?.[name];
+  let url;
+  try { if (typeof asset?.url === "string") url = new URL(asset.url); } catch { /* Checked below. */ }
+  const tag = version && "v" + version.replace(/^v/, "");
+  const official = url?.hostname === "usemagpie.ai" && url.pathname === `/files/${tag}/${name}`;
+  const github = url?.hostname === "github.com" && [tag, version?.replace(/^v/, "")].some((releaseTag) => url.pathname === `/yetone/magpie-releases/releases/download/${releaseTag}/${name}`);
+  if (!version || typeof asset?.sha256 !== "string" || !/^[a-f0-9]{64}$/i.test(asset.sha256) || url?.protocol !== "https:" || (!official && !github) || url.port || url.search || url.hash || url.username || url.password) {
+    throw new OperationError("REMOTE_RELEASE_INVALID", "官方版本清单结构不受支持，未执行安装");
+  }
+  return { version, url: url.href, sha256: asset.sha256.toLowerCase(), ...(Number.isSafeInteger(asset.size) && asset.size > 0 && asset.size <= 1e12 && { size: asset.size }) };
+}
+
+export async function latestRelease(architecture) {
+  releaseAssetName(architecture);
   let data;
   try {
     const response = await fetch("https://usemagpie.ai/api/latest", { signal: AbortSignal.timeout(15000), redirect: "error" });
@@ -90,14 +113,7 @@ export async function latestRelease(architecture) {
     if (Buffer.byteLength(text) > 262144) throw new Error("release feed too large");
     data = JSON.parse(text);
   } catch (cause) { throw new OperationError("REMOTE_RELEASE_UNAVAILABLE", "无法读取官方版本清单，请稍后重试", { cause }); }
-  const name = `magpie-cli-linux-${arch}`;
-  const asset = data.assets?.[name];
-  let url;
-  try { url = new URL(asset?.url); } catch { /* Checked below. */ }
-  if (!/^v?\d+\.\d+\.\d+$/.test(data.version ?? "") || !/^[a-f0-9]{64}$/i.test(asset?.sha256 ?? "") || url?.protocol !== "https:" || url.hostname !== "github.com" || !url.pathname.startsWith("/yetone/magpie-releases/releases/download/") || !url.pathname.endsWith("/" + name) || url.search || url.hash || url.username || url.password) {
-    throw new OperationError("REMOTE_RELEASE_INVALID", "官方版本清单结构不受支持，未执行安装");
-  }
-  return { version: data.version, url: url.href, sha256: asset.sha256.toLowerCase(), ...(Number.isSafeInteger(asset.size) && asset.size > 0 && asset.size <= 1e12 && { size: asset.size }) };
+  return parseRelease(data, architecture);
 }
 
 export class RemoteManager {
@@ -108,9 +124,10 @@ export class RemoteManager {
   #queue = Promise.resolve();
   #ready;
   #closed = false;
+  #shutdown = new AbortController();
 
-  constructor({ store, sessions, file = store.file + ".remote.json", release = latestRelease, renameFile = rename }) {
-    this.store = store; this.sessions = sessions; this.file = file; this.release = release; this.renameFile = renameFile;
+  constructor({ store, sessions, file = store.file + ".remote.json", release = latestRelease, download = downloadRelease, renameFile = rename }) {
+    this.store = store; this.sessions = sessions; this.file = file; this.release = release; this.download = download; this.renameFile = renameFile;
     this.#ready = this.#load();
     void this.#ready.catch(() => {});
   }
@@ -131,7 +148,7 @@ export class RemoteManager {
           || new Set(record.history.map((operation) => operation.id)).size !== record.history.length) throw new Error("invalid operation history");
         if (record.operation?.state === "running") {
           const operation = record.operation;
-          if (operation.dispatch === "pending" && operation.step === "checking") {
+          if (operation.dispatch === "pending") {
             operation.state = "failed"; operation.step = "failed";
             operation.message = "插件在派发前退出，本次未执行远端变更，请重新预览后操作";
             operation.error = errorDetails(new OperationError("REMOTE_NOT_DISPATCHED", operation.message));
@@ -199,15 +216,20 @@ export class RemoteManager {
     return parseProbe(response.stdout);
   }
 
-  async #checkUpdate(instance) {
+  async #checkUpdate(instance, pinnedRelease) {
     const checkedAt = new Date().toISOString();
     try {
-      const release = await this.release(instance.architecture);
+      const release = pinnedRelease ?? await this.release(instance.architecture);
       const current = releaseVersion(instance.version), latest = releaseVersion(release.version);
       if (!current || !latest) throw new OperationError("REMOTE_VERSION_UNKNOWN", "无法识别当前版本，请在服务器核对版本后再更新");
       const difference = latest.map((part, index) => part - current[index]).find((part) => part !== 0) ?? 0;
       return { state: difference > 0 ? "available" : "current", currentVersion: current.join("."), latestVersion: latest.join("."), checkedAt };
     } catch (error) { return { state: "unknown", checkedAt, error: errorDetails(error) }; }
+  }
+
+  async inspect(id, { signal } = {}) {
+    await this.#profile(id);
+    return this.#probe(id, signal);
   }
 
   #progressReader(id, operation) {
@@ -224,7 +246,7 @@ export class RemoteManager {
           || !/^\d{1,13}$/.test(done ?? "") || !/^\d{1,13}$/.test(total ?? "")) continue;
         const downloadedBytes = Number(done), totalBytes = Number(total);
         if (downloadedBytes > 1e12 || totalBytes > 1e12 || (totalBytes > 0 && downloadedBytes > totalBytes)) continue;
-        const downloading = ["downloading", "updating"].includes(step);
+        const downloading = ["downloading", "uploading", "updating"].includes(step);
         if (!downloading && (downloadedBytes || totalBytes)) continue;
         const changed = operation.step !== step, now = Date.now();
         operation.step = step; operation.updatedAt = new Date(now).toISOString();
@@ -248,7 +270,7 @@ export class RemoteManager {
     const level = operation.state === "failed" ? "error" : operation.state === "unknown" ? "warn" : "info";
     const message = operation.state === "running" ? operation.step === "checking" ? "已提交，正在复核环境" : steps[operation.step] ? steps[operation.step] + "中" : "正在执行"
       : operation.state === "succeeded" ? "已完成" : operation.state === "unknown" ? "结果未知，请检测环境核实，避免重复执行"
-        : operation.diagnostic ? actionFailure(operation.action, operation.diagnostic.exitCode, operation.diagnostic).message : "执行失败，请查看任务详情";
+        : operation.diagnostic ? actionFailure(operation.action, operation.diagnostic.exitCode, operation.diagnostic).message : operation.message;
     const backup = operation.result?.backupDirectory ? "；远端备份目录：" + operation.result.backupDirectory : "";
     const restore = restoreResultMessage(operation.restore);
     this.sessions.recordLog?.(id, level, "远程 Magpie：" + labels[operation.action] + " · " + (reconciled ? "检测确认：" : "") + (["REMOTE_NOT_DISPATCHED", "REMOTE_RECOVERED"].includes(operation.error?.code) ? operation.message : message) + backup + (restore ? "；" + restore : "") + "（任务 " + operation.id + "）");
@@ -339,7 +361,7 @@ export class RemoteManager {
     }
     if (action === "install") {
       if (instance.installed || instance.service.installed) throw new OperationError("REMOTE_ALREADY_INSTALLED", "检测到已有程序或服务，请使用现有安装");
-      for (const tool of ["curl", "sha256sum", "mktemp", "install"]) if (!instance.tools.includes(tool)) throw new OperationError("REMOTE_PREREQUISITE", "安装需要远端命令：" + tool);
+      for (const tool of ["sha256sum", "mktemp", "install"]) if (!instance.tools.includes(tool)) throw new OperationError("REMOTE_PREREQUISITE", "安装需要远端命令：" + tool);
     } else if (!instance.installed) throw new OperationError("REMOTE_NOT_INSTALLED", "请先安装或修复远程 Magpie");
     if (["start", "stop", "restart", "enable_web"].includes(action) && !instance.systemd) throw new OperationError("REMOTE_NO_SYSTEMD", "当前 SSH 用户无法访问 systemd 用户服务，请使用服务器已有的进程管理器");
     if (["start", "stop", "restart"].includes(action) && !instance.service.installed) throw new OperationError("REMOTE_NO_SERVICE", "尚未安装用户服务，请先启用管理页面");
@@ -350,12 +372,14 @@ export class RemoteManager {
     if (action === "uninstall" && instance.service.installed && !instance.systemd) throw new OperationError("REMOTE_NO_SYSTEMD", "无法访问已有用户服务，未删除程序");
     if (action === "uninstall" && instance.binary !== instance.managedBinary) throw new OperationError("REMOTE_EXTERNAL_INSTALL", "自动卸载仅支持当前用户的 ~/.local/bin/magpie，请使用原安装方式处理其他路径");
     if (action === "install") return;
+    if ((["start", "restart"].includes(action) || ["update", "restore"].includes(action) && instance.service.state === "running") && instance.service.scope !== "loopback") throw new OperationError("REMOTE_LOOPBACK_REQUIRED", "服务尚未确认仅监听服务器回环地址，请先点击「启用 Web」重建回环服务；自定义 systemd 覆盖配置需先在服务器核对");
+    if (action === "enable_web" && !instance.service.rebuildSafe) throw new OperationError("REMOTE_LOOPBACK_REQUIRED", "systemd 存在覆盖配置、其他服务来源或无法核实，未启动服务；请先在服务器核对 magpie.service 及其 drop-in");
     if (!Array.isArray(instance.capabilities)) throw new OperationError("REMOTE_CAPABILITIES_UNKNOWN", "请重新检测环境，读取此安装的命令能力");
     const requireCommand = (capability, command) => {
       if (!instance.capabilities.includes(capability)) throw new OperationError("REMOTE_CAPABILITY_UNSUPPORTED", "当前程序的帮助信息未确认支持 " + command + "，请在服务器核对或更新程序");
     };
     if (action === "update") {
-      requireCommand("update", "magpie update");
+      for (const tool of ["readlink", "mktemp", "install"]) if (!instance.tools.includes(tool)) throw new OperationError("REMOTE_PREREQUISITE", "更新需要远端命令：" + tool);
       if (!instance.tools.includes("tar")) throw new OperationError("REMOTE_PREREQUISITE", "更新前需要远端 tar 保存配置归档");
       if (instance.service.state === "running") { requireCommand("daemon_restart", "magpie daemon restart"); requireCommand("healthcheck", "magpie healthcheck"); }
       if (update?.state === "current") throw new OperationError("REMOTE_ALREADY_CURRENT", "当前已是最新版，无需更新");
@@ -378,7 +402,8 @@ export class RemoteManager {
     const profile = await this.#profile(id), record = this.#record(id, profile);
     if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BUSY", "已有远端操作尚未完成核实，请先检测其结果");
     const instance = await this.#probe(id, signal);
-    const update = action === "update" ? await this.#checkUpdate(instance) : record.update;
+    let release;
+    const update = action === "update" ? await this.#checkUpdate(instance, release = await this.release(instance.architecture)) : record.update;
     this.#validate(action, instance, update);
     let selectedBackup;
     if (["restore", "delete_backup"].includes(action)) {
@@ -387,13 +412,14 @@ export class RemoteManager {
       if (!selectedBackup) throw new OperationError("REMOTE_BACKUP_MISSING", "此备份不存在或不可读，请刷新列表");
       if (action === "restore" && !["archive", "absent"].includes(selectedBackup.format)) throw new OperationError("REMOTE_BACKUP_FORMAT", selectedBackup.format === "encrypted" ? "历史加密备份请使用原工具和口令手动恢复；此处支持删除" : "此备份不完整，无法恢复配置");
     } else if (backupId !== undefined) throw new OperationError("REMOTE_BACKUP_INVALID", "此操作不接受备份条目标识");
-    const release = action === "install" ? await this.release(instance.architecture) : undefined;
+    if (action === "install") release = await this.release(instance.architecture);
     const warnings = [], changes = [];
-    if (action === "install") changes.push(`下载并校验官方 CLI ${release.version}`, "安装到 " + instance.managedBinary, "本次只安装程序，随后可启用用户服务与管理页面");
+    if (["install", "update"].includes(action)) changes.push(`在本机下载并校验官方 CLI ${release.version}，通过 SSH 上传后再次校验；服务器无需联网下载`);
+    if (action === "install") changes.push("安装到 " + instance.managedBinary, "本次只安装程序，随后可启用用户服务与管理页面");
     const backupMode = backupActions.includes(action) ? "archive" : undefined;
     if (backupMode) warnings.push("配置归档未加密，可能包含供应商密钥与登录信息；仅保存在远端当前用户可访问的目录，请妥善保管");
     if (action === "update") {
-      changes.push("先保存当前配置目录的 config.tar.gz 归档及旧程序；配置目录不存在时记录为空", "执行官方更新" + (instance.service.state === "running" ? "，重启现有服务并检查健康状态" : "，保持服务未运行状态"));
+      changes.push("先保存当前配置目录的 config.tar.gz 归档及旧程序；配置目录不存在时记录为空", "用上传的官方程序替换当前版本" + (instance.service.state === "running" ? "，重启现有服务并检查健康状态" : "，保持服务未运行状态"));
       warnings.push("更新可能中断现有请求；备份位于远端 Magpie 配置旁的 magpie-remote/backups/，配置迁移后的回退需要单独验证");
     }
     if (action === "backup") {
@@ -408,7 +434,7 @@ export class RemoteManager {
       warnings.push("删除后无法恢复此备份；当前 Magpie 程序、配置与服务保持原状");
     }
     if (action === "enable_web") {
-      changes.push("安装或更新当前用户的 Magpie 服务并启动", "管理页面仅监听远端 127.0.0.1:3430，通过 SSH 本地转发访问");
+      changes.push("安装或更新当前用户的 Magpie 服务并启动", "网关仅监听远端 127.0.0.1:3425，管理页面仅监听 127.0.0.1:3430，通过 SSH 转发访问", "启动前核实 systemd 配置，启动后核实实际监听；无法确认回环范围时停止本次服务");
       warnings.push("服务重新配置可能短暂中断请求；首次安装服务会继承本次 SSH 会话的运行环境");
     }
     if (["start", "stop", "restart"].includes(action)) changes.push(labels[action], action === "stop" ? "保留程序、配置和用户服务文件" : "检查网关健康状态");
@@ -450,18 +476,32 @@ export class RemoteManager {
 
   async #run(id, record, preview) {
     const operation = record.operation;
-    let dispatched = false;
+    let dispatched = false, artifact;
     try {
       const instance = await this.#probe(id);
       if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭，未执行变更");
       if (hash(instance) !== preview.baseline) throw new OperationError("REMOTE_PREVIEW_STALE", "远端程序、服务或环境已变化，请重新预览");
       this.#validate(operation.action, instance, preview.update);
+      const progress = this.#progressReader(id, operation);
+      const report = (step, bytes, total) => progress(`MIGPIE_PROGRESS_V1\t${operation.id}\t${step}\t${bytes}\t${total}\n`);
+      if (["install", "update"].includes(operation.action)) {
+        artifact = await this.download(preview.release, { signal: this.#shutdown.signal, onProgress: (bytes, total) => report("downloading", bytes, total) });
+        if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭，未执行变更");
+        if (hash(await this.#probe(id)) !== preview.baseline) throw new OperationError("REMOTE_PREVIEW_STALE", "下载期间远端程序、服务或环境已变化，请重新预览");
+      }
+      const script = actionScript(operation.action, instance, operation.id, preview.release, preview.selectedBackup);
+      const command = artifact ? scriptCommand(script) : "sh -s";
+      delete operation.progress;
       operation.step = "executing"; operation.dispatch = "possible"; operation.message = labels[operation.action] + "中，刷新页面后可继续查看";
       await this.#save();
       this.#logOperation(id, operation);
-      const script = actionScript(operation.action, instance, operation.id, preview.release, preview.selectedBackup);
       dispatched = true;
-      const response = await this.sessions.execute(id, "sh -s", { input: script, timeoutMs: 600000, maxBytes: 262144, onStdout: this.#progressReader(id, operation) });
+      let uploaded = 0;
+      const response = await this.sessions.execute(id, command, {
+        input: artifact ? createReadStream(artifact.path) : script, timeoutMs: 600000, maxBytes: 262144,
+        onStdout: (chunk) => { progress(chunk); if (artifact && operation.step === "uploading") report("uploading", uploaded, artifact.size); },
+        onInput: (bytes) => { uploaded = bytes; if (operation.step === "uploading") report("uploading", bytes, artifact.size); },
+      });
       delete operation.progress;
       const result = parseActionResult(response.stdout, operation.id, response.code);
       const restore = operation.action === "restore" ? parseRestoreResult(response.stdout, operation.id) : undefined;
@@ -492,6 +532,10 @@ export class RemoteManager {
       operation.step = operation.state === "failed" ? operation.diagnostic?.step ?? "failed" : operation.state;
       operation.error = errorDetails(error); operation.message = error.message;
     } finally {
+      if (artifact) {
+        try { await artifact.cleanup(); }
+        catch { operation.message += "；本机临时下载文件清理失败，请检查临时目录"; }
+      }
       delete operation.progress;
       if (operation.restore) operation.message += "；" + restoreResultMessage(operation.restore);
       operation.updatedAt = new Date().toISOString();
@@ -597,5 +641,5 @@ export class RemoteManager {
     this.#records.delete(id); this.#previews.delete(id); this.#webForwards.delete(id); await this.#save();
   }
 
-  async close() { this.#closed = true; await Promise.allSettled([...this.#tasks]); await this.#queue.catch(() => {}); }
+  async close() { this.#closed = true; this.#shutdown.abort(); await Promise.allSettled([...this.#tasks]); await this.#queue.catch(() => {}); }
 }

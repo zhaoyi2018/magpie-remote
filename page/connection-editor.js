@@ -57,6 +57,7 @@
     $("profile-continue-forwards").checked = connection?.forwardFailurePolicy === "continue";
     $("profile-auto-connect").checked = connection?.autoConnect === true;
     $("profile-auto-reconnect").checked = connection?.autoReconnect === true;
+    $("profile-auto-local-magpie").checked = connection?.autoLinkLocalMagpie !== false;
     $("profile-error").hidden = true;
     $("profile-auth-advanced").open = true;
     $("profile-host-advanced").open = false;
@@ -89,6 +90,7 @@
       if ($("profile-continue-forwards").checked) connection.forwardFailurePolicy = "continue";
       connection.autoConnect = $("profile-auto-connect").checked;
       connection.autoReconnect = $("profile-auto-reconnect").checked;
+      if (!$("profile-auto-local-magpie").checked) connection.autoLinkLocalMagpie = false;
       if (!editingConnection && getRows().some((row) => row.connection.id === connection.id)) throw new Error("连接标识已存在，请使用其他标识");
       const mode = $("profile-auth").value;
       const optional = { hostFingerprint: "profile-fingerprint", knownHostsFile: "profile-known-hosts", identityFile: "profile-identity", passphraseEnv: "profile-passphrase-env", passwordEnv: "profile-password-env" };

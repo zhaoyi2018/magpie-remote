@@ -1,10 +1,11 @@
 import { StringDecoder } from "node:string_decoder";
+import { Readable } from "node:stream";
 import { OperationError } from "./errors.mjs";
 
 // Internal transport only; public tools accept named Magpie actions, never shell text.
-export function executeRemote(client, command, { input = "", signal, timeoutMs = 30000, maxBytes = 262144, onStdout } = {}) {
+export function executeRemote(client, command, { input = "", signal, timeoutMs = 30000, maxBytes = 262144, onStdout, onInput } = {}) {
   return new Promise((resolve, reject) => {
-    let stream, finished = false, size = 0, stdout = "", stderr = "";
+    let stream, source, finished = false, size = 0, stdout = "", stderr = "";
     const out = new StringDecoder("utf8"), err = new StringDecoder("utf8");
     const finish = (error, result) => {
       if (finished) return;
@@ -12,12 +13,16 @@ export function executeRemote(client, command, { input = "", signal, timeoutMs =
       clearTimeout(timer);
       signal?.removeEventListener("abort", cancel);
       client.removeListener("close", disconnected);
+      source?.unpipe(stream);
+      source?.destroy();
+      if (input instanceof Readable) input.destroy();
       if (error) { stream?.destroy(); reject(error); }
       else resolve(result);
     };
     const cancel = () => finish(new OperationError("REMOTE_CANCELLED", "远端请求已中止；变更结果需重新检测"));
     const disconnected = () => finish(new OperationError("REMOTE_DISCONNECTED", "SSH 已断开，远端操作结果待核实"));
     const timer = setTimeout(() => finish(new OperationError("REMOTE_TIMEOUT", "远端操作超时，请重新检测实际状态")), timeoutMs);
+    if (input instanceof Readable) input.on("error", () => finish(new OperationError("REMOTE_INPUT_FAILED", "上传文件读取中断，请检测远端操作结果")));
     signal?.addEventListener("abort", cancel, { once: true });
     client.once("close", disconnected);
     if (signal?.aborted) { cancel(); return; }
@@ -44,7 +49,20 @@ export function executeRemote(client, command, { input = "", signal, timeoutMs =
         if (!Number.isInteger(code) || exitSignal) return finish(new OperationError("REMOTE_RESULT_UNKNOWN", "远端未返回明确退出状态，请重新检测"));
         finish(undefined, { code, stdout: stdout + out.end(), stderr: stderr + err.end() });
       });
-      stream.end(input);
+      if (typeof input === "string" || Buffer.isBuffer(input)) stream.end(input);
+      else {
+        try {
+          source = Readable.from(input);
+          let sent = 0;
+          source.on("error", () => finish(new OperationError("REMOTE_INPUT_FAILED", "上传文件读取中断，请检测远端操作结果")));
+          source.on("data", (chunk) => {
+            sent += chunk.length;
+            try { onInput?.(sent); }
+            catch { finish(new OperationError("REMOTE_INPUT_FAILED", "上传进度读取中断，请检测远端操作结果")); }
+          });
+          source.pipe(stream);
+        } catch { finish(new OperationError("REMOTE_INPUT_FAILED", "无法读取上传文件，请检测远端操作结果")); }
+      }
     });
   });
 }

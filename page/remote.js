@@ -7,7 +7,7 @@ const panelActions = ["install", "update", "start", "stop", "restart", "enable_w
 const serviceActions = new Set(["start", "stop", "restart", "enable_web"]);
 const backupActions = new Set(["backup", "update", "restore", "delete_backup"]);
 const operationLabels = { running: "执行中", succeeded: "已完成", failed: "失败", unknown: "结果未知" };
-const stepLabels = { checking: "复核环境", executing: "执行变更", preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "下载程序", installing: "安装程序", updating: "执行官方更新", restoring: "恢复配置", deleting_backup: "删除备份", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", healthcheck: "检查服务健康状态", completed: "执行完成", failed: "执行失败", unknown: "等待核实" };
+const stepLabels = { checking: "复核环境", executing: "执行变更", preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "本机下载程序", uploading: "上传程序到服务器", checking_upload: "检查上传程序", installing: "安装程序", updating: "执行官方更新", restoring: "恢复配置", deleting_backup: "删除备份", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", healthcheck: "检查服务健康状态", completed: "执行完成", failed: "执行失败", unknown: "等待核实" };
 const serviceLabels = { running: "运行中", stopped: "已停止", unavailable: "不可用", unknown: "待核实" };
 const backupFormatLabels = { encrypted: "历史加密备份", archive: "配置归档", absent: "无配置目录快照", incomplete: "备份不完整" };
 
@@ -22,6 +22,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
   let history = [], historySignature = "";
+  let providerSyncing = false;
   let programDisclosureInitialized = false;
 
   function drawHistory() {
@@ -235,6 +236,12 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     text("remote-open-web", webLoading ? "正在建立通道…" : "获取 Web 地址");
     text("remote-web-hint", reason || "远端 Web 默认使用 3430 端口，仅通过本机回环 SSH 通道访问。");
     showError("remote-web-error", webError);
+    const linked = status?.localProvider;
+    text("remote-local-provider-state", providerSyncing ? "正在检测并对接本机 Magpie…" : row?.connection.autoLinkLocalMagpie === false ? "已关闭自动对接，可在连接设置中开启" : !sshReady() ? "SSH 未连接，本机 Magpie 对接通道已停止" : linked?.message || "SSH 连接后自动检测并对接");
+    $("remote-local-provider-state").classList.toggle("is-warning", linked?.state === "error");
+    text("remote-local-provider-address", linked?.endpoint ? "远端供应商 " + linked.providerId + " · " + linked.endpoint : "");
+    $("remote-local-provider-address").hidden = !linked?.endpoint;
+    $("remote-local-provider-sync").disabled = !sshReady() || !linked || row?.connection.autoLinkLocalMagpie === false || providerSyncing || running() || uncertain() || submitting;
     drawBackups(); drawTaskSummary(); drawHistory(); syncPreview();
     showError("history-error", readError);
   }
@@ -340,10 +347,10 @@ export function createRemoteManager({ call, confirmAction, toast }) {
 
   function downloadProgress() {
     const progress = operation?.progress;
-    if (!["install", "update"].includes(operation?.action) || !["downloading", "updating"].includes(operation?.step) || !progress) return "";
+    if (!["install", "update"].includes(operation?.action) || !["downloading", "uploading", "updating"].includes(operation?.step) || !progress) return "";
     const { downloadedBytes, totalBytes, bytesPerSecond } = progress;
     if (!Number.isSafeInteger(downloadedBytes) || downloadedBytes < 0 || !Number.isSafeInteger(totalBytes) || totalBytes < 0 || !Number.isFinite(bytesPerSecond) || bytesPerSecond < 0) return "";
-    let detail = "已下载 " + size(downloadedBytes);
+    let detail = (operation.step === "uploading" ? "已上传 " : "已下载 ") + size(downloadedBytes);
     if (totalBytes > 0) detail += " / " + size(totalBytes) + "（" + Math.min(100, downloadedBytes / totalBytes * 100).toLocaleString("zh-CN", { maximumFractionDigits: 1 }) + "%）";
     return detail + " · " + size(bytesPerSecond) + "/s";
   }
@@ -392,6 +399,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       programDisclosureInitialized = false;
       for (const id of ["connection-overview", "remote-program-details", "remote-environment-details", "remote-backups", "remote-maintenance-details"]) $(id).open = false;
       status = null; operation = null; history = []; historySignature = ""; readError = actionError = "";
+      providerSyncing = false;
       uncertainSubmission = uncertainSubmissions.get(nextRow?.connection.id) ?? null;
       submissionUncertain = Boolean(uncertainSubmission); submitting = false; recovering = false;
       backups = null; backupError = ""; backupsDirty = false; backupRefreshDue = false; completedBackupOperation = null;
@@ -482,7 +490,10 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       text("remote-preview-summary", result.summary);
       list("remote-preview-changes", result.changes); list("remote-preview-warnings", result.warnings);
     } catch (error) {
-      if (current(id, epoch) && sequence === previewSequence && dialog.open) showError("remote-preview-error", errorMessage(error));
+      if (current(id, epoch) && sequence === previewSequence && dialog.open) {
+        text("remote-preview-summary", "未能读取变更预览，请关闭后重试。");
+        showError("remote-preview-error", errorMessage(error));
+      }
     } finally {
       if (current(id, epoch) && sequence === previewSequence) { previewLoading = false; draw(); }
     }
@@ -551,6 +562,18 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     }
   }
 
+  async function syncLocalProvider() {
+    if ($("remote-local-provider-sync").disabled) return;
+    const id = row.connection.id, epoch = generation;
+    providerSyncing = true; dataRevision++; draw();
+    try {
+      const result = await call("remote_provider_sync", { connectionId: id });
+      if (current(id, epoch)) status = { ...status, localProvider: result };
+    } catch (error) {
+      if (current(id, epoch)) status = { ...status, localProvider: { state: "error", message: errorMessage(error) } };
+    } finally { if (current(id, epoch)) { providerSyncing = false; draw(); } }
+  }
+
   async function recoverOperation() {
     if (!sshReady() || operation?.state !== "unknown" || recovering || reading || submitting) return;
     const id = row.connection.id, epoch = generation, operationId = operation.id;
@@ -582,6 +605,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   $("remote-recover").addEventListener("click", () => { void recoverOperation(); });
   $("history-filter").addEventListener("change", drawHistory);
   $("remote-open-web").addEventListener("click", () => { void openWeb(); });
+  $("remote-local-provider-sync").addEventListener("click", () => { void syncLocalProvider(); });
   $("remote-web-port").addEventListener("input", () => { clearWeb(); draw(); });
   $("remote-web-url").addEventListener("click", (event) => event.currentTarget.select());
   $("remote-web-address").addEventListener("click", async (event) => {

@@ -463,6 +463,7 @@ import { createRemoteManager } from "./remote.js";
     const values = [["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username], ["认证方式", auth(connection)], ["自动启动预设", connection.autoStartForwards === false ? "已关闭" : "已开启"], ["预设失败处理", connection.forwardFailurePolicy === "continue" ? "保留连接，继续其他预设" : "回滚本次连接"], ["启动时连接", connection.autoConnect ? "已开启" : "已关闭"], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent], ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv], ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"], ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"]];
     $("settings-list").replaceChildren();
     values.splice(7, 0, ["断网自动重连", connection.autoReconnect ? "已开启，仅网络故障重试" : "已关闭"]);
+    values.push(["本机 Magpie 自动对接", connection.autoLinkLocalMagpie === false ? "已关闭" : "已开启，通过 SSH 反向通道"]);
     for (const [label, value] of values) {
       if (!value) continue;
       const row = element("div", "settings-row");
@@ -591,7 +592,9 @@ import { createRemoteManager } from "./remote.js";
     setIcon($("rule-listener-icon"), local ? "laptop" : "server");
     setIcon($("rule-relay-icon"), local ? "server" : "laptop");
     $("rule-preview").setAttribute("aria-label", local ? "本机监听，经 SSH 服务器转发至远程目标" : "远程监听，经 SSH 客户端转发至本机目标");
-    $("rule-hint").textContent = local ? "本地转发 (-L)：本机监听端口，流量经 SSH 转发至服务器侧目标。" : "远程转发 (-R)：服务器监听端口，流量经 SSH 转发至本机侧目标。";
+    $("rule-hint").textContent = local ? "本地转发 (-L)：本机监听端口，流量经 SSH 转发至服务器侧目标。" : "远程转发 (-R)：仅服务器本机可访问监听端口，流量经 SSH 转发至本机侧目标。";
+    $("rule-bind-host").readOnly = !local;
+    if (!local) $("rule-bind-host").value = "127.0.0.1";
   }
   function syncForwardAction() {
     $("forward-editor").setAttribute("aria-busy", String(forwardSaving));

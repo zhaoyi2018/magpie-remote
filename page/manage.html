@@ -80,6 +80,12 @@
             <div class="remote-task-link"><p id="remote-task-summary" class="remote-secondary" role="status"><span id="remote-task-state">远程操作的进度与结果会记录在运行日志中。</span></p><button id="remote-recover" class="text-button" type="button" hidden>解除待核实</button><button id="remote-view-logs" class="text-button" type="button">查看运行日志</button></div>
             <div class="remote-layout">
               <div class="remote-controls">
+                <section class="remote-command-section" aria-labelledby="remote-local-provider-title">
+                  <div class="remote-command-copy"><h4 id="remote-local-provider-title">本机 Magpie 对接</h4><p>自动把本机 Magpie 加入远端供应商，通过 SSH 反向通道访问，无需处于同一局域网。远端需先启用 Web 管理服务。</p></div>
+                  <p id="remote-local-provider-state" class="remote-secondary" role="status">SSH 连接后自动检测并对接</p>
+                  <p id="remote-local-provider-address" class="remote-secondary remote-path" hidden></p>
+                  <div class="remote-actions"><button id="remote-local-provider-sync" class="button" type="button" disabled>重新检测对接</button></div>
+                </section>
                 <section class="remote-web-section" aria-labelledby="remote-web-title">
                   <div class="remote-command-copy"><h4 id="remote-web-title">访问官方 Web</h4><p>供应商与 Agent 可在 Magpie 官方 Web 中管理。</p></div>
                   <div class="remote-web-controls"><label for="remote-web-port">远端 Web 端口<input id="remote-web-port" type="number" min="1" max="65535" step="1" value="3430" required inputmode="numeric" aria-describedby="remote-web-hint"></label><button id="remote-open-web" class="button" type="button" disabled>获取 Web 地址</button></div>
@@ -178,6 +184,7 @@
         <label class="check-label"><input id="profile-continue-forwards" type="checkbox">个别预设启动失败时保留连接，继续启动其他预设</label>
         <label class="check-label"><input id="profile-auto-connect" type="checkbox">应用启动时尝试重新连接</label>
         <label class="check-label"><input id="profile-auto-reconnect" type="checkbox">网络中断后自动重连</label>
+        <label class="check-label"><input id="profile-auto-local-magpie" type="checkbox" checked>自动将本机 Magpie 对接到远端供应商</label>
         <p class="profile-storage-note">仅网络故障会重试；手动断开后停止。已保存的密码可用于自动重连，临时凭据需要重新填写。</p>
         <p class="profile-storage-note">仅保存配置与转发预设；当前 SSH 会话不写入磁盘。</p>
       </section>

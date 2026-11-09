@@ -7,7 +7,7 @@ import { arch, release, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { actionScript, probeScript } from "../src/remote-scripts.mjs";
-import { parseProbe } from "../src/remote.mjs";
+import { parseProbe, parseRelease } from "../src/remote.mjs";
 import { backupInventoryScript, parseBackups } from "../src/remote-backups.mjs";
 import { parseRestoreResult } from "../src/remote-results.mjs";
 
@@ -90,11 +90,15 @@ async function command(binary, args, { input, timeout = 120000, allowFailure = f
     child.once("error", (error) => { problem = `Unable to launch ${basename(binary)} (${error.code || "spawn"})`; });
     child.once("close", (code) => {
       active.delete(child); clearTimeout(timer); clearTimeout(hardStop);
+      input?.destroy?.();
       if (problem) reject(new Error(problem));
       else if (code !== 0 && !allowFailure) reject(new Error(`${basename(binary)} failed (exit ${code}); raw output deliberately omitted`));
       else done({ code, stdout });
     });
-    child.stdin.end(input);
+    if (input?.pipe) {
+      input.on("error", () => stop("Local release could not be read"));
+      input.pipe(child.stdin);
+    } else child.stdin.end(input);
   });
 }
 const sh = (script, options = {}) => command("/usr/bin/sh", ["-s"], { ...options, input: script });
@@ -112,14 +116,10 @@ function pinnedRelease(value, name) {
   assert.match(value.version || "", /^v?\d+\.\d+\.\d+$/, `${name} requires a fixed version`);
   assert.match(value.sha256 || "", /^[a-f0-9]{64}$/i, `${name} requires a trusted SHA-256, not a placeholder`);
   assert.ok(!/^([a-f0-9])\1{63}$/i.test(value.sha256), `${name} SHA-256 is a placeholder`);
-  const url = new URL(value.url);
-  const asset = `magpie-cli-linux-${{ x64: "amd64", arm64: "arm64" }[process.arch]}`;
-  const tag = url.pathname.split("/").at(-2);
-  assert.ok(url.protocol === "https:" && url.hostname === "github.com" && !url.port && !url.username && !url.password && !url.search && !url.hash
-    && /^v?\d+\.\d+\.\d+$/.test(tag || "") && tag.replace(/^v/, "") === value.version.replace(/^v/, "")
-    && url.pathname === `/yetone/magpie-releases/releases/download/${tag}/${asset}`, `${name} must name the fixed official Linux CLI asset for this architecture`);
+  const architecture = { x64: "amd64", arm64: "arm64" }[process.arch];
+  const asset = `magpie-cli-linux-${architecture}`;
   assert.ok(value.size === undefined || (Number.isSafeInteger(value.size) && value.size > 0 && value.size <= 1e12), "Omit size unless the actual official byte length is known");
-  return { version: value.version, url: url.href, sha256: value.sha256.toLowerCase(), ...(value.size !== undefined && { size: value.size }) };
+  return parseRelease({ version: value.version, assets: { [asset]: value } }, architecture);
 }
 function versionNumber(version) {
   const match = String(version).match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:$|\s|\()/);
@@ -149,7 +149,11 @@ async function probe() {
 async function operation(action, releaseAsset, backup) {
   instance = await probe();
   const id = randomUUID();
-  const result = await sh(actionScript(action, instance, id, releaseAsset, backup), { timeout: action === "update" ? 660000 : 420000, allowFailure: true });
+  const script = actionScript(action, instance, id, releaseAsset, backup);
+  const download = releaseAsset ? await downloadPinned(releaseAsset) : undefined;
+  const result = download
+    ? await command("/usr/bin/sh", ["-c", script], { input: createReadStream(download.path), timeout: 420000, allowFailure: true })
+    : await sh(script, { timeout: 420000, allowFailure: true });
   const records = result.stdout.split(/\r?\n/).filter((line) => line.startsWith("MIGPIE_RESULT_V1\t"));
   assert.equal(records.length, 1, `${action} must produce one action result`);
   assert.equal(records[0], `MIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\t${["backup", "restore", "update"].includes(action)}`, `${action} result did not complete successfully`);
@@ -187,7 +191,7 @@ async function downloadPinned(asset) {
   await command("/usr/bin/curl", ["--disable", "-fLsS", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15", "--max-time", "300", asset.url, "-o", path], { timeout: 330000 });
   assert.equal(await sha256(path), asset.sha256, "Downloaded second asset failed SHA-256 verification");
   if (asset.size !== undefined) assert.equal((await stat(path)).size, asset.size, "Second asset byte length differs from manifest");
-  return { sha256: asset.sha256, bytes: (await stat(path)).size };
+  return { path, sha256: asset.sha256, bytes: (await stat(path)).size };
 }
 async function removeOwnedFile(path) {
   if (!await exists(path)) return;
@@ -312,6 +316,7 @@ try {
   await checked("enable_web", async (check) => {
     check.operationId = await operation("enable_web"); instance = await probe();
     assert.equal(instance.service.installed, true); assert.equal(instance.service.state, "running");
+    assert.equal(instance.service.scope, "loopback", "Gateway and Web must actually listen only on loopback");
     assert.equal(instance.web.enabled, true); assert.equal(instance.web.port, 3430);
     // Never request daemon web: it prints a management key.
   });
@@ -336,14 +341,7 @@ try {
   });
   if (updateRelease) {
     await checked("update", async (check) => {
-      check.download = await downloadPinned(updateRelease);
-      const feed = await command("/usr/bin/curl", ["--disable", "-fsS", "--proto", "=https", "--connect-timeout", "15", "--max-time", "30", "https://usemagpie.ai/api/latest"], { timeout: 45000 });
-      const latest = JSON.parse(feed.stdout);
-      const asset = latest.assets?.[`magpie-cli-linux-${process.arch === "x64" ? "amd64" : "arm64"}`];
-      assert.equal(latest.version?.replace(/^v/, ""), updateRelease.version.replace(/^v/, ""), "Official latest changed; native magpie update cannot pin historical targets");
-      assert.equal(asset?.url, updateRelease.url, "Official update asset URL changed");
-      assert.equal(asset?.sha256?.toLowerCase(), updateRelease.sha256, "Official update asset SHA-256 changed");
-      check.operationId = await operation("update");
+      check.operationId = await operation("update", updateRelease);
       check.observed = await assertBinary(updateRelease); assert.equal(instance.service.state, "running");
     });
   } else report.checks.find((check) => check.id === "update").reason = "No second pinned official version/asset supplied; native update was not run";

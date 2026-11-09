@@ -104,12 +104,19 @@ export async function until(predicate, message = "condition not met", timeout = 
   throw new Error(message);
 }
 
-export async function sshServer(t, { rejectRemote = false, hangAuth = false, hangForward = false, cancelForward = "accept", clientPublicKey = hostPublicKey } = {}) {
+export async function sshServer(t, { rejectRemote = false, hangAuth = false, hangForward = false, cancelForward = "accept", clientPublicKey = hostPublicKey, remoteBindHost, sourceIP, inspection = true } = {}) {
   const acceptedKey = utils.parseKey(`ssh-ed25519 ${clientPublicKey.toString("base64")}`);
   if (acceptedKey instanceof Error) throw acceptedKey;
   const clients = new Set();
   const listeners = new Set();
   const sockets = new Set();
+  const listenerReply = (command) => {
+    if (!command.includes("MAGPIE_LISTENER_V1")) return;
+    const port = Number(command.match(/listener_scope (\d+)\)/)?.[1]);
+    const addresses = [...listeners].map((listener) => listener.address()).filter((address) => address?.port === port);
+    const scope = !inspection || !addresses.length ? "unknown" : addresses.every((address) => ["127.0.0.1", "::1"].includes(address.address)) ? "loopback" : "exposed";
+    return `MAGPIE_LISTENER_V1\t${port}\t${scope}\n`;
+  };
   const server = new Server({ hostKeys: [keys.private] }, (client) => {
     clients.add(client);
     client.on("error", () => {});
@@ -137,6 +144,17 @@ export async function sshServer(t, { rejectRemote = false, hangAuth = false, han
       else ctx.reject();
     });
     client.on("ready", () => {
+      client.on("session", (accept, reject) => {
+        // Custom exec fixtures own their sessions and may use listenerReply.
+        if (client.listenerCount("session") > 1) return;
+        const session = accept(); session.on("error", () => {});
+        session.on("exec", (acceptExec, rejectExec, { command }) => {
+          const reply = listenerReply(command);
+          if (reply === undefined) return rejectExec();
+          const channel = acceptExec(); channel.on("error", () => {});
+          channel.resume(); channel.exit(0); channel.end(reply);
+        });
+      });
       client.on("tcpip", (accept, reject, info) => {
         const socket = track(connectTCP({ host: info.destIP, port: info.destPort }));
         let answered = false;
@@ -155,7 +173,7 @@ export async function sshServer(t, { rejectRemote = false, hangAuth = false, han
           const listener = createServer((socket) => {
             track(socket);
             client.forwardOut(info.bindAddr, listener.address().port,
-              socket.remoteAddress, socket.remotePort, (error, channel) => {
+              sourceIP ?? socket.remoteAddress, socket.remotePort, (error, channel) => {
                 if (error) socket.destroy();
                 else bridge(socket, channel);
               });
@@ -163,7 +181,7 @@ export async function sshServer(t, { rejectRemote = false, hangAuth = false, han
           listeners.add(listener);
           listener.once("close", () => listeners.delete(listener));
           listener.on("error", () => reject());
-          listener.listen(info.bindPort, info.bindAddr, () => {
+          listener.listen(info.bindPort, remoteBindHost ?? info.bindAddr, () => {
             forwards.set(`${info.bindAddr}:${listener.address().port}`, listener);
             accept(listener.address().port);
           });
@@ -196,7 +214,7 @@ export async function sshServer(t, { rejectRemote = false, hangAuth = false, han
   const knownHostsFile = join(directory, "known_hosts");
   await writeFile(knownHostsFile, "");
   return {
-    server, clients, listeners, port,
+    server, clients, listeners, port, listenerReply,
     profile: {
       id: "test-server", host: "127.0.0.1", port, username: "tester",
       passwordEnv: "MIGPIE_TEST_PASSWORD", knownHostsFile,

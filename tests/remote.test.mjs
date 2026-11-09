@@ -15,6 +15,7 @@ const baseProbe = {
   version: "magpie 0.1.1500", binaryHash: "a".repeat(64), configDirectory: "/home/tester/.config/magpie",
   unit: "/home/tester/.config/systemd/user/magpie.service", unitHash: "b".repeat(64),
   installed: "true", systemd: "true", serviceInstalled: "true", serviceActive: "active",
+  serviceScope: "loopback", serviceRebuildSafe: "true",
   webEnabled: "true", webPort: "3430", webTLS: "false", linger: "yes", locked: "false",
   tools: "curl sha256sum base64 mktemp install readlink tar",
   capabilities: "update backup restore healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
@@ -58,17 +59,23 @@ class FakeSessions {
   status() { return { state: this.state, forwards: structuredClone(this.forwards) }; }
 
   async execute(id, command, options = {}) {
-    const input = options.input;
+    const input = command.startsWith("sh -c '") ? command.slice(7, -1).replaceAll("'\\''", "'") : options.input;
     let kind;
     if (command === "sh -s" && input === probeScript) kind = "probe";
     else if (command === "sh -s" && input === backupInventoryScript) kind = "backups";
     else if (command === "sh -s" && /cat "\$base\/operations\/[a-f0-9-]+\/state"/.test(input ?? "")) kind = "reconcile";
     else if (command === "sh -s" && input?.includes("MIGPIE_RECOVERED_V1")) kind = "recover";
     else if (/ daemon web$/.test(command)) kind = "web";
-    else if (command === "sh -s" && input?.includes("MIGPIE_DONE")) kind = "action";
+    else if (input?.includes("MIGPIE_DONE")) kind = "action";
     else throw new Error("Unexpected fixture command: " + command);
-    const call = { kind, id, command, ...options };
+    const call = { kind, id, command, ...options, input };
     this.calls.push(call);
+    if (command.startsWith("sh -c '")) {
+      const chunks = [];
+      let sent = 0;
+      for await (const chunk of options.input) { chunks.push(chunk); sent += chunk.length; options.onInput?.(sent); }
+      call.uploaded = Buffer.concat(chunks);
+    }
     if (kind === "probe") return this.onProbe ? this.onProbe(call) : response(probe(this.fields));
     if (kind === "action") return this.onAction ? this.onAction(call) : success();
     if (kind === "backups") return response("MIGPIE_BACKUPS_V1\n" + this.backupRows.join("\n") + (this.backupRows.length ? "\n" : ""));
@@ -98,10 +105,17 @@ async function fixture(t, fields = {}) {
   const sessions = new FakeSessions();
   sessions.fields = fields;
   const releases = [];
-  const options = { store, sessions, release: async (architecture) => { releases.push(architecture); return structuredClone(release); } };
+  const downloads = [];
+  const options = { store, sessions, release: async (architecture) => { releases.push(architecture); return structuredClone(release); }, download: async (asset, { onProgress }) => {
+    downloads.push(asset);
+    const path = join(directory, "release.bin");
+    await writeFile(path, "fixture-release");
+    onProgress?.(15, 15);
+    return { path, size: 15, cleanup: () => rm(path, { force: true }) };
+  } };
   const remote = new RemoteManager(options);
   t.after(() => remote.close());
-  return { directory, store, profile, sessions, releases, options, remote };
+  return { directory, store, profile, sessions, releases, downloads, options, remote };
 }
 
 async function completed(h) {
@@ -122,6 +136,29 @@ async function start(h, action = "restart") {
   const operation = await h.remote.apply(h.profile.id, action, preview.revision);
   return { preview, operation };
 }
+
+for (const scope of [undefined, "unknown", "exposed"]) {
+  test("unconfirmed service scope " + String(scope) + " blocks every service launch path", async (t) => {
+    const h = await fixture(t, { serviceScope: scope });
+    for (const action of ["start", "restart", "update", "restore"]) await assert.rejects(h.remote.preview(h.profile.id, action), { code: "REMOTE_LOOPBACK_REQUIRED" });
+    assert.equal(h.sessions.actions().length, 0);
+    assert.ok(await h.remote.preview(h.profile.id, "stop"));
+    assert.ok(await h.remote.preview(h.profile.id, "backup"));
+    const rebuild = await h.remote.preview(h.profile.id, "enable_web");
+    assert.ok(rebuild.changes.some((change) => change.includes("127.0.0.1:3425")));
+  });
+}
+
+test("systemd overrides prevent rebuilding and policy changes invalidate a queued start", async (t) => {
+  const h = await fixture(t, { serviceRebuildSafe: "false" });
+  await assert.rejects(h.remote.preview(h.profile.id, "enable_web"), { code: "REMOTE_LOOPBACK_REQUIRED" });
+  h.sessions.fields = {};
+  const preview = await h.remote.preview(h.profile.id, "start");
+  h.sessions.fields.serviceScope = "unknown";
+  await h.remote.apply(h.profile.id, "start", preview.revision);
+  assert.equal((await completed(h)).error.code, "REMOTE_PREVIEW_STALE");
+  assert.equal(h.sessions.actions().length, 0);
+});
 
 test("transient Windows destination locks retry only the local atomic rename", { skip: process.platform !== "win32" }, async (t) => {
   const h = await fixture(t); await h.remote.close();
@@ -244,7 +281,7 @@ test("base64 probe retains version, Unicode paths and separate service and web f
   assert.equal(instance.home, "/home/测试 user's");
   assert.equal(instance.version, "magpie 0.1.1500");
   assert.equal(instance.binaryHash, "a".repeat(64));
-  assert.deepEqual(instance.service, { installed: true, state: "running" });
+  assert.deepEqual(instance.service, { installed: true, state: "running", scope: "loopback", rebuildSafe: true });
   assert.deepEqual(instance.web, { enabled: true, port: 4567, tls: false });
   assert.equal(instance.container, false);
   assert.ok(instance.tools.includes("sha256sum"));
@@ -265,7 +302,7 @@ test("probe rejects login banners, malformed fields, missing identity and contro
 
 test("an unreachable systemd user session is unavailable rather than a stopped service", () => {
   const instance = parseProbe(probe({ systemd: "false", serviceActive: "active" }));
-  assert.deepEqual(instance.service, { installed: true, state: "unavailable" });
+  assert.deepEqual(instance.service, { installed: true, state: "unavailable", scope: "unknown", rebuildSafe: false });
   assert.equal(parseProbe(probe({ serviceActive: "activating" })).service.state, "unknown");
 });
 
@@ -310,7 +347,7 @@ test("missing capabilities disable only dependent actions and explain the requir
   assert.equal(status.actions.stop.enabled, true);
   assert.equal(status.actions.uninstall.enabled, true);
   assert.equal(status.actions.update.enabled, false);
-  assert.match(status.actions.update.reason, /magpie update/);
+  assert.match(status.actions.update.reason, /magpie daemon restart/);
   assert.equal(status.actions.enable_web.enabled, false);
   assert.equal(h.sessions.actions().length, 0);
 });
@@ -324,10 +361,11 @@ test("legacy update without the official backup command uses an explicit archive
   await h.remote.apply(h.profile.id, "update", preview.revision);
   assert.equal((await completed(h)).state, "succeeded");
   const action = h.sessions.actions()[0];
-  assert.equal(action.command, "sh -s");
+  assert.ok(action.command.startsWith("sh -c '"));
   assert.match(action.input, /config\.tar\.gz/);
   assert.ok(!action.input.includes("read -r passphrase"));
-  assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf('"$bin" update'));
+  assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf("run_step installing install"));
+  assert.ok(!action.input.includes('"$bin" update'));
 });
 
 test("legacy update refuses to proceed without a usable backup mechanism", async (t) => {
@@ -346,6 +384,72 @@ test("install preview resolves the injected release but does not download, execu
   assert.deepEqual(h.sessions.calls.map((call) => call.kind), ["probe"]);
   assert.equal(await readFile(h.store.file, "utf8"), before);
   assert.equal(await h.remote.operation(h.profile.id), null);
+  assert.equal(h.downloads.length, 0);
+});
+
+test("offline installation downloads locally, streams the verified binary and needs no remote curl", async (t) => {
+  const h = await fixture(t, { installed: "false", binary: "", version: "", binaryHash: "", serviceInstalled: "false", unitHash: "", tools: "sha256sum mktemp install" });
+  await start(h, "install");
+  assert.equal((await completed(h)).state, "succeeded");
+  const action = h.sessions.actions()[0];
+  assert.deepEqual(action.uploaded, Buffer.from("fixture-release"));
+  assert.ok(!/curl|wget/.test(action.input));
+  assert.ok(!action.input.includes(release.url));
+  assert.ok(action.input.includes(release.sha256));
+  assert.equal(h.downloads.length, 1);
+  await assert.rejects(readFile(join(h.directory, "release.bin")), { code: "ENOENT" });
+});
+
+test("offline update does not require or invoke the native update command", async (t) => {
+  const h = await fixture(t, { capabilities: "healthcheck", serviceInstalled: "false", serviceActive: "inactive", unitHash: "", tools: "sha256sum mktemp install readlink tar" });
+  const { preview } = await start(h, "update");
+  assert.ok(preview.changes.some((change) => change.includes("服务器无需联网")));
+  assert.equal((await completed(h)).state, "succeeded");
+  const action = h.sessions.actions()[0];
+  assert.ok(!/curl|wget|"\$bin" update/.test(action.input));
+  assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf("run_step installing install"));
+  assert.deepEqual(h.downloads, [release]);
+});
+
+test("local download failure never dispatches a remote mutation and permits a new preview", async (t) => {
+  const h = await fixture(t);
+  h.remote.download = async () => { throw new OperationError("LOCAL_RELEASE_INVALID", "fixture checksum failed"); };
+  await start(h, "update");
+  const operation = await completed(h);
+  assert.equal(operation.state, "failed");
+  assert.equal(operation.dispatch, "pending");
+  assert.equal(h.sessions.actions().length, 0);
+  await h.remote.preview(h.profile.id, "update");
+});
+
+test("environment changes during local download block upload and remove the temporary binary", async (t) => {
+  const h = await fixture(t), download = h.remote.download;
+  h.remote.download = async (...args) => { const artifact = await download(...args); h.sessions.fields.binaryHash = "d".repeat(64); return artifact; };
+  await start(h, "update");
+  assert.equal((await completed(h)).error.code, "REMOTE_PREVIEW_STALE");
+  assert.equal(h.sessions.actions().length, 0);
+  await assert.rejects(readFile(join(h.directory, "release.bin")), { code: "ENOENT" });
+});
+
+test("restart during a local download proves no remote mutation was dispatched", async (t) => {
+  const h = await fixture(t), entered = deferred(), finish = deferred();
+  h.remote.download = async (_asset, { onProgress }) => {
+    onProgress(1, 10); entered.resolve(); await finish.promise;
+    throw new OperationError("LOCAL_DOWNLOAD_FAILED", "fixture interrupted download");
+  };
+  try {
+    await start(h, "update"); await entered.promise;
+    await until(async () => JSON.parse(await readFile(h.remote.file, "utf8")).records[0].operation.step === "downloading");
+    const file = join(h.directory, "during-download.json");
+    await writeFile(file, await readFile(h.remote.file));
+    const restarted = new RemoteManager({ ...h.options, file });
+    t.after(() => restarted.close());
+    const operation = await restarted.operation(h.profile.id);
+    assert.equal(operation.state, "failed");
+    assert.equal(operation.error.code, "REMOTE_NOT_DISPATCHED");
+    assert.equal(h.sessions.actions().length, 0);
+  } finally { finish.resolve(); }
+  await completed(h);
 });
 
 test("caller supplied shell text is rejected as an action before any change is queued", async (t) => {
@@ -446,11 +550,11 @@ test("update always archives configuration without a passphrase even when offici
   assert.equal(Object.hasOwn(preview, "passphraseMinimumLength"), false);
   assert.equal(h.sessions.actions().length, 1);
   const action = h.sessions.actions()[0];
-  assert.equal(action.command, "sh -s");
+  assert.ok(action.command.startsWith("sh -c '"));
   assert.match(action.input, /tar -czf/);
   assert.ok(!action.input.includes('"$bin" backup'));
   assert.ok(!action.input.includes("read -r passphrase"));
-  assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf('"$bin" update'));
+  assert.ok(action.input.indexOf("tar -czf") < action.input.indexOf("run_step installing install"));
   assert.equal(action.maxBytes, 262144);
   assert.match(operation.result.backupDirectory, /\/magpie-remote\/backups\/[a-f0-9-]+$/);
 });
@@ -968,7 +1072,7 @@ test("remote backup inventory lists metadata without exposing backup contents an
   assert.ok(input.includes(backupId));
   assert.ok(input.indexOf("tar -czf") < input.indexOf('run_step stopping "$bin" daemon stop'));
   assert.ok(input.indexOf('run_step stopping "$bin" daemon stop') < input.indexOf('run_step restoring mv -- "$target"'));
-  assert.ok(input.includes('run_step starting "$bin" daemon start'));
+  assert.ok(input.includes('start_private_service starting "$bin" daemon start'));
   assert.ok(!input.includes('"$bin" restore'));
   assert.ok(h.sessions.logs.some((entry) => entry.message.includes(operation.result.backupDirectory)));
 });

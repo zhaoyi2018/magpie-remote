@@ -5,6 +5,7 @@ import { fingerprint, hostVerifier } from "./host-keys.mjs";
 import { prepareAuthentication, credentialRequest } from "./authentication.mjs";
 import { OperationError, errorDetails, sshFailure } from "./errors.mjs";
 import { executeRemote } from "./remote-exec.mjs";
+import { loopbackHost, privateForward, verifyRemoteListener } from "./remote-listeners.mjs";
 
 const { Client } = ssh2;
 
@@ -99,6 +100,8 @@ export class SessionManager {
       clearTimeout(intent.stableTimer);
       intent.stableTimer = setTimeout(() => { intent.attempts = 0; }, this.reconnectStableMs);
       intent.stableTimer.unref?.();
+      try { void Promise.resolve(this.onConnected?.(session.id)).catch(() => {}); }
+      catch { /* Optional integration must not fail an authenticated SSH session. */ }
       return this.#view(session);
     }).catch(async (error) => {
       if (!["disconnected", "failed"].includes(session.state)) this.#fail(session, error);
@@ -200,7 +203,7 @@ export class SessionManager {
 
   async addForward(id, value, { signal, internal = false } = {}) {
     aborted(signal);
-    const spec = validateForward(value);
+    const spec = privateForward(validateForward(value));
     const session = this.#sessions.get(id);
     if (!internal && session?.intent.phase === "connecting") throw new OperationError("SESSION_BUSY", "连接恢复中，请稍后再操作转发");
     if (session?.state !== "connected") throw new Error("请先成功建立 SSH 连接，再创建转发");
@@ -242,6 +245,9 @@ export class SessionManager {
           });
         }
       }));
+      aborted(signal);
+      if (session.state !== "connected") throw new Error("SSH 连接已关闭");
+      if (forward.direction === "s2c") await verifyRemoteListener(session.client, forward.bindPort, executeRemote, { signal });
       aborted(signal);
       if (session.state !== "connected") throw new Error("SSH 连接已关闭");
       forward.state = "listening";
@@ -462,9 +468,9 @@ export class SessionManager {
   #incoming(session, info, accept, reject) {
     const forward = [...session.forwards.values()].find((item) => (
       item.direction === "s2c" && item.state === "listening" && item.bindPort === info.destPort
-      && (item.bindHost === info.destIP || ["0.0.0.0", "::", "*"].includes(item.bindHost))
+      && item.bindHost === info.destIP
     ));
-    if (!forward || session.state !== "connected") return reject();
+    if (!forward || session.state !== "connected" || !loopbackHost(info.srcIP)) return reject();
     const attempt = this.#beginTarget(forward);
     let socket;
     try { socket = this.#track(forward, this.connectTarget({ host: forward.targetHost, port: forward.targetPort, allowHalfOpen: true })); }

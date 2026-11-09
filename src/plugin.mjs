@@ -8,6 +8,8 @@ import { readSSHConfig } from "./ssh-config.mjs";
 import { OperationError } from "./errors.mjs";
 import { RemoteManager } from "./remote.mjs";
 import { remoteActions } from "./remote-scripts.mjs";
+import { ProviderLink } from "./provider-link.mjs";
+import { privateForward } from "./remote-listeners.mjs";
 
 const runtimes = new WeakMap();
 export async function closePlugin(hooks) {
@@ -15,6 +17,7 @@ export async function closePlugin(hooks) {
   if (runtime) {
     runtime.startup.abort();
     await runtime.startupTask;
+    await runtime.providerLink?.close();
     await runtime.web?.close();
     await runtime.sessions.close();
     await runtime.remote.close();
@@ -49,6 +52,7 @@ const profileSchema = {
     autoStartForwards: { type: "boolean", default: true, description: "Start saved forward presets after successful authentication" },
     autoConnect: { type: "boolean", default: false, description: "Try connecting once when the plugin host starts using available saved authentication sources" },
     autoReconnect: { type: "boolean", default: false, description: "Retry network failures with capped exponential backoff; manual disconnect cancels retries and temporary credentials are never retained" },
+    autoLinkLocalMagpie: { type: "boolean", default: true, description: "Automatically add this computer's Magpie to the remote providers through a loopback SSH reverse forward once the remote Web service is running" },
     forwardFailurePolicy: { type: "string", enum: ["rollback", "continue"], default: "rollback", description: "Whether a rejected preset rolls back the connection or allows other presets to continue; uncertain remote allocations always close SSH" },
     identityFile: { ...stringSchema, description: "Absolute path or ~/ path to an SSH private key; never its contents" },
     agent: { ...stringSchema, description: "SSH agent socket or Windows named pipe" },
@@ -64,7 +68,7 @@ function args(properties, required = Object.keys(properties)) {
   return { type: "object", properties, required, additionalProperties: false };
 }
 
-export function createTools(store, sessions, remote = new RemoteManager({ store, sessions })) {
+export function createTools(store, sessions, remote = new RemoteManager({ store, sessions }), providerLink) {
   sessions.passwordVault ??= store.passwordVault;
   // Serialize configuration and session mutations for each profile, while allowing
   // independent connections to proceed in parallel in Magpie's shared host.
@@ -94,8 +98,18 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       args: args({ connectionId: idSchema, refresh: { type: "boolean", default: false } }, ["connectionId"]),
       execute({ connectionId, refresh = false }, ctx = {}) {
         if (typeof refresh !== "boolean") throw new Error("refresh 必须是布尔值");
-        const read = () => remote.status(connectionId, { refresh, signal: ctx.abort });
+        const read = async () => ({ ...await remote.status(connectionId, { refresh, signal: ctx.abort }), ...(providerLink && { localProvider: providerLink.status(connectionId) }) });
         return refresh ? serial(connectionId, read) : read();
+      },
+    },
+    remote_provider_sync: {
+      description: "Detect the local Magpie and ensure it exists among remote providers through a loopback SSH reverse forward. Runs automatically after SSH connects and periodically; existing unrelated providers are preserved. Returns public status without credentials.",
+      args: args({ connectionId: idSchema }),
+      execute({ connectionId }, ctx = {}) {
+        return serial(connectionId, () => {
+          if (!providerLink) throw new OperationError("PROVIDER_LINK_UNAVAILABLE", "本机 Magpie 自动对接尚未启用");
+          return providerLink.sync(connectionId, { signal: ctx.abort });
+        });
       },
     },
     remote_preview: {
@@ -223,6 +237,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       args: args({ connection: profileSchema, expectedRevision: { anyOf: [revisionSchema, { type: "null" }], description: "Use null for create-only; use the connections revision to replace an existing profile" } }, ["connection"]),
       execute({ connection, expectedRevision }, ctx = {}) {
         const profile = validateProfile(connection);
+        profile.forwards = profile.forwards.map(privateForward);
         if (profile.encryptedPassword) throw new Error("密码密文由本机生成，请勿在连接参数中提交");
         return serial(profile.id, async () => {
           if (sessions.isActive(profile.id)) throw new Error("请先断开连接再修改配置");
@@ -243,12 +258,13 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
           await sessions.forgetConnection(connectionId);
           try { await remote.forget(connectionId); }
           catch (cause) { throw new OperationError("REMOTE_CLEANUP_FAILED", "连接配置与 SSH 运行记录已删除，但远程管理缓存清理失败，请重新读取连接列表并检查本地记录文件", { cause }); }
+          await providerLink?.forget(connectionId);
           return result;
         });
       },
     },
     connect: {
-      description: "Authenticate a saved SSH connection, verify its host key, then start its saved c2s/s2c forwards unless autoStartForwards is false. A failed preset rolls back by default; forwardFailurePolicy=continue preserves the connection for recoverable failures. No remote shell is executed.",
+      description: "Authenticate a saved SSH connection, verify its host key, then start its saved c2s/s2c forwards unless autoStartForwards is false. A failed preset rolls back by default; forwardFailurePolicy=continue preserves the connection for recoverable failures. After connection the optional local Magpie integration automatically probes the remote and configures its provider through a reverse SSH tunnel.",
       args: args({ connectionId: idSchema }),
       execute({ connectionId }, ctx = {}) {
         identifier(connectionId);
@@ -301,7 +317,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       description: "Create or replace a saved c2s/s2c forward preset using the profile's expectedRevision from connections; return {forward, revision}. Stop this particular forward before editing it. Saving does not start the forward.",
       args: args({ connectionId: idSchema, forward: forwardSchema, expectedRevision: revisionSchema }),
       execute({ connectionId, forward, expectedRevision }) {
-        const spec = validateForward(forward);
+        const spec = privateForward(validateForward(forward));
         return serial(connectionId, async () => {
           assertForwardEditable(connectionId);
           const profile = await store.get(connectionId);
@@ -353,7 +369,10 @@ export async function createPlugin(input = {}, options) {
   const store = new ProfileStore(join(config.dataDirectory, "connections.json"));
   const sessions = new SessionManager(config);
   const remote = new RemoteManager({ store, sessions });
-  const tools = createTools(store, sessions, remote);
+  const providerLink = new ProviderLink({ store, sessions, remote, directory: config.magpieDirectory });
+  const tools = createTools(store, sessions, remote, providerLink);
+  providerLink.start((connectionId) => tools.remote_provider_sync.execute({ connectionId }));
+  sessions.onConnected = (id) => providerLink.schedule(id);
   const hooks = {};
   let web;
   if (config.webUI) {
@@ -365,6 +384,9 @@ export async function createPlugin(input = {}, options) {
       const close = web.close;
       web.close = async () => { unpublish(); await close(); };
     } catch (error) {
+      await providerLink.close();
+      await sessions.close();
+      await remote.close();
       await web?.close();
       throw error;
     }
@@ -373,6 +395,6 @@ export async function createPlugin(input = {}, options) {
   const startupTask = store.list().then((profiles) => Promise.allSettled(profiles
     .filter((profile) => profile.autoConnect)
     .map((profile) => tools.connect.execute({ connectionId: profile.id }, { abort: startup.signal })))).catch(() => {});
-  runtimes.set(hooks, { sessions, remote, web, startup, startupTask });
+  runtimes.set(hooks, { sessions, remote, providerLink, web, startup, startupTask });
   return hooks;
 }

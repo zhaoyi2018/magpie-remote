@@ -62,7 +62,7 @@ node --version
 
 ## 固定官方资产与命令
 
-操作者从可信官方发布资料取得准确版本、对应 Linux CLI URL 和 SHA-256，将它们放入清单。清单是参数输入，脚本不会自动接受随时间变化的 latest 作为安装版本。只允许 `https://github.com/yetone/magpie-releases/releases/download/<固定版本>/magpie-cli-linux-amd64` 或 arm64，同一 URL 中的版本必须与清单一致。
+操作者从可信官方发布资料取得准确版本、对应 Linux CLI URL 和 SHA-256，将它们放入清单。清单是参数输入，脚本不会自动接受随时间变化的 latest 作为安装版本。只允许 `https://usemagpie.ai/files/v<固定版本>/magpie-cli-linux-amd64` 或官方 GitHub 仓库的 `https://github.com/yetone/magpie-releases/releases/download/v<固定版本>/magpie-cli-linux-amd64`，arm64 使用对应文件名，同一 URL 中的版本必须与清单一致；GitHub 版本标签也兼容省略 `v`。两种来源使用与安装预览相同的解析与校验逻辑。
 
 在仓库 `.local/pinned-releases.json` 创建以下结构，**先将占位符全部替换为实际官方值**。占位版本、缺失/伪造 SHA-256 都会被拒绝；这里不提供未经下载核实的哈希，也不编造下载总字节数：
 
@@ -90,9 +90,9 @@ node scripts/linux-lifecycle-smoke.mjs \
 
 等价环境变量是 `MIGPIE_LINUX_HOME`、`MIGPIE_LINUX_CONFIRM_HOME`、`MIGPIE_LINUX_RELEASE_MANIFEST`。HOME 必须是当前账户的实际登记 HOME，且当前 `HOME` 已与它相同。显式重复 HOME 表示确认该目录及该用户会话只用于一次性验收。报告应留在 HOME 外，以便删除账户后保留证据。
 
-脚本通过子进程 `/usr/bin/sh -s` 执行现有 [actionScript / probeScript](../src/remote-scripts.mjs)，保持 install → enable_web → backup → restore → uninstall 的真实路径。安装使用原脚本的 HTTPS 下载、全新下载暂存目录与 SHA-256 校验；生成脚本通过 stdin 传入，控制工作目录与下载目录分开。不会在下载目录运行解释器，也不添加 curl/Magpie/systemctl 替身。备份使用随机生成的无秘密文本标记，恢复要求标记还原、多余文件消失、恢复前快照保留和用户服务重新运行；既不提交模型请求，也不执行会输出 Web 管理密钥的 `daemon web`。
+脚本通过子进程执行现有 [actionScript / probeScript](../src/remote-scripts.mjs)，保持 install → enable_web → backup → restore → uninstall 的真实路径。安装和更新先由验收进程下载固定资产并校验，然后以 `/usr/bin/sh -c` 执行安装脚本，文件字节从标准输入流式传入，安装脚本再次校验；其他脚本仍通过 `/usr/bin/sh -s` 传入。此验收在同一 Linux 账户内模拟上传入口，不替代实际 SSH 传输验证。控制工作目录与下载目录分开；不会在下载目录运行解释器，也不添加 curl/Magpie/systemctl 替身。备份使用随机生成的无秘密文本标记，恢复要求标记还原、多余文件消失、恢复前快照保留和用户服务重新运行；既不提交模型请求，也不执行会输出 Web 管理密钥的 `daemon web`。
 
-提供 `update` 时，脚本先把第二资产下载到另一个新空目录并校验哈希，再确认官方 `https://usemagpie.ai/api/latest` 的版本、资产 URL、SHA-256 与第二资产一致，随后调用原 `actionScript("update")`。原生 `magpie update` 仍跟随官方 latest，不能强制历史目标；feed 已变化会拒绝运行，运行后版本及二进制 SHA-256 不一致也会失败。该前后校验不提供原生更新的版本锁定保证。未提供第二资产时完全不执行更新，`update` 为 `not_run`，JSON 为 `incomplete`，核心流程成功可退出 0，但 strict 发布门禁仍非零。
+提供 `update` 时，脚本先把第二资产下载到另一个新空目录并校验哈希，再调用 `actionScript("update")`，将固定资产从标准输入传入。更新不调用原生 `magpie update`，不要求固定版本仍为官方 latest；运行后验证实际版本及二进制 SHA-256 与固定资产一致。未提供第二资产时完全不执行更新，`update` 为 `not_run`，JSON 为 `incomplete`，核心流程成功可退出 0，但 strict 发布门禁仍非零。
 
 结果含 `kind: "magpie-linux-lifecycle"`、`execution: "real"`、`substitutes: false`、提交/指纹、真实 Linux 与用户会话证据、固定官方资产及逐动作结果。任一前置检查失败，后续动作仍是 `not_run`；Windows/Git Bash 运行入口也只会失败并生成未验收报告，不会退回替身。原始 CLI/systemd 输出不落报告或控制台，避免意外保存服务 Web key。
 

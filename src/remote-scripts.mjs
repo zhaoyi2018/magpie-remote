@@ -1,4 +1,5 @@
 import { backupIdPattern, backupInspection } from "./remote-backups.mjs";
+import { servicePolicyFunctions } from "./remote-service.mjs";
 
 export const remoteActions = ["install", "update", "start", "stop", "restart", "enable_web", "backup", "restore", "delete_backup", "uninstall"];
 export const backupActions = ["update", "backup", "restore"];
@@ -6,6 +7,12 @@ export const backupActions = ["update", "backup", "restore"];
 export function shellQuote(value) {
   if (typeof value !== "string" || /[\x00-\x1f\x7f]/.test(value)) throw new Error("远端参数无效");
   return "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
+// A generated script is passed as one command argument, leaving stdin for bytes.
+export function scriptCommand(script) {
+  if (typeof script !== "string" || script.includes("\0")) throw new Error("远端脚本无效");
+  return "sh -c '" + script.replaceAll("'", "'\\''") + "'";
 }
 
 export const probeScript = `set -eu
@@ -59,6 +66,11 @@ else emit serviceInstalled false; emit webEnabled false; fi
 if [ "$systemd" = true ]; then
   emit serviceActive "$(systemctl --user show magpie.service --property=ActiveState --value 2>/dev/null || true)"
 fi
+${servicePolicyFunctions}
+emit serviceRebuildSafe "$(if [ "$systemd" = true ] && service_overrides_clear; then printf true; else printf false; fi)"
+emit serviceScope "$(if [ "$systemd" = true ] && service_private_config; then
+  if [ "$(systemctl --user show magpie.service --property=ActiveState --value 2>/dev/null)" != active ] || service_private_listeners; then printf loopback; else printf unknown; fi
+else printf unknown; fi)"
 emit linger "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)"
 emit tools "$(for tool in curl sha256sum base64 mktemp install readlink tar; do command -v "$tool" >/dev/null && printf '%s ' "$tool"; done)"
 emit locked "$(if [ -d "\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote/operation.lock" ]; then printf true; else printf false; fi)"
@@ -144,24 +156,26 @@ export function actionScript(action, instance, operationId, release, selectedBac
   restore_result=$(printf 'MIGPIE_RESTORE_V1\\t%s\\t%s\\t%s\\t%s\\t%s' '${operationId}' "$restore_config_state" "$restore_service_state" "$restore_rollback_state" "$restore_recovery")
   result=$(printf '%s\\n%s' "$result" "$restore_result")
 ` : "";
+  const startsService = ["enable_web", "start", "restart"].includes(action) || ["update", "restore"].includes(action) && instance.service.state === "running";
   const prefix = common + `bin=${bin}
-job="$base/operations/${operationId}"
+${startsService ? "unit=" + shellQuote(instance.unit) + "\n" : ""}job="$base/operations/${operationId}"
 step=preparing
 reason=command_failed
 backup_ready=false
 stage=''
-command_pid=''
+replacement=''
 restore_stage=''
 restore_applied=false
+service_pending=false
 ${action === "restore" ? "restore_config_state=not_applied\nrestore_service_state=unchanged\nrestore_rollback_state=not_needed\n" : ""}finish() {
   code=$?
   trap - EXIT
   trap '' HUP INT TERM PIPE
   set +e
-  # A lost SSH channel must not release the lock while a download still runs.
-  if [ -n "$command_pid" ]; then wait "$command_pid" 2>/dev/null; fi
+  if [ "$service_pending" = true ]; then systemctl --user stop magpie.service >/dev/null 2>&1; fi
   rm -f "$job/output"
   if [ -n "$stage" ]; then rm -f "$stage/magpie"; rmdir "$stage"; fi
+  if [ -n "$replacement" ]; then rm -f -- "$replacement"; fi
 ${restoreCleanup}  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
   if [ -f "$job/reason" ]; then reason=$(cat "$job/reason"); fi
   state=failed
@@ -186,38 +200,10 @@ mkdir -p "$job"
 printf running > "$job/state"
 emit_progress() { printf 'MIGPIE_PROGRESS_V1\\t%s\\t%s\\t%s\\t%s\\n' '${operationId}' "$1" "$2" "$3"; }
 set_step() { step=$1; printf '%s' "$step" > "$job/step"; emit_progress "$step" 0 0; }
-sample_download() {
-  current_bytes=''
-  if [ "$step" = downloading ]; then
-    if [ -f "$stage/magpie" ] && [ ! -L "$stage/magpie" ]; then current_bytes=$(stat -c %s "$stage/magpie" 2>/dev/null || true); fi
-  else
-    for candidate in "$download_bin.new" "$(dirname "$download_bin")/.magpie-update/$download_name.new" "\${XDG_CACHE_HOME:-$HOME/.cache}/magpie/update/$download_name.new" "$(dirname "$download_bin")/data/cache/update/$download_name.new"; do
-      if [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ "$candidate" -nt "$job/download-start" ]; then
-        current_bytes=$(stat -c %s "$candidate" 2>/dev/null || true)
-        break
-      fi
-    done
-  fi
-  case "$current_bytes" in ''|*[!0-9]*) return ;; esac
-  emit_progress "$step" "$current_bytes" "$download_total"
-}
 run_step() {
   set_step "$1"
   shift
-  if [ "$step" = downloading ] || [ "$step" = updating ]; then
-    download_total=${action === "install" && Number.isSafeInteger(release?.size) && release.size > 0 ? release.size : 0}
-    download_bin=$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")
-    download_name=\${download_bin##*/}
-    : > "$job/download-start"
-    "$@" > "$job/output" 2>&1 &
-    command_pid=$!
-    while kill -0 "$command_pid" 2>/dev/null; do sample_download; sleep 1; done
-    sample_download
-    if wait "$command_pid"; then command_pid=''; rm -f "$job/output"; return 0; else code=$?; fi
-    command_pid=''
-    output=$(tail -c 16384 "$job/output")
-    rm -f "$job/output"
-  elif output=$("$@" 2>&1); then return 0; else code=$?; fi
+  if output=$("$@" 2>&1); then return 0; else code=$?; fi
   reason=command_failed
   if printf '%s' "$output" | grep -Eiq 'permission denied|operation not permitted|read-only file system|access is denied'; then reason=permission;
   elif printf '%s' "$output" | grep -Eiq 'no space left|disk (is )?full|disk quota exceeded'; then reason=disk_full;
@@ -229,26 +215,46 @@ run_step() {
   printf '%s' "$reason" > "$job/reason"
   return "$code"
 }
-set_step verifying
-${instance.binaryHash ? `actual=$(sha256sum "$bin" | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.binaryHash)} ] || exit 79\n` : ""}${instance.unitHash ? `actual=$(sha256sum ${shellQuote(instance.unit)} | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.unitHash)} ] || exit 79\n` : ""}`;
-  if (action === "install") {
-    return prefix + `command -v magpie >/dev/null 2>&1 && exit 76
-[ ! -e "$bin" ] && [ ! -L "$bin" ] || exit 76
-command -v curl >/dev/null
-command -v sha256sum >/dev/null
-stage=$(mktemp -d "$base/download.XXXXXXXX")
-run_step downloading curl -fLsS --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 ${shellQuote(release.url)} -o "$stage/magpie"
+${startsService ? servicePolicyFunctions + `private_failure() {
+  reason=loopback_required
+  printf '%s' "$reason" > "$job/reason"
+  return 80
+}
+start_private_service() {
+  service_private_config || { private_failure; return 80; }
+  service_pending=true
+  if run_step "$@"; then
+    if ! service_private_listeners; then private_failure; return 80; fi
+    service_pending=false
+    return 0
+  else return $?; fi
+}
+` : ""}set_step verifying
+${instance.binaryHash ? `actual=$(sha256sum "$bin" | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.binaryHash)} ] || exit 79\n` : ""}${instance.unitHash ? `actual=$(sha256sum ${shellQuote(instance.unit)} | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.unitHash)} ] || exit 79\n` : ""}${startsService ? `systemctl --user daemon-reload >/dev/null 2>&1 || { private_failure; exit 80; }
+${action === "enable_web" ? "service_overrides_clear" : "service_private_config"} || { private_failure; exit 80; }
+` : ""}`;
+  const uploadedRelease = ["install", "update"].includes(action) ? `command -v sha256sum >/dev/null
+stage=$(mktemp -d "$base/upload.XXXXXXXX")
+receive_binary() { cat > "$stage/magpie"; }
+run_step uploading receive_binary
 set_step verifying
 printf '%s  %s\\n' ${shellQuote(release.sha256)} "$stage/magpie" | sha256sum -c - >/dev/null
 chmod 755 "$stage/magpie"
-run_step checking_version "$stage/magpie" --version
+run_step checking_upload "$stage/magpie" --version </dev/null
+` : "";
+  if (action === "install") {
+    return prefix + `command -v magpie >/dev/null 2>&1 && exit 76
+[ ! -e "$bin" ] && [ ! -L "$bin" ] || exit 76
+${uploadedRelease}
 set_step installing
 mkdir -p "$HOME/.local/bin"
 [ ! -e "$bin" ] && [ ! -L "$bin" ] || exit 76
-install -m 755 "$stage/magpie" "$HOME/.local/bin/.magpie-${operationId}"
-mv -n "$HOME/.local/bin/.magpie-${operationId}" "$bin"
-[ ! -e "$HOME/.local/bin/.magpie-${operationId}" ] || exit 76
-run_step checking_version "$bin" --version
+replacement="$HOME/.local/bin/.magpie-${operationId}"
+[ ! -e "$replacement" ] && [ ! -L "$replacement" ] || { replacement=''; exit 76; }
+install -m 755 "$stage/magpie" "$replacement"
+mv -n "$replacement" "$bin"
+[ ! -e "$replacement" ] || exit 76
+run_step checking_version "$bin" --version </dev/null
 printf 'MIGPIE_DONE\\n'
 `;
   }
@@ -265,7 +271,14 @@ run_step deleting_backup rmdir "$selected"
 printf 'MIGPIE_DONE\\n'
 `;
   if (backupActions.includes(action)) {
-    const mutation = action === "update" ? 'run_step updating "$bin" update </dev/null\n' : action === "restore" ? `set_step restoring
+    const mutation = action === "update" ? `set_step installing
+target=$(readlink -f -- "$bin") || exit 78
+[ -f "$target" ] && [ ! -L "$target" ] || exit 78
+${instance.binaryHash ? `actual=$(sha256sum "$bin" | cut -d ' ' -f 1)\n[ "$actual" = ${shellQuote(instance.binaryHash)} ] || exit 79\n` : ""}replacement="$(dirname "$target")/.magpie-${operationId}"
+[ ! -e "$replacement" ] && [ ! -L "$replacement" ] || { replacement=''; exit 76; }
+run_step installing install -m 755 "$stage/magpie" "$replacement"
+run_step installing mv -f -- "$replacement" "$target"
+` : action === "restore" ? `set_step restoring
 case "$format" in archive|absent) ;; *) exit 78 ;; esac
 # Stage the archive beside the target, keeping extraction away from live files.
 target=$(readlink -f -- "$config") || exit 78
@@ -291,7 +304,7 @@ elif [ -L "$config" ]; then run_step restoring rm -- "$config"; fi
 restore_applied=true
 restore_config_state=applied
 ` : "";
-    return prefix + selected + `command -v sha256sum >/dev/null
+    return prefix + uploadedRelease + selected + `command -v sha256sum >/dev/null
 command -v tar >/dev/null
 config=${shellQuote(instance.configDirectory)}
 set_step preparing_backup
@@ -308,14 +321,18 @@ elif [ -e "$config" ] || [ -L "$config" ]; then exit 77
 else printf 'Configuration directory did not exist before this operation.\\n' > "$backup/config.absent"; fi
 run_step saving_binary cp -p "$bin" "$backup/magpie"
 backup_ready=true
-${mutation}${action !== "backup" && instance.service.state === "running" ? `${action === "restore" ? "restore_service_state=unknown\n" : ""}run_step ${action === "restore" ? 'starting "$bin" daemon start' : 'restarting "$bin" daemon restart'} </dev/null\n` : ""}${action === "update" ? 'run_step checking_version "$bin" --version </dev/null\n' : ""}${action !== "backup" && instance.service.state === "running" ? `run_step healthcheck "$bin" healthcheck </dev/null\n${action === "restore" ? "restore_service_state=running\n" : ""}` : ""}printf 'MIGPIE_DONE\\n'
+${mutation}${action !== "backup" && instance.service.state === "running" ? `${action === "restore" ? "restore_service_state=unknown\n" : ""}start_private_service ${action === "restore" ? 'starting "$bin" daemon start' : 'restarting "$bin" daemon restart'} </dev/null\n` : ""}${action === "update" ? 'run_step checking_version "$bin" --version </dev/null\n' : ""}${action !== "backup" && instance.service.state === "running" ? `run_step healthcheck "$bin" healthcheck </dev/null\n${action === "restore" ? "restore_service_state=running\n" : ""}` : ""}printf 'MIGPIE_DONE\\n'
 `;
   }
-  if (action === "enable_web") return prefix + `MAGPIE_ADDR=127.0.0.1:3425 run_step enabling_web "$bin" daemon install --web --addr 127.0.0.1:3430 </dev/null
+  if (action === "enable_web") return prefix + `service_pending=true
+export MAGPIE_ADDR=127.0.0.1:3425
+run_step enabling_web "$bin" daemon install --web --addr 127.0.0.1:3430 </dev/null
+service_private_listeners || { private_failure; exit 80; }
+service_pending=false
 run_step healthcheck "$bin" healthcheck </dev/null
 printf 'MIGPIE_DONE\\n'
 `;
-  if (["start", "stop", "restart"].includes(action)) return prefix + `run_step ${action === "start" ? "starting" : action === "stop" ? "stopping" : "restarting"} "$bin" daemon ${action} </dev/null
+  if (["start", "stop", "restart"].includes(action)) return prefix + `${action === "stop" ? "run_step" : "start_private_service"} ${action === "start" ? "starting" : action === "stop" ? "stopping" : "restarting"} "$bin" daemon ${action} </dev/null
 ${action === "stop" ? "" : 'run_step healthcheck "$bin" healthcheck </dev/null\n'}printf 'MIGPIE_DONE\\n'
 `;
   if (action === "uninstall") return prefix + `expected="$HOME/.local/bin/magpie"

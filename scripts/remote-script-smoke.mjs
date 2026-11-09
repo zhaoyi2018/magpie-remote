@@ -5,9 +5,12 @@ import { join, resolve, basename, dirname } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { actionScript, probeScript, recoveryScript, shellQuote } from "../src/remote-scripts.mjs";
+import { Readable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
+import { actionScript, probeScript, recoveryScript, scriptCommand, shellQuote } from "../src/remote-scripts.mjs";
 import { parseProbe } from "../src/remote.mjs";
 import { backupInventoryScript, parseBackups } from "../src/remote-backups.mjs";
+import { listenerScopeFunction } from "../src/remote-listeners.mjs";
 
 // Runs generated POSIX scripts with a fake Magpie executable and service manager.
 // It never downloads a release or invokes an installed Magpie.
@@ -16,16 +19,22 @@ const bundledBash = git && join(dirname(dirname(git)), "bin", "bash.exe");
 const bash = process.env.MIGPIE_BASH || (bundledBash && existsSync(bundledBash) ? bundledBash : "bash");
 const directory = await mkdtemp(join(tmpdir(), "migpie-script-smoke-"));
 const home = join(directory, "home"), tools = join(directory, "tools");
-const run = (script, onStdout) => new Promise((resolveRun, reject) => {
-  const setup = `export HOME="$(cd ${shellQuote(home.replaceAll("\\", "/"))} && pwd -P)"\nexport XDG_CONFIG_HOME="$HOME/.config"\nexport PATH="$(cd ${shellQuote(tools.replaceAll("\\", "/"))} && pwd -P):$PATH"\n`;
-  const child = spawn(bash, ["-s"], { env: { ...process.env, MSYS_NO_PATHCONV: "1" }, stdio: ["pipe", "pipe", "pipe"] });
+const run = async (script, onStdout, input = "") => {
+  const setup = `export HOME="$(cd ${shellQuote(home.replaceAll("\\", "/"))} && pwd -P)"\nexport XDG_CONFIG_HOME="$HOME/.config"\nunset MAGPIE_ADDR\nexport PATH="$(cd ${shellQuote(tools.replaceAll("\\", "/"))} && pwd -P):$HOME/.local/bin:/usr/bin:/bin"\n`;
+  const path = join(directory, "script-" + randomUUID() + ".sh");
+   const isolated = script.replaceAll("/proc/net/tcp6", home.replaceAll("\\", "/") + "/tcp6").replaceAll("/proc/net/tcp", home.replaceAll("\\", "/") + "/tcp");
+   await writeFile(path, setup + (input ? "exec " + scriptCommand(isolated) + "\n" : isolated));
+  try { return await new Promise((resolveRun, reject) => {
+  const child = spawn(bash, [path.replaceAll("\\", "/")], { env: { ...process.env, MSYS_NO_PATHCONV: "1" }, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   const timer = setTimeout(() => { child.kill(); reject(new Error("Script smoke timed out: " + (script.match(/job=[^\n]+/)?.[0] ?? script.slice(-160)))); }, 20000);
   child.stdout.on("data", (chunk) => { stdout += chunk; onStdout?.(chunk.toString()); }); child.stderr.on("data", (chunk) => { stderr += chunk; });
   child.once("error", (error) => { clearTimeout(timer); reject(error); });
   child.once("close", (code) => { clearTimeout(timer); resolveRun({ code, stdout, stderr }); });
-  child.stdin.end(setup + script);
-});
+  child.stdin.on("error", () => {});
+  if (input instanceof Readable) input.pipe(child.stdin); else child.stdin.end(input);
+  }); } finally { await rm(path, { force: true }); }
+};
 const id = "c2be46f1-cf7c-4e27-a5ef-c0786bb4fb05";
 try {
   await Promise.all([mkdir(home), mkdir(tools)]);
@@ -53,9 +62,12 @@ case "$1" in
       rm -f "$0.new"
     fi
     printf updated > "$HOME/updated" ;;
-  healthcheck) if [ -e "$HOME/fail-healthcheck" ]; then printf 'gateway not healthy: isolated-private-output\\n' >&2; exit 1; fi; [ "$(cat "$state" 2>/dev/null)" = running ] ;;
+  healthcheck) [ "$MAGPIE_ADDR" = 127.0.0.1:3425 ] || exit 97; if [ -e "$HOME/fail-healthcheck" ]; then printf 'gateway not healthy: isolated-private-output\\n' >&2; exit 1; fi; [ "$(cat "$state" 2>/dev/null)" = running ] ;;
   daemon) printf '%s\\n' "$2" >> "$HOME/service-actions"; if { [ "$2" = restart ] && [ -e "$HOME/fail-restart" ]; } || { [ "$2" = start ] && [ -e "$HOME/fail-start" ]; }; then printf 'permission denied: isolated-private-output\\n' >&2; exit 1; fi; case "$2" in
-    install|restart|start) printf running > "$state" ;;
+    install) mkdir -p "$HOME/.config/systemd/user"
+      printf '[Service]\nExecStart="%s" serve "--web=127.0.0.1:3430"\nEnvironment="MAGPIE_ADDR=%s"\nEnvironment="MAGPIE_WEB_KEY=isolated-script-secret"\n' "$0" "$MAGPIE_ADDR" > "$HOME/.config/systemd/user/magpie.service"
+      printf running > "$state" ;;
+    restart|start) printf running > "$state" ;;
     stop) printf stopped > "$state" ;;
     uninstall) rm -f "$HOME/.config/systemd/user/magpie.service" "$state" ;;
     *) exit 3 ;;
@@ -64,7 +76,19 @@ case "$1" in
 esac
 `;
   await writeFile(join(tools, "uname"), "#!/bin/sh\nprintf 'Linux\\n'\n", { mode: 0o755 });
-  await writeFile(join(tools, "systemctl"), "#!/bin/sh\ncase \"$*\" in *show-environment*) exit 0;; *ActiveState*) printf active;; esac\n", { mode: 0o755 });
+  await writeFile(join(tools, "systemctl"), `#!/bin/sh
+case "$*" in
+  *show-environment*) exit 0;;
+  *UnitPath*) printf '%s' "$HOME/.config/systemd/user";;
+  *ActiveState*) if [ "$(cat "$HOME/service-state" 2>/dev/null)" = running ]; then printf active; else printf inactive; fi;;
+  *FragmentPath*) if [ -f "$HOME/.config/systemd/user/magpie.service" ]; then printf '%s' "$HOME/.config/systemd/user/magpie.service"; else exit 1; fi;;
+  *DropInPaths*) if [ -f "$HOME/drop-in" ]; then printf '%s' "$HOME/override.conf"; fi;;
+  *EnvironmentFiles*) if [ -f "$HOME/env-file" ]; then printf '%s' "$HOME/service.env"; fi;;
+  *NeedDaemonReload*) printf no;;
+  *LoadState*) if [ -f "$HOME/.config/systemd/user/magpie.service" ]; then printf loaded; else printf not-found; exit 1; fi;;
+  *'stop magpie.service'*) printf stopped > "$HOME/service-state";;
+esac
+`, { mode: 0o755 });
   await writeFile(join(tools, "loginctl"), "#!/bin/sh\nprintf 'yes\\n'\n", { mode: 0o755 });
   const posixHome = (await run('cd "$HOME" && pwd -P')).stdout.trim();
   const binary = posixHome + "/.local/bin/magpie";
@@ -75,12 +99,20 @@ esac
   await mkdir(config);
   await writeFile(join(config, "providers.json"), "isolated-config-secret");
   await writeFile(join(home, ".local", "bin", "magpie"), fake, { mode: 0o755 });
-  await writeFile(join(home, ".config", "systemd", "user", "magpie.service"), '[Service]\nExecStart="' + binary + '" "serve" "--web=127.0.0.1:3430"\nEnvironment="MAGPIE_WEB_KEY=isolated-script-secret"\n');
+  const unitPath = join(home, ".config", "systemd", "user", "magpie.service");
+  const safeUnit = '[Service]\nExecStart="' + binary + '" serve "--web=127.0.0.1:3430"\nEnvironment="MAGPIE_ADDR=127.0.0.1:3425"\nEnvironment="MAGPIE_WEB_KEY=isolated-script-secret"\n';
+  await writeFile(unitPath, safeUnit);
+  const tcpRow = (address, port = 3425) => `0: ${address}:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000:0000 0A\n`;
+  const safeListeners = tcpRow("0100007F") + tcpRow("0100007F", 3430);
+  await writeFile(join(home, "tcp"), safeListeners); await writeFile(join(home, "tcp6"), "");
+  await writeFile(join(home, "service-state"), "running");
   const probe = await run(probeScript); assert.equal(probe.code, 0, probe.stderr);
   const instance = parseProbe(probe.stdout);
   assert.equal(instance.platform, "Linux"); assert.equal(instance.installed, true); assert.equal(instance.web.port, 3430);
   assert.ok(!probe.stdout.includes("isolated-script-secret"));
   assert.equal(instance.version, "magpie 0.1.1327");
+  assert.equal(instance.service.scope, "loopback", JSON.stringify(instance.service));
+  assert.equal(instance.service.rebuildSafe, true);
   for (const capability of ["update", "backup", "healthcheck", "daemon_start", "daemon_stop", "daemon_restart", "daemon_uninstall", "daemon_web", "daemon_install_web"]) assert.ok(instance.capabilities.includes(capability), "missing " + capability);
   await writeFile(join(home, "limited-help"), 'magpie update [check]\nmagpie daemon\nDescription: backup start stop restart web --addr --web\n');
   const limited = parseProbe((await run(probeScript)).stdout);
@@ -88,7 +120,93 @@ esac
   await rm(join(home, "limited-help"));
   // Use a canonical HOME for the scripts' explicit default-path ownership check.
   const canonical = 'export HOME=' + "'" + posixHome.replaceAll("'", "'\\''") + "'\n";
-  const execute = (action, operationId = randomUUID(), selected, observed = instance) => run(canonical + actionScript(action, observed, operationId, undefined, selected));
+  const release = { version: "0.1.1327", sha256: createHash("sha256").update(fake).digest("hex"), size: Buffer.byteLength(fake) };
+  const execute = (action, operationId = randomUUID(), selected, observed = instance) => run(canonical + actionScript(action, observed, operationId, release, selected), undefined, ["install", "update"].includes(action) ? fake : "");
+  // Exercise the actual POSIX parser with IPv4, IPv6 and mixed socket tables.
+  for (const [ipv4, ipv6, scope] of [
+    [tcpRow("0100007F"), "", "loopback"],
+    [tcpRow("0200007F"), "", "loopback"],
+    [tcpRow("00000000"), "", "exposed"],
+    [tcpRow("0101A8C0"), "", "exposed"],
+    ["", tcpRow("00000000000000000000000001000000"), "loopback"],
+    ["", tcpRow("00000000000000000000000000000000"), "exposed"],
+    ["", tcpRow("0000000000000000FFFF00000100007F"), "loopback"],
+    [tcpRow("0100007F"), tcpRow("00000000000000000000000000000000"), "exposed"],
+    [tcpRow("0100007F", 3426), "", "unknown"],
+  ]) {
+    await writeFile(join(home, "tcp"), ipv4); await writeFile(join(home, "tcp6"), ipv6);
+    const checked = await run(listenerScopeFunction + "listener_scope 3425\n");
+    assert.equal(checked.code, 0, checked.stderr); assert.equal(checked.stdout.trim(), scope);
+  }
+  await writeFile(join(tools, "od"), "#!/bin/sh\ncat >/dev/null\nprintf '256\\n'\n", { mode: 0o755 });
+  for (const [ipv4, ipv6, scope] of [
+    [tcpRow("7F000001"), "", "loopback"],
+    [tcpRow("C000007F"), "", "exposed"],
+    ["", tcpRow("00000000000000000000000000000001"), "loopback"],
+    ["", tcpRow("00000000000000000000FFFF7F000001"), "loopback"],
+  ]) {
+    await writeFile(join(home, "tcp"), ipv4); await writeFile(join(home, "tcp6"), ipv6);
+    const checked = await run(listenerScopeFunction + "listener_scope 3425\n");
+    assert.equal(checked.stdout.trim(), scope, checked.stderr);
+  }
+  await rm(join(tools, "od"));
+  await rm(join(home, "tcp")); await rm(join(home, "tcp6"));
+  for (const [addresses, scope] of [["127.0.0.1:3425", "loopback"], ["[::1]:3425", "loopback"], ["[::]:3425", "exposed"], ["0.0.0.0:3425", "exposed"], ["127.0.0.1:3426", "unknown"]]) {
+    await writeFile(join(tools, "ss"), "#!/bin/sh\nprintf '%s\\n' 'LISTEN 0 128 " + addresses + " *:*'\n", { mode: 0o755 });
+    const checked = await run(listenerScopeFunction + "listener_scope 3425\n");
+    assert.equal(checked.stdout.trim(), scope, checked.stderr);
+  }
+  await rm(join(tools, "ss"));
+  await writeFile(join(home, "tcp"), safeListeners); await writeFile(join(home, "tcp6"), "");
+  for (const unsafe of [
+    safeUnit.replace("MAGPIE_ADDR=127.0.0.1", "MAGPIE_ADDR=0.0.0.0"),
+    safeUnit.replace("MAGPIE_ADDR=127.0.0.1", "MAGPIE_ADDR=[::]"),
+    safeUnit.replace("--web=127.0.0.1", "--web=0.0.0.0"),
+    safeUnit.replace("--web=127.0.0.1", "--web=[::]"),
+    safeUnit.replace('Environment="MAGPIE_ADDR=127.0.0.1:3425"\n', ""),
+    safeUnit + 'EnvironmentFile=/some/override.env\n',
+    safeUnit.replace('serve "--web', 'serve --lan "--web'),
+  ]) {
+    await writeFile(unitPath, unsafe); await writeFile(join(home, "service-actions"), "");
+    const observed = parseProbe((await run(probeScript)).stdout);
+    assert.equal(observed.service.scope, "unknown");
+    for (const action of ["start", "restart", "update"]) {
+      const result = await execute(action, randomUUID(), undefined, observed);
+      assert.equal(result.code, 80, result.stderr + result.stdout);
+      assert.match(result.stdout, /\tverifying\t80\tloopback_required\tfalse/);
+    }
+    assert.equal(await readFile(join(home, "service-actions"), "utf8"), "");
+  }
+  await writeFile(unitPath, safeUnit);
+  for (const flag of ["drop-in", "env-file"]) {
+    await writeFile(join(home, flag), "override");
+    const observed = parseProbe((await run(probeScript)).stdout);
+    assert.equal(observed.service.rebuildSafe, false);
+    const result = await execute("enable_web", randomUUID(), undefined, observed);
+    assert.equal(result.code, 80, result.stderr + result.stdout);
+    assert.equal(await readFile(join(home, "service-actions"), "utf8"), "");
+    await rm(join(home, flag));
+  }
+  const genericDropin = join(home, ".config", "systemd", "user", "service.d");
+  await mkdir(genericDropin);
+  await writeFile(join(genericDropin, "override.conf"), '[Service]\nEnvironment="MAGPIE_ADDR=0.0.0.0:3425"\n');
+  const overridden = parseProbe((await run(probeScript)).stdout);
+  assert.equal(overridden.service.rebuildSafe, false, "Unloaded generic drop-ins must also be detected");
+  assert.equal((await execute("enable_web", randomUUID(), undefined, overridden)).code, 80);
+  await rm(genericDropin, { recursive: true });
+  for (const scope of ["exposed", "unknown"]) {
+    await writeFile(join(home, "tcp"), scope === "exposed" ? tcpRow("00000000") + tcpRow("0100007F", 3430) : "");
+    const result = await execute("start", randomUUID());
+    assert.equal(result.code, 80, result.stderr + result.stdout);
+    assert.match(result.stdout, /\tstarting\t80\tloopback_required\tfalse/);
+    assert.equal(await readFile(join(home, "service-state"), "utf8"), "stopped", "Unverified service must be stopped");
+  }
+  await writeFile(join(home, "tcp"), safeListeners);
+  await writeFile(unitPath, safeUnit.replace("MAGPIE_ADDR=127.0.0.1", "MAGPIE_ADDR=0.0.0.0"));
+  const rebuilt = await execute("enable_web", randomUUID(), undefined, parseProbe((await run(probeScript)).stdout));
+  assert.equal(rebuilt.code, 0, rebuilt.stderr + rebuilt.stdout);
+  assert.equal((await readFile(unitPath, "utf8")), safeUnit);
+  console.log("Remote privacy: IPv4/IPv6 socket inspection, ss fallback, public gateway/Web refusal, unsafe unit and systemd override refusal, post-start shutdown and loopback service rebuilding passed.");
   const assertRestoreResult = async (result, operationId, configState, serviceState, rollbackState, recoveryDirectory = instance.configDirectory.replace(/\/magpie$/, "/magpie-remote/backups/") + operationId) => {
     const records = result.stdout.split("\n").filter((line) => /^MIGPIE_(RESULT|RESTORE)_V1\t/.test(line));
     assert.equal(records.length, 2, result.stdout);
@@ -115,34 +233,30 @@ esac
   await writeFile(join(home, "service-state"), "running");
   const updated = await execute("update", id); assert.equal(updated.code, 0, updated.stderr);
   assert.ok(updated.stdout.includes(`MIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue`));
-  assert.equal(await readFile(join(home, "updated"), "utf8"), "updated");
+  await assert.rejects(access(join(home, "updated")), "Native update must never run");
   const contents = await run('tar -xOzf "$HOME/.config/magpie-remote/backups/' + id + '/config.tar.gz" ./providers.json');
   assert.equal(contents.code, 0, contents.stderr); assert.equal(contents.stdout, "isolated-config-secret");
   await assert.rejects(access(backupPath(id, "config.magpie")));
-  await rm(join(home, "updated"));
-  await writeFile(join(home, "slow-update"), "enabled");
-  let liveOutput = "", receivedLiveBytes = false;
+  let liveOutput = "", receivedLiveUpload = false;
   const progressId = randomUUID();
-  const slow = await run(canonical + actionScript("update", instance, progressId), (chunk) => {
+  const slowInput = Readable.from((async function* () { yield Buffer.from(fake.slice(0, 32)); await delay(1000); yield Buffer.from(fake.slice(32)); })());
+  const slow = await run(canonical + actionScript("update", instance, progressId, release), (chunk) => {
     liveOutput += chunk;
-    if (new RegExp(`MIGPIE_PROGRESS_V1\\t${progressId}\\tupdating\\t(?:1024|2048)\\t0`).test(liveOutput) && !liveOutput.includes("MIGPIE_DONE")) receivedLiveBytes = true;
-  });
+    if (liveOutput.includes(`MIGPIE_PROGRESS_V1\t${progressId}\tuploading\t0\t0`) && !liveOutput.includes("MIGPIE_DONE")) receivedLiveUpload = true;
+  }, slowInput);
   assert.equal(slow.code, 0, slow.stderr + slow.stdout);
-  assert.equal(receivedLiveBytes, true, "Download size must stream before the update exits");
-  assert.ok(slow.stdout.includes(`MIGPIE_PROGRESS_V1\t${progressId}\tupdating\t2048\t0`));
+  assert.equal(receivedLiveUpload, true, "The upload stage must stream before installation completes");
   assert.match(slow.stdout, /\tbacking_up\t0\t0/);
   assert.match(slow.stdout, /\trestarting\t0\t0/);
-  await rm(join(home, "slow-update")); await rm(join(home, "updated"));
   await writeFile(join(tools, "tar"), "#!/bin/sh\nprintf 'no space left: isolated-private-output\\n' >&2\nexit 42\n", { mode: 0o755 });
   const failureId = randomUUID(), failed = await execute("update", failureId);
   assert.equal(failed.code, 42); await assert.rejects(access(join(home, "updated")));
   assert.match(failed.stdout, /\tbacking_up\t42\tdisk_full\tfalse/);
   assert.ok(!(failed.stdout + failed.stderr).includes("isolated-private-output"));
   await rm(join(tools, "tar"));
-  for (const [flag, step, reason, updatedBeforeFailure] of [
-    ["fail-update", "updating", "network", false],
-    ["fail-restart", "restarting", "permission", true],
-    ["fail-healthcheck", "healthcheck", "command_failed", true],
+  for (const [flag, step, reason] of [
+    ["fail-restart", "restarting", "permission"],
+    ["fail-healthcheck", "healthcheck", "command_failed"],
   ]) {
     const operationId = randomUUID();
     await writeFile(join(home, flag), "fail");
@@ -153,8 +267,7 @@ esac
     assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", operationId, "result"), "utf8"), result.stdout.split("\n").find((line) => line.startsWith("MIGPIE_RESULT_V1")) + "\n");
     await assert.rejects(access(join(home, ".config", "magpie-remote", "operations", operationId, "output")));
     assert.ok((await readFile(backupPath(operationId, "magpie"))).length);
-    if (updatedBeforeFailure) await rm(join(home, "updated"));
-    else await assert.rejects(access(join(home, "updated")));
+    await assert.rejects(access(join(home, "updated")));
     await rm(join(home, flag));
   }
   const selected = (await listing()).find((backup) => backup.id === id);
@@ -294,13 +407,13 @@ exec ${shellQuote(realMove)} "$@"
   const uninstalled = await execute("uninstall", "5d140b01-7a34-432b-ac15-934fba8fc9ae", undefined, { ...instance, binary, managedBinary: binary });
   assert.equal(uninstalled.code, 0, uninstalled.stderr); await assert.rejects(access(join(home, ".local", "bin", "magpie")));
   assert.ok((await readFile(backupPath(id, "config.tar.gz"))).length);
-  await writeFile(join(tools, "curl"), '#!/bin/sh\nfor output; do :; done\ncp "$HOME/release-source" "$output"\n', { mode: 0o755 });
-  await writeFile(join(home, "release-source"), fake, { mode: 0o755 });
-  const release = { version: "0.1.1472", sha256: createHash("sha256").update(fake).digest("hex"), url: "https://github.com/yetone/magpie-releases/releases/download/test/magpie-cli-linux-amd64" };
+  await writeFile(join(tools, "curl"), '#!/bin/sh\nprintf "Remote network must not be used\\n" >&2\nexit 99\n', { mode: 0o755 });
   const empty = parseProbe((await run(probeScript)).stdout);
-  const badInstall = await run(actionScript("install", empty, "2d5d6952-bf60-47ad-b2c7-d4624bcb51dc", { ...release, sha256: "0".repeat(64) }));
+  const badInstall = await run(actionScript("install", empty, "2d5d6952-bf60-47ad-b2c7-d4624bcb51dc", { ...release, sha256: "0".repeat(64) }), undefined, fake);
   assert.notEqual(badInstall.code, 0); await assert.rejects(access(join(home, ".local", "bin", "magpie")));
-  const installed = await run(actionScript("install", empty, "23737f6f-cc09-46d2-85dd-c7ba7965e42c", release));
+  const truncated = await run(actionScript("install", empty, randomUUID(), release), undefined, fake.slice(0, 50));
+  assert.notEqual(truncated.code, 0); await assert.rejects(access(join(home, ".local", "bin", "magpie")));
+  const installed = await run(actionScript("install", empty, "23737f6f-cc09-46d2-85dd-c7ba7965e42c", release), undefined, fake);
   assert.equal(installed.code, 0, installed.stderr); assert.equal(await readFile(join(home, ".local", "bin", "magpie"), "utf8"), fake);
   for (const action of ["enable_web", "stop", "start", "restart"]) {
     const observed = parseProbe((await run(probeScript)).stdout), result = await execute(action, randomUUID(), undefined, observed);
@@ -350,14 +463,12 @@ exec ${shellQuote(realMove)} "$@"
     assert.equal(await readFile(join(home, ".config", "magpie-remote", "operations", operationId, "state"), "utf8"), "failed");
     await assert.rejects(access(lockPath));
   }
-  await writeFile(join(home, "interrupt-download"), "enabled");
-  const interruptedDownloadId = randomUUID(), interruptedDownload = await execute("update", interruptedDownloadId, undefined, observed);
+  const interruptedDownloadId = randomUUID();
+  const interruptedDownload = await run(actionScript("update", observed, interruptedDownloadId, release).replace("run_step uploading receive_binary", () => "set_step uploading\nkill -HUP $$\nrun_step uploading receive_binary"), undefined, fake);
   assert.equal(interruptedDownload.code, 129, interruptedDownload.stderr + interruptedDownload.stdout);
-  assert.equal(await readFile(join(home, "interrupted-child-lock"), "utf8"), "kept", "Keep the lock until the background download ends");
-  assert.match(interruptedDownload.stdout, new RegExp(`MIGPIE_RESULT_V1\\t${interruptedDownloadId}\\tupdating\\t129\\tcommand_failed\\ttrue`));
+  assert.match(interruptedDownload.stdout, new RegExp(`MIGPIE_RESULT_V1\\t${interruptedDownloadId}\\tuploading\\t129\\tcommand_failed\\tfalse`));
   await assert.rejects(access(lockPath));
-  await rm(join(home, "interrupt-download"));
-  console.log("Remote recovery: legacy/dead-owner locks, live/foreign-owner refusal, unexpected-file preservation, recovery exclusion, stale recovery retry, HUP/INT/TERM/PIPE failure persistence and waiting for an interrupted download passed.");
+  console.log("Remote recovery: legacy/dead-owner locks, live/foreign-owner refusal, unexpected-file preservation, recovery exclusion, stale recovery retry and HUP/INT/TERM/PIPE failure persistence including interrupted uploads passed.");
   console.log(`Remote scripts: help capabilities, POSIX probe, checksum install, ${symlinked ? "symlinked" : "directory"}/absent config restore, stopped-service preservation, classified failures without secret output, service actions, lock exclusion and uninstall retaining backups passed.`);
 } finally {
   if (dirname(resolve(directory)) === resolve(tmpdir()) && basename(directory).startsWith("migpie-script-smoke-")) await rm(directory, { recursive: true, force: true, maxRetries: 3 });

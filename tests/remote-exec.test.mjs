@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
+import { Readable } from "node:stream";
 import ssh2 from "ssh2";
 import { executeRemote } from "../src/remote-exec.mjs";
 import { SessionManager } from "../src/sessions.mjs";
@@ -101,13 +102,42 @@ test("real SSH stdout is delivered while the command is still running, without s
   assert.equal(chunks.join(""), "下载 𠮷\ncomplete\n");
 });
 
+test("streamed SSH input preserves a large binary, reports sent bytes and releases the source", async (t) => {
+  const bytes = Buffer.from(Array.from({ length: 3 * 1024 * 1024 }, (_, index) => index % 256));
+  let received;
+  const fixture = await executableServer(t, ({ accept }) => {
+    const channel = accept(), chunks = [];
+    channel.on("error", () => {});
+    channel.on("data", (chunk) => chunks.push(chunk));
+    channel.on("end", () => { received = Buffer.concat(chunks); channel.exit(0); channel.end("uploaded"); });
+  });
+  const client = await connectedClient(t, fixture);
+  const source = Readable.from((function* () { for (let offset = 0; offset < bytes.length; offset += 65536) yield bytes.subarray(offset, offset + 65536); })());
+  const progress = [];
+  assert.equal((await executeRemote(client, "receive-binary", { input: source, onInput: (sent) => progress.push(sent) })).stdout, "uploaded");
+  assert.deepEqual(received, bytes);
+  assert.equal(progress.at(-1), bytes.length);
+  assert.ok(progress.length > 1);
+  assert.equal(source.destroyed, true);
+});
+
+test("a failed streaming input cannot complete an installation", async (t) => {
+  const fixture = await executableServer(t, ({ accept }) => { const channel = accept(); channel.on("error", () => {}); channel.resume(); });
+  const client = await connectedClient(t, fixture);
+  const source = Readable.from((async function* () { yield Buffer.from("partial"); throw new Error("local read failed"); })());
+  await assert.rejects(executeRemote(client, "receive-binary", { input: source }), { code: "REMOTE_INPUT_FAILED" });
+  assert.equal(source.destroyed, true);
+});
+
 test("a real server refusing exec returns a transport error and leaves the SSH connection usable", async (t) => {
   const fixture = await executableServer(t, ({ accept, reject, command }) => {
     if (command === "refused") reject();
     else complete(accept(), { stdout: "still connected" });
   });
   const client = await connectedClient(t, fixture);
-  await assert.rejects(executeRemote(client, "refused"), { code: "REMOTE_EXEC_FAILED" });
+  const source = Readable.from([Buffer.from("never uploaded")]);
+  await assert.rejects(executeRemote(client, "refused", { input: source }), { code: "REMOTE_EXEC_FAILED" });
+  assert.equal(source.destroyed, true);
   assert.deepEqual(await executeRemote(client, "next"), { code: 0, stdout: "still connected", stderr: "" });
 });
 

@@ -150,6 +150,8 @@ try {
     await field("rule-bind-port").fill("0");
     await field("rule-target-port").fill(String(echo.port));
     await field("rule-direction-" + direction).check();
+    assert.equal(await field("rule-bind-host").evaluate((node) => node.readOnly), direction === "s2c");
+    if (direction === "s2c") assert.equal(await field("rule-bind-host").inputValue(), "127.0.0.1");
   };
   const assertBusyDialog = async () => {
     assert.equal(await field("forward-editor").getAttribute("aria-busy"), "true");

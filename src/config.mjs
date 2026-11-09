@@ -67,7 +67,7 @@ export function validateForward(value) {
 export function validateProfile(value) {
   object(value, "连接配置");
   const optional = ["identityFile", "agent", "passwordEnv", "passphraseEnv", "knownHostsFile", "hostFingerprint"];
-  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", "autoReconnect", "forwardFailurePolicy", "encryptedPassword", ...optional], "连接配置");
+  onlyKeys(value, ["id", "name", "host", "port", "username", "forwards", "authMethod", "autoStartForwards", "autoConnect", "autoReconnect", "autoLinkLocalMagpie", "forwardFailurePolicy", "encryptedPassword", ...optional], "连接配置");
   if (value.forwards !== undefined && !Array.isArray(value.forwards)) throw new Error("forwards 必须是数组");
   const profile = {
     id: identifier(value.id, "连接 id"),
@@ -85,7 +85,7 @@ export function validateProfile(value) {
     profile.authMethod = value.authMethod;
   }
   if (value.encryptedPassword !== undefined) profile.encryptedPassword = validateEncryptedPassword(value.encryptedPassword);
-  for (const key of ["autoStartForwards", "autoConnect", "autoReconnect"]) {
+  for (const key of ["autoStartForwards", "autoConnect", "autoReconnect", "autoLinkLocalMagpie"]) {
     if (value[key] !== undefined) {
       if (typeof value[key] !== "boolean") throw new Error(`${key} 必须是布尔值`);
       profile[key] = value[key];
@@ -118,6 +118,7 @@ export function pluginOptions(input = {}, options = {}) {
   if (options.webUI !== undefined && typeof options.webUI !== "boolean") throw new Error("webUI 必须是布尔值");
   const directory = input.directory ?? join(homedir(), ".config", "magpie");
   return {
+    magpieDirectory: directory,
     webUI: options.webUI ?? true,
     uiPort: integer(options.uiPort, "uiPort", 0, 0),
     dataDirectory: options.dataDirectory
