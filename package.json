@@ -1,6 +1,6 @@
 {
   "name": "migpie-remote",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Magpie page for SSH connections, TCP forwarding, and remote Magpie management",
   "repository": { "type": "git", "url": "git+https://github.com/zhaoyi2018/migpie-remote.git" },
   "type": "module",
