@@ -154,6 +154,7 @@ export class ProviderLink {
   async sync(id, { signal } = {}) {
     if (this.#closed) return this.status(id);
     const abort = signal ? AbortSignal.any([signal, this.#shutdown.signal]) : this.#shutdown.signal;
+    let directVerified = false;
     try {
       await this.#ready;
       const profile = await this.store.get(id);
@@ -179,6 +180,7 @@ export class ProviderLink {
       }
       if (!gateways.length) throw new OperationError("LOCAL_MAGPIE_UNAVAILABLE", "无法通过局域网地址与共享网关密钥访问本机 Magpie，请检查局域网共享、网关端口及密钥；不会改用 localhost");
       const detection = await this.detect(this.sessions, id, gateways, { signal: abort });
+      directVerified = Boolean(detection.gateway);
       if (abort.aborted || this.sessions.status(id, { includeLogs: false }).state !== "connected") return this.status(id);
       const local = detection.gateway ?? gateways[0];
       const api = await this.#api(id, detection, abort);
@@ -252,7 +254,8 @@ export class ProviderLink {
       if (this.#closed) return this.status(id);
       if (error.code === "REMOTE_BUSY") return this.#state(id, "waiting", "等待远端任务结束后自动对接本机 Magpie");
       const message = error instanceof OperationError ? error.message : "自动对接暂未完成，请检查本机网关、远端 Web 服务和 SSH 转发权限；稍后自动重试";
-      return this.#state(id, "error", message);
+      return this.#state(id, "error", directVerified && ["PROVIDER_LINK_HTTP", "PROVIDER_LINK_AUTH", "PROVIDER_LINK_API"].includes(error.code)
+        ? "本机局域网网关直连验证已通过；" + message : message);
     }
   }
 

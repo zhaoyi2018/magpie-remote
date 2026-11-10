@@ -59,6 +59,7 @@ async function fixture(t, { lan = false, detection = false, reachable = lan } = 
   await writeFile(join(directory, "caller-keys.json"), JSON.stringify([{ id: "lan-default", lan: true, secret: control.gatewayKey }]));
   const admin = createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
+    if (control.adminFailure?.method === request.method && control.adminFailure.path === url.pathname) return json(response, { error: "private-admin-error-output" }, control.adminFailure.status);
     if (url.pathname === "/" && url.searchParams.get("k") === webKey) {
       response.writeHead(303, { "Set-Cookie": "magpie_web_fixture=" + webKey + "; Path=/; HttpOnly", Location: "/" }); response.end(); return;
     }
@@ -180,6 +181,7 @@ test("changing between LAN and SSH updates one owned provider and preserves unre
   await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
   const initial = await h.link.sync(id);
   assert.equal(initial.mode, "ssh", JSON.stringify(initial));
+  assert.match(initial.message, /验证本机局域网网关.*curl 退出码 28/);
   const unrelated = await h.sessions.addForward(id, { id: "kept", direction: "c2s", bindPort: 0, targetPort: h.gatewayPort });
   h.providers[0].name = "My provider"; h.providers[0].priority = 7;
   h.control.reachable = true;
@@ -199,6 +201,44 @@ test("changing between LAN and SSH updates one owned provider and preserves unre
   assert.equal((await h.link.sync(id)).mode, "direct");
   assert.deepEqual(h.sessions.status(id).forwards.map((forward) => forward.id), [unrelated.id]);
   assert.equal(h.control.webCalls, 0);
+});
+
+for (const [path, method, phase] of [["/", "GET", "登录远端 Web 管理服务"], ["/api/providers", "GET", "读取远端供应商列表"], ["/api/provider/save", "POST", "保存远端供应商"]]) {
+  test("verified direct access reports management failure during " + phase, async (t) => {
+    const h = await fixture(t, { detection: true, reachable: true }), id = h.profile.id;
+    h.control.adminFailure = { path, method, status: 401 };
+    await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+    const state = await h.link.sync(id);
+    assert.equal(state.state, "error");
+    assert.ok(state.message.startsWith("本机局域网网关直连验证已通过；"));
+    assert.ok(state.message.includes(phase)); assert.ok(state.message.includes("HTTP 401"));
+    assert.equal(state.mode, undefined, "A failed configuration must not be advertised as an active direct provider");
+    assert.deepEqual(h.sessions.status(id).forwards, []);
+    assert.equal(h.writes.length, 0); assert.equal(h.providers.length, 0);
+    const publicData = JSON.stringify([state, h.sessions.status(id)]);
+    for (const secret of [h.control.gatewayKey, webKey, "private-admin-error-output"]) assert.ok(!publicData.includes(secret));
+    h.control.adminFailure = undefined;
+    const recovered = await h.link.sync(id);
+    assert.equal(recovered.mode, "direct"); assert.equal(recovered.state, "ready");
+    assert.equal(h.writes.length, 1); assert.equal(h.providers.length, 1);
+  });
+}
+
+test("a management failure preserves the old model tunnel until a successful direct cutover", async (t) => {
+  const h = await fixture(t, { detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const first = await h.link.sync(id), original = h.sessions.status(id).forwards[0];
+  h.control.reachable = true;
+  h.control.adminFailure = { path: "/api/provider/save", method: "POST", status: 403 };
+  const failed = await h.link.sync(id);
+  assert.equal(failed.state, "error"); assert.match(failed.message, /直连验证已通过.*保存远端供应商.*HTTP 403/);
+  assert.equal(h.sessions.status(id).forwards[0].bindPort, original.bindPort);
+  assert.equal(h.providers[0].id, first.providerId); assert.equal(h.providers[0].anthropic, first.endpoint);
+  assert.equal(h.writes.length, 1);
+  h.control.adminFailure = undefined;
+  const recovered = await h.link.sync(id);
+  assert.equal(recovered.mode, "direct"); assert.equal(recovered.providerId, first.providerId);
+  assert.deepEqual(h.sessions.status(id).forwards, []); assert.equal(h.providers.length, 1);
 });
 
 test("a lost transport-switch reply retains the old tunnel until readback confirms the direct provider", async (t) => {

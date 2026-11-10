@@ -113,7 +113,7 @@ printf 'p1234\\ncnode\\nu1000\\nLalice\\nf8\\nn[::1]:3425\\n'`);
     assert.equal(requests.at(-1).headers.authorization, "Bearer " + credential);
     assert.deepEqual(JSON.parse(requests.at(-1).body), body);
     assert.equal((await remoteHTTP(httpSessions, "fixture", address + "/redirect")).status, 302);
-    await assert.rejects(remoteHTTP(httpSessions, "fixture", address + "/denied"), { code: "PROVIDER_LINK_HTTP" });
+    await assert.rejects(remoteHTTP(httpSessions, "fixture", address + "/denied"), (error) => error.code === "PROVIDER_LINK_HTTP" && error.message.includes("HTTP 401") && error.message.includes(address + "/denied") && !error.message.includes("private-error-output"));
     const denied = await run(noProxy + remoteHTTPScript(address + "/denied"));
     assert.equal(denied.code, 22); assert.equal(denied.stderr, ""); assert.ok(!denied.stdout.includes("private-error-output"));
     const api = await remoteProviderAPI(httpSessions, "fixture", { url: address + "/?k=" + httpKey });

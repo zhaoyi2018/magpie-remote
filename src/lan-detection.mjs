@@ -92,14 +92,15 @@ export async function detectDirectGateway(sessions, id, gateways, { signal, inte
   }).sort((left, right) => Number(right.onLink) - Number(left.onLink));
   // Route/subnet evidence only prioritizes probes. Routed LANs, missing route
   // details and a different SSH ingress address still need an actual HTTP test.
+  let directFailure;
   for (const { gateway } of eligible) {
     if (signal?.aborted) break;
     try {
-      const response = await remoteHTTP(sessions, id, gateway.url + "/", { signal, headers: { Authorization: "Bearer " + gateway.key, "x-api-key": gateway.key }, maxBytes: 16384 });
+      const response = await remoteHTTP(sessions, id, gateway.url + "/", { signal, context: "验证本机局域网网关", headers: { Authorization: "Bearer " + gateway.key, "x-api-key": gateway.key }, maxBytes: 16384 });
       if (signal?.aborted) break;
       const info = JSON.parse(response.body);
       if (response.status === 200 && info?.name === "magpie" && info.version === gateway.info.version) return { gateway, remoteHTTP: true, reason: "远端已通过局域网地址和共享密钥验证网关" };
-    } catch { /* Keep the existing transport until a direct route is verified. */ }
+    } catch (error) { if (error.code === "PROVIDER_LINK_HTTP") directFailure = error.message; }
   }
-  return { remoteHTTP: true, reason: signal?.aborted ? "直连检测已取消" : eligible.length ? "远端局域网网关不可达或鉴权未通过" : "本机局域网网关地址已变化或不属于当前网卡" };
+  return { remoteHTTP: true, reason: signal?.aborted ? "直连检测已取消" : eligible.length ? "远端局域网网关不可达或鉴权未通过" + (directFailure ? "：" + directFailure : "") : "本机局域网网关地址已变化或不属于当前网卡" };
 }

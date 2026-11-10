@@ -142,4 +142,6 @@ const saved = await call("save_connection", {
 
 `FORWARD_REJECTED` 的消息包含远端监听地址与端口，并在可查询时附上对应监听的进程名、PID、用户或 UID。无可见监听、进程信息受权限限制、查询不可用或超时分别给出说明；仍使用原错误代码，不将查询失败改报为 SSH 断开。相同说明也出现在规则的 `forwardErrors[].message` 和连接运行日志中。详细行为见[常见问题](usage.md#常见问题)。
 
+`PROVIDER_LINK_HTTP` 保留网关验证或远端 Web 管理请求的步骤、目标地址与端口，以及 HTTP 状态或 curl 退出码，隐藏登录查询参数与原始响应。`localProvider.message` 会区分网关尚未通过直连验证，以及网关已验证但供应商管理失败；后者不会被显示为已配置成功的直连模式。说明见[自动对接](remote.md#自动对接本机-magpie)。
+
 接口定义来源：[plugin.mjs](../src/plugin.mjs)；运行校验来源：[config.mjs](../src/config.mjs)。返回[文档导航](README.md)。

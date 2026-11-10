@@ -156,7 +156,7 @@ try {
   cleanup.unshift(() => remote.close());
   const providerLink = {
     mode: "ssh",
-    status(id) { return fixture.state.webEnabled ? { state: "ready", mode: this.mode, message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture-" + id, endpoint: this.mode === "direct" ? "http://192.168.10.2:4567" : "http://127.0.0.1:23425/" + id, gatewayAddress: "http://192.168.10.2:4567" } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
+    status(id) { return this.error ? { state: "error", message: this.error } : fixture.state.webEnabled ? { state: "ready", mode: this.mode, message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture-" + id, endpoint: this.mode === "direct" ? "http://192.168.10.2:4567" : "http://127.0.0.1:23425/" + id, gatewayAddress: "http://192.168.10.2:4567" } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
     async sync(id) { return this.status(id); },
   };
   const tools = createTools(store, sessions, remote, providerLink);
@@ -437,6 +437,21 @@ try {
   await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
   await field("remote-local-provider-mode").filter({ hasText: "访问方式：SSH 隧道" }).waitFor();
   console.log("Remote UI: direct/SSH mode labels, direct LAN endpoint and disconnected direct configuration state passed.");
+  providerLink.error = "本机局域网网关直连验证已通过；登录远端 Web 管理服务（http://127.0.0.1:3430/）：HTTP 401，认证或访问权限被拒绝，请核对该服务的密钥和登录会话";
+  await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
+  await field("remote-local-provider-state").filter({ hasText: providerLink.error }).waitFor();
+  assert.equal(await field("remote-local-provider-state").evaluate((node) => node.classList.contains("is-warning")), true);
+  assert.equal(await field("remote-local-provider-mode").isVisible(), false);
+  assert.equal(await field("remote-local-provider-address").isVisible(), false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await field("panel-remote").evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  assert.equal(await field("panel-remote").evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+  await page.screenshot({ path: join(screenshots, "http-diagnostics-narrow.png"), fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  providerLink.error = undefined;
+  await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
+  await field("remote-local-provider-mode").filter({ hasText: "访问方式：SSH 隧道" }).waitFor();
+  console.log("Remote UI: verified gateway and failed management step/status are shown separately, without advertising a configured direct mode, including at 390px.");
 
   sessions.recordLog("remote-alpha", "info", "alpha-only-log-marker");
   sessions.recordLog("remote-beta", "info", "beta-only-log-marker");
