@@ -474,7 +474,7 @@ import { createRemoteManager } from "./remote.js";
     const values = [["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username], ["认证方式", auth(connection)], ["自动启动预设", connection.autoStartForwards === false ? "已关闭" : "已开启"], ["预设失败处理", connection.forwardFailurePolicy === "continue" ? "保留连接，继续其他预设" : "回滚本次连接"], ["启动时连接", connection.autoConnect ? "已开启" : "已关闭"], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent], ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv], ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"], ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"]];
     $("settings-list").replaceChildren();
     values.splice(7, 0, ["断网自动重连", connection.autoReconnect ? "已开启，仅网络故障重试" : "已关闭"]);
-    values.push(["局域网 Magpie 自动对接", connection.autoLinkLocalMagpie === false ? "已关闭" : "已开启，转发本机 Magpie 的局域网共享网关"]);
+    values.push(["局域网 Magpie 自动对接", connection.autoLinkLocalMagpie === false ? "已关闭" : "已开启，优先验证局域网直连，否则使用 SSH 隧道"]);
     for (const [label, value] of values) {
       if (!value) continue;
       const row = element("div", "settings-row");

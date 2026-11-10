@@ -288,16 +288,35 @@ try {
   await until(async () => (await field("last-updated").textContent()) !== beforePageRestore, "Snapshot polling did not resume after restoring the cached page");
   console.log("UI: snapshot polling resumes after the browser restores a cached page.");
 
-  tools.forward_add.execute = async () => { throw new Error("UI test: start rejected"); };
+  for (const client of fixture.clients) client.on("session", (accept) => {
+    const session = accept(); session.on("error", () => {});
+    session.on("exec", (acceptExec, rejectExec, { command }) => {
+      if (command !== "sh -s") return rejectExec();
+      const channel = acceptExec(); channel.on("error", () => {});
+      let input = "";
+      channel.on("data", (chunk) => { input += chunk; });
+      channel.on("end", () => {
+        assert.ok(input.includes(`port=${echo.port}\n`));
+        channel.exit(0);
+        channel.end(`MAGPIE_FORWARD_CONFLICT_V1\t${echo.port}\tss\nSS\tLISTEN 0 128 127.0.0.1:${echo.port} 0.0.0.0:* users:(("node",pid=1234,fd=8)) uid:1000\nPS\t1234 alice node\nMAGPIE_FORWARD_CONFLICT_END\n`);
+      });
+    });
+  });
   await createForward("Saved but not started", "s2c");
+  await field("rule-bind-port").fill(String(echo.port));
   await field("save-forward").click();
   await field("rule-error").filter({ hasText: "预设已保存，但启动失败" }).waitFor();
+  assert.ok((await field("rule-error").textContent()).includes("node（PID 1234，用户 alice）"));
   assert.equal(await field("forward-editor").evaluate((node) => node.open), true);
   assert.ok((await store.get("ui-regression")).forwards.some((forward) => forward.name === "Saved but not started"));
   await until(() => field("save-forward").isEnabled());
   await ui.locator("#forward-editor .dialog-actions .close-dialog").click();
-  tools.forward_add.execute = add;
-  console.log("UI: delayed save/start keeps the dialog open, submits once and exposes partial start failures; c2s data round trip passed.");
+  await ui.locator("#forward-list tr").filter({ hasText: "Saved but not started" }).locator(".row-error").filter({ hasText: "node（PID 1234，用户 alice）" }).waitFor();
+  await field("tab-logs").click();
+  await field("log-list").filter({ hasText: "PID 1234" }).waitFor();
+  await field("tab-forwards").click();
+  assert.equal(sessions.status("ui-regression").state, "connected");
+  console.log("UI: delayed save/start submits once; a real remote bind rejection shows the diagnosed process/PID/user in the dialog, rule and logs while SSH stays connected.");
 
   await page.setViewportSize({ width: 555, height: 720 });
   await createForward("Narrow dialog");

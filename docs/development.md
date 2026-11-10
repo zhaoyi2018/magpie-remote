@@ -24,9 +24,13 @@ npm test
 
 `tests/consistency.test.mjs` 验证旧版本写入与删除保护、同连接排队冲突、独立连接互不冲突、无变化版本稳定，以及删除失败保护和运行记录清理。`tests/forward-diagnostics.test.mjs` 使用本机 SSH 服务、迟到通道回调及可注入的本地目标连接，验证双向目标超时、真实拒绝与恢复、旧请求不覆盖新结果和快照隔离；不使用外部不可达地址模拟超时。HTTP 测试还覆盖并发页面编辑的版本保护。
 
+`tests/forward-conflicts.test.mjs` 覆盖远端端口查询协议、IPv4/IPv6 与多进程、用户名/UID、权限受限、畸形响应、查询失败/超时和取消；真实回环 SSH/TCP 端口冲突验证失败消息、规则和日志中的占用者线索，以及释放占用后重试、预设继续/回滚和其他转发可用。进程查询响应使用受控数据；`test:remote` 另在真实 POSIX shell 中运行生成的 `ss`/`lsof` 脚本，工具使用替身。`test:ui` 验证真实绑定拒绝后，失败窗口、规则行与运行日志均显示进程/PID/用户，窄屏不溢出。
+
 `tests/runtime-logs.test.mjs` 验证轻量 HTTP 快照不含日志、认证后的单连接日志读取、旧内部接口兼容、返回副本和单连接查询不复制其他会话日志。`tests/remote-storage.test.mjs` 验证损坏记录下的安全本地编辑、删除/重新绑定/全局恢复保护、原始字节保留、重复/并发重读、保留失败和缺失文件继续阻断、修复后完整加载及已派发任务保持未知；HTTP 恢复入口继续要求认证。SSH 导入回归覆盖公开反向监听被警告并跳过后，其余预设可在本机 SSH 服务正常启动。
 
 `tests/remote-results.test.mjs` 覆盖恢复协议的空尾字段、Base64 路径、重复/矛盾记录与摘要字段白名单；`tests/remote.test.mjs` 另验证派发前重启、派发边界保存失败、旧记录保守核实、历史查询/轮换、损坏历史保护与恢复结果跨重启保留。`tests/sessions.test.mjs` 注入远端取消监听的拒绝、超时和断链，要求关闭受影响 SSH、释放双向监听且独立连接仍能传输。
+
+`tests/lan-detection.test.mjs` 验证实际 IPv4/IPv6 子网、多网卡、无路由时的 SSH 地址证据、网络协议校验和鉴权失败回退；`tests/remote-http.test.mjs` 验证 HTTP 解析及受限供应商管理请求。`tests/provider-link.test.mjs` 使用真实临时局域网监听和 SSH 会话，覆盖零转发直连、双向模式切换、供应商去重、保存响应丢失回读、密钥轮换、插件重启、旧记录迁移及手动配置保护。`test:remote` 还在隔离 POSIX shell 中运行实际 curl，验证 JSON 与凭据转义、代理及 curlrc 绕过和禁止重定向；页面回归验证访问方式、直连地址与 SSH 断开后的待检测提示。
 
 `tests/remote-exec.test.mjs` 使用本机真实 SSH 通道验证标准输入、双输出、分片 UTF-8 实时标准输出、退出状态、输出上限、超时与断线。`tests/remote.test.mjs` 使用隔离状态文件和注入的远端响应验证生命周期预览、去重、环境变化、普通配置归档、恢复预览绑定、分片进度校验、下载阶段断线后的未知结果、卸载范围和 Web 转发冲突。`npm run test:remote` 通过标准输入向真实 POSIX shell 传入生成脚本，使用临时 HOME 和假的 Magpie / systemd 命令，并用逐步写入的临时文件验证下载字节在任务结束前输出；Windows 自动定位 Git Bash，也可用 `MIGPIE_BASH` 指定。它验证脚本行为，不下载程序或改变真实服务。
 

@@ -955,6 +955,9 @@ test("status and preview never fetch a management key; an explicit web request c
   await h.remote.preview(h.profile.id, "restart");
   assert.equal(h.sessions.calls.filter((call) => call.kind === "web").length, 0);
   h.sessions.webResponse = response(`\u001b[32mManagement: http://localhost:3430/?k=${managementKey}\u001b[0m\n`);
+  const management = await h.remote.managementLink(h.profile.id);
+  assert.equal(management.url, `http://127.0.0.1:3430/?k=${managementKey}`);
+  assert.equal(h.sessions.added.length, 0, "SSH-based automatic management must not create a Web port forward");
   const web = await h.remote.web(h.profile.id);
   assert.deepEqual(web, { address: "http://127.0.0.1:43125/", url: `http://127.0.0.1:43125/?k=${managementKey}` });
   assert.deepEqual(h.sessions.added, [{

@@ -238,9 +238,11 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     text("remote-web-hint", reason || "远端 Web 默认使用 3430 端口，仅通过本机回环 SSH 通道访问。");
     showError("remote-web-error", webError);
     const linked = status?.localProvider;
-    text("remote-local-provider-state", providerSyncing ? "正在检测并对接本机 Magpie…" : row?.connection.autoLinkLocalMagpie === false ? "已关闭自动对接，可在连接设置中开启" : !sshReady() ? "SSH 未连接，本机 Magpie 对接通道已停止" : linked?.message || "SSH 连接后自动检测并对接");
+    text("remote-local-provider-state", providerSyncing ? "正在检测并对接本机 Magpie…" : row?.connection.autoLinkLocalMagpie === false ? "已关闭自动对接，可在连接设置中开启" : !sshReady() ? linked?.mode === "direct" ? "SSH 未连接，局域网配置保留，直连状态待检测" : "SSH 未连接，本机 Magpie 对接通道已停止" : linked?.message || "SSH 连接后自动检测并对接");
     $("remote-local-provider-state").classList.toggle("is-warning", linked?.state === "error");
-    text("remote-local-provider-address", linked?.endpoint ? (linked.gatewayAddress ? "局域网网关 " + linked.gatewayAddress + " → " : "") + "远端供应商 " + linked.providerId + " · " + linked.endpoint : "");
+    text("remote-local-provider-mode", linked?.mode === "direct" ? "访问方式：局域网直连，无需 SSH 隧道" : linked?.mode === "ssh" ? "访问方式：SSH 隧道" : "");
+    $("remote-local-provider-mode").hidden = !["direct", "ssh"].includes(linked?.mode);
+    text("remote-local-provider-address", linked?.endpoint ? linked.mode === "direct" ? "局域网地址 " + linked.endpoint + " · 远端供应商 " + linked.providerId : (linked.gatewayAddress ? "局域网网关 " + linked.gatewayAddress + " → " : "") + "远端供应商 " + linked.providerId + " · " + linked.endpoint : "");
     $("remote-local-provider-address").hidden = !linked?.endpoint;
     $("remote-local-provider-sync").disabled = !sshReady() || !linked || row?.connection.autoLinkLocalMagpie === false || providerSyncing || running() || uncertain() || submitting;
     drawBackups(); drawTaskSummary(); drawHistory(); syncPreview();

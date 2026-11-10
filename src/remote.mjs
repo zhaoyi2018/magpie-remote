@@ -638,7 +638,7 @@ export class RemoteManager {
     return copy(operation);
   }
 
-  async web(id, { port } = {}) {
+  async managementLink(id, { port } = {}) {
     const profile = await this.#profile(id), record = this.#record(id, profile);
     this.#connected(id);
     if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BUSY", "请等待远端任务完成并核实，再获取 Web 地址");
@@ -650,7 +650,15 @@ export class RemoteManager {
     const match = text.match(/http:\/\/(?:127\.0\.0\.1|localhost):([0-9]+)\/\?k=([A-Za-z0-9._~-]{16,256})/);
     if (response.code !== 0 || !match) throw new OperationError("REMOTE_WEB_UNAVAILABLE", "无法读取用户服务的回环管理链接，请在服务器检查 magpie daemon web");
     const targetPort = Number(match[1]);
+    if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new OperationError("REMOTE_WEB_PORT", "远端管理端口无效");
     if (port !== undefined && port !== targetPort) throw new OperationError("REMOTE_WEB_PORT", "端口与服务实际管理端口不一致，请重新检测");
+    const address = `http://127.0.0.1:${targetPort}/`;
+    return { address, url: address + "?k=" + match[2], targetPort, instance };
+  }
+
+  async web(id, { port } = {}) {
+    const { targetPort, url, instance } = await this.managementLink(id, { port });
+    const record = this.#record(id, await this.#profile(id));
     const forwardId = "magpie-web";
     if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BUSY", "远端任务正在执行，请稍后获取 Web 地址");
     let forward = this.sessions.status(id).forwards.find((item) => item.id === forwardId);
@@ -665,7 +673,7 @@ export class RemoteManager {
     }
     record.instance = instance; record.observedAt = new Date().toISOString();
     const address = `http://127.0.0.1:${forward.bindPort}/`;
-    return { address, url: address + "?k=" + match[2] };
+    return { address, url: address + new URL(url).search };
   }
 
   async assertIdle(id) {

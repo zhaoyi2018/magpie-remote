@@ -52,7 +52,7 @@ const profileSchema = {
     autoStartForwards: { type: "boolean", default: true, description: "Start saved forward presets after successful authentication" },
     autoConnect: { type: "boolean", default: false, description: "Try connecting once when the plugin host starts using available saved authentication sources" },
     autoReconnect: { type: "boolean", default: false, description: "Retry network failures with capped exponential backoff; manual disconnect cancels retries and temporary credentials are never retained" },
-    autoLinkLocalMagpie: { type: "boolean", default: true, description: "Automatically add this computer's Magpie to the remote providers through a loopback SSH reverse forward once the remote Web service is running" },
+    autoLinkLocalMagpie: { type: "boolean", default: true, description: "Automatically add this computer's shared Magpie gateway to remote providers; prefer verified direct LAN access and fall back to a loopback SSH reverse forward once the remote Web service is running" },
     forwardFailurePolicy: { type: "string", enum: ["rollback", "continue"], default: "rollback", description: "Whether a rejected preset rolls back the connection or allows other presets to continue; uncertain remote allocations always close SSH" },
     identityFile: { ...stringSchema, description: "Absolute path or ~/ path to an SSH private key; never its contents" },
     agent: { ...stringSchema, description: "SSH agent socket or Windows named pipe" },
@@ -113,7 +113,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       },
     },
     remote_provider_sync: {
-      description: "Detect the local Magpie and ensure it exists among remote providers through a loopback SSH reverse forward. Runs automatically after SSH connects and periodically; existing unrelated providers are preserved. Returns public status without credentials.",
+      description: "Detect the local Magpie and verify LAN subnet, route and authenticated reachability from the remote. Use a direct LAN provider when verified, otherwise a loopback SSH reverse forward. Reconcile owned provider changes and preserve unrelated or manually changed providers. Returns mode and public status without credentials.",
       args: args({ connectionId: idSchema }),
       execute({ connectionId }, ctx = {}) {
         return serial(connectionId, () => {

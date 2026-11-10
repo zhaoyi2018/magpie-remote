@@ -20,6 +20,8 @@ function lanRank(host) {
   return -1;
 }
 
+export const isLANAddress = (host) => lanRank(host) >= 0;
+
 function gatewayURL(address) {
   let url;
   try { url = new URL(address.includes("://") ? address : "http://" + address); }

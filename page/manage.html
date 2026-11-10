@@ -82,8 +82,9 @@
             <div class="remote-layout">
               <div class="remote-controls">
                 <section class="remote-command-section" aria-labelledby="remote-local-provider-title">
-                  <div class="remote-command-copy"><h4 id="remote-local-provider-title">局域网网关对接</h4><p>自动将本机 Magpie 的局域网共享网关加入远端供应商，通过 SSH 反向通道访问。本机需开启局域网共享，远端需启用 Web 管理服务。</p></div>
+                  <div class="remote-command-copy"><h4 id="remote-local-provider-title">局域网网关对接</h4><p>自动检测两端网络，局域网直连验证通过时直接访问本机 IP，其他情况使用 SSH 隧道。本机需开启局域网共享，远端需启用 Web 管理服务。</p></div>
                   <p id="remote-local-provider-state" class="remote-secondary" role="status">SSH 连接后自动检测并对接</p>
+                  <p id="remote-local-provider-mode" class="remote-secondary" role="status" hidden></p>
                   <p id="remote-local-provider-address" class="remote-secondary remote-path" hidden></p>
                   <div class="remote-actions"><button id="remote-local-provider-sync" class="button" type="button" disabled>重新检测对接</button></div>
                 </section>

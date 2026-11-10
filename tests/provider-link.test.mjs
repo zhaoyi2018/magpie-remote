@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { Agent, createServer, request as httpRequest } from "node:http";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { execFile } from "node:child_process";
@@ -18,8 +18,20 @@ const webKey = "fixture-web-sign-in-key-123456789";
 const json = (response, value, code = 200) => { response.writeHead(code, { "Content-Type": "application/json" }); response.end(JSON.stringify(value)); };
 const lanHost = Object.values(networkInterfaces()).flat().find((entry) => !entry.internal && entry.family === "IPv4" && /^(10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(entry.address))?.address;
 const fakeInterfaces = { Ethernet: [{ address: "192.168.10.2", internal: false, family: "IPv4" }] };
+const directAgent = new Agent({ keepAlive: false, proxyEnv: {} });
+const directFetch = (url, { body, ...options } = {}) => new Promise((resolve, reject) => {
+  const request = httpRequest(url, { ...options, agent: directAgent }, (response) => {
+    void (async () => {
+      const chunks = [];
+      for await (const chunk of response) chunks.push(chunk);
+      const text = Buffer.concat(chunks).toString("utf8");
+      resolve({ status: response.statusCode, headers: new Headers(response.headers), text: async () => text, json: async () => JSON.parse(text) });
+    })().catch(reject);
+  });
+  request.on("error", reject); request.end(body);
+});
 
-async function fixture(t) {
+async function fixture(t, { lan = false, detection = false } = {}) {
   assert.ok(lanHost, "The LAN integration fixture needs an assigned private IPv4 address");
   const directory = await temporary(t), ssh = await sshServer(t);
   const store = new ProfileStore(join(directory, "connections.json"));
@@ -28,7 +40,7 @@ async function fixture(t) {
   t.after(() => sessions.close());
   await sessions.connect(ssh.profile);
   const gatewayCalls = [], providers = [], writes = [];
-  const control = { loseSaveReply: false, running: true, busy: false, gatewayKey: randomBytes(24).toString("base64url") };
+  const control = { loseSaveReply: false, running: true, busy: false, gatewayKey: randomBytes(24).toString("base64url"), detection, lan, reachable: true, webCalls: 0 };
   const gateway = createServer((request, response) => {
     gatewayCalls.push({ method: request.method, url: request.url, authorization: request.headers.authorization, host: request.headers.host, peer: request.socket.remoteAddress });
     if (request.headers.authorization !== "Bearer " + control.gatewayKey) return json(response, { error: "LAN gateway key required" }, 401);
@@ -57,7 +69,9 @@ async function fixture(t) {
       request.on("data", (chunk) => { input += chunk; });
       request.on("end", () => {
         const value = JSON.parse(input); writes.push(value);
-        providers.push({ ...value, key: { set: true, masked: "…" + value.key.slice(-6) } });
+        const provider = { ...value, key: { set: true, masked: "…" + value.key.slice(-6) } };
+        const index = providers.findIndex((entry) => entry.id === value.id);
+        if (index < 0) providers.push(provider); else providers[index] = provider;
         if (control.loseSaveReply) { control.loseSaveReply = false; request.socket.destroy(); return; }
         json(response, { providers });
       });
@@ -70,8 +84,44 @@ async function fixture(t) {
   const remote = {
     async assertIdle() { if (control.busy) throw new OperationError("REMOTE_BUSY", "fixture busy"); },
     async inspect() { return { installed: true, locked: false, web: { enabled: true, tls: false }, service: { state: control.running ? "running" : "stopped" } }; },
-    async web() { return { address: `http://127.0.0.1:${adminPort}/`, url: `http://127.0.0.1:${adminPort}/?k=${webKey}` }; },
+    async managementLink() { return { address: `http://127.0.0.1:${adminPort}/`, url: `http://127.0.0.1:${adminPort}/?k=${webKey}` }; },
+    async web() { control.webCalls++; return this.managementLink(); },
   };
+  // The SSH fixture interprets only fixed probe/HTTP scripts. HTTP requests hit
+  // actual temporary LAN/loopback listeners; no deployment command is executed.
+  ssh.server.on("connection", (client) => client.on("ready", () => client.on("session", (accept) => {
+    const session = accept(); session.on("error", () => {});
+    session.on("exec", (acceptExec, _reject, { command }) => {
+      const channel = acceptExec(); channel.on("error", () => {});
+      let input = "";
+      channel.on("data", (chunk) => { input += chunk; });
+      channel.on("end", () => { void (async () => {
+        const finish = (stdout, code = 0) => { channel.write(stdout); channel.exit(code); channel.end(); };
+        const listener = ssh.listenerReply(command);
+        if (listener !== undefined) return finish(listener);
+        if (input.startsWith("# MIGPIE_LAN_NETWORK_V1")) {
+          if (!control.detection) return finish("", 69);
+          const hosts = [...input.matchAll(/route get '([^']+)'/g)].map((match) => match[1]);
+          return finish("MIGPIE_LAN_NETWORK_V1\nssh\t" + Buffer.from(`${lanHost} 12345 ${lanHost} 22`).toString("base64") + "\ncurl\ttrue\n" + hosts.map((host) => "route\t" + host + "\t" + Buffer.from(control.lan && host === lanHost ? host + " dev fixture src " + lanHost : host + " via 192.0.2.1 dev fixture src 192.0.2.2").toString("base64")).join("\n") + "\n");
+        }
+        if (!input.startsWith("# MIGPIE_HTTP_V1")) return finish("", 70);
+        const option = /(?<![\w-])(?:url|request|header|data) = ("(?:\\.|[^"\\])*")/g;
+        let url, method = "GET", body; const headers = {};
+        for (const match of input.matchAll(option)) {
+          const value = JSON.parse(match[1]);
+          if (match[0].startsWith("url")) url = value;
+          else if (match[0].startsWith("request")) method = value;
+          else if (match[0].startsWith("data")) body = value;
+          else { const index = value.indexOf(":"); headers[value.slice(0, index)] = value.slice(index + 1).trim(); }
+        }
+        const address = new URL(url);
+        assert.ok(address.hostname === "127.0.0.1" && Number(address.port) === adminPort || address.hostname === lanHost && Number(address.port) === gatewayPort);
+        if (address.hostname === lanHost && !control.reachable) return finish("", 28);
+        const response = await directFetch(url, { method, headers, ...(body !== undefined && { body }), signal: AbortSignal.timeout(3000) });
+        finish("HTTP/1.1 " + response.status + " Fixture\r\n" + [...response.headers].map(([key, value]) => key + ": " + value + "\r\n").join("") + "\r\n" + await response.text(), response.status >= 400 ? 22 : 0);
+      })().catch(() => { channel.exit(70); channel.end(); }); });
+    });
+  })));
   const options = { store, sessions, remote, directory, env: { MAGPIE_ADDR: `127.0.0.1:${gatewayPort}` } };
   const link = new ProviderLink(options);
   t.after(() => link.close());
@@ -94,6 +144,176 @@ test("gateway discovery uses LAN interfaces and the actual port instead of the h
   for (const address of ["http://remote.example:3425", "http://127.0.0.1:3425/api", "https://127.0.0.1:3425", "http://127.0.0.1:3425?key=bad"]) await assert.rejects(discover({ MAGPIE_ADDR: address }), { code: "LOCAL_MAGPIE_CONFIG" });
   await assert.rejects(discover({ MAGPIE_PUBLIC_URL: "http://127.0.0.1:3425" }), { code: "LOCAL_MAGPIE_CONFIG" });
   await assert.rejects(discover({}, { Tun: [{ address: "198.18.0.1", internal: false, family: "IPv4" }] }), { code: "LOCAL_MAGPIE_LAN_REQUIRED" });
+});
+
+test("verified LAN integration uses the actual gateway IP, shared key and no SSH port forwards", async (t) => {
+  const h = await fixture(t, { lan: true, detection: true });
+  // Reconnect so the fixture's exec handler owns this authenticated client.
+  await h.sessions.disconnect(h.profile.id); await h.sessions.connect(h.profile);
+  const state = await h.link.sync(h.profile.id);
+  assert.equal(state.state, "ready", JSON.stringify(state));
+  assert.equal(state.mode, "direct");
+  assert.equal(state.endpoint, `http://${h.gatewayHost}:${h.gatewayPort}`);
+  assert.equal(h.control.webCalls, 0);
+  assert.deepEqual(h.sessions.status(h.profile.id).forwards, []);
+  const saved = h.writes[0]; assert.equal(saved.key, h.control.gatewayKey);
+  const models = await directFetch(saved.chat + "/models", { headers: { Authorization: "Bearer " + saved.key } });
+  assert.equal((await models.json()).data[0].id, "local/model-a");
+  const stream = await directFetch(saved.chat + "/chat/completions", { method: "POST", headers: { Authorization: "Bearer " + saved.key }, body: "{}" });
+  assert.match(await stream.text(), /fixture-stream[\s\S]*\[DONE\]/);
+  assert.equal((await h.link.sync(h.profile.id)).mode, "direct");
+  assert.equal(h.writes.length, 1);
+  const publicData = JSON.stringify([state, h.sessions.status(h.profile.id), JSON.parse(await readFile(h.link.file, "utf8"))]);
+  for (const secret of [h.control.gatewayKey, webKey]) assert.ok(!publicData.includes(secret));
+  await h.sessions.disconnect(h.profile.id);
+  const disconnected = h.link.status(h.profile.id);
+  assert.equal(disconnected.mode, "direct"); assert.equal(disconnected.state, "disconnected");
+  assert.match(disconnected.message, /局域网供应商配置保留/);
+  assert.equal((await directFetch(saved.chat + "/models", { headers: { Authorization: "Bearer " + saved.key } })).status, 200);
+});
+
+test("changing between LAN and SSH updates one owned provider and preserves unrelated forwards and settings", async (t) => {
+  const h = await fixture(t, { detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const initial = await h.link.sync(id);
+  assert.equal(initial.mode, "ssh", JSON.stringify(initial));
+  const unrelated = await h.sessions.addForward(id, { id: "kept", direction: "c2s", bindPort: 0, targetPort: h.gatewayPort });
+  h.providers[0].name = "My provider"; h.providers[0].priority = 7;
+  h.control.lan = true;
+  const direct = await h.link.sync(id);
+  assert.equal(direct.mode, "direct", JSON.stringify(direct));
+  assert.equal(direct.providerId, initial.providerId);
+  assert.equal(h.providers.length, 1); assert.equal(h.providers[0].name, "My provider"); assert.equal(h.providers[0].priority, 7);
+  assert.deepEqual(h.sessions.status(id).forwards.map((forward) => forward.id), [unrelated.id]);
+  h.control.reachable = false;
+  const fallback = await h.link.sync(id);
+  assert.equal(fallback.mode, "ssh", JSON.stringify(fallback));
+  assert.equal(fallback.providerId, initial.providerId);
+  assert.equal(fallback.endpoint, initial.endpoint);
+  assert.equal(h.providers.length, 1);
+  assert.equal((await fetch(fallback.endpoint + "/v1/models", { headers: { Authorization: "Bearer " + h.writes.at(-1).key } })).status, 200);
+  h.control.reachable = true;
+  assert.equal((await h.link.sync(id)).mode, "direct");
+  assert.deepEqual(h.sessions.status(id).forwards.map((forward) => forward.id), [unrelated.id]);
+  assert.equal(h.control.webCalls, 0);
+});
+
+test("a lost transport-switch reply retains the old tunnel until readback confirms the direct provider", async (t) => {
+  const h = await fixture(t, { detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  assert.equal((await h.link.sync(id)).mode, "ssh");
+  h.control.lan = true; h.control.loseSaveReply = true;
+  assert.equal((await h.link.sync(id)).state, "error");
+  assert.ok(h.sessions.status(id).forwards.some((forward) => forward.id === "magpie-local-provider"));
+  const writes = h.writes.length;
+  assert.equal((await h.link.sync(id)).mode, "direct");
+  assert.equal(h.writes.length, writes);
+  assert.equal(h.providers.length, 1);
+  assert.deepEqual(h.sessions.status(id).forwards, []);
+});
+
+test("LAN key rotation and plugin restart preserve provider identity without persisting the shared credential", async (t) => {
+  const h = await fixture(t, { lan: true, detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const first = await h.link.sync(id), oldKey = h.control.gatewayKey;
+  h.control.gatewayKey = randomBytes(24).toString("base64url");
+  await writeFile(join(h.directory, "caller-keys.json"), JSON.stringify([{ id: "lan-default", lan: true, secret: h.control.gatewayKey }]));
+  const rotated = await h.link.sync(id);
+  assert.equal(rotated.mode, "direct", JSON.stringify(rotated)); assert.equal(rotated.providerId, first.providerId);
+  assert.equal(h.writes.length, 2); assert.equal(h.writes.at(-1).key, h.control.gatewayKey);
+  await h.link.close();
+  const restarted = new ProviderLink(h.options); t.after(() => restarted.close());
+  assert.equal((await restarted.sync(id)).mode, "direct");
+  assert.equal(h.writes.length, 2);
+  const contents = await readFile(h.link.file, "utf8");
+  for (const secret of [oldKey, h.control.gatewayKey, webKey]) assert.ok(!contents.includes(secret));
+  assert.deepEqual(h.sessions.status(id).forwards, []);
+});
+
+test("manual endpoint/key edits and a disabled LAN provider are preserved during automatic detection", async (t) => {
+  const h = await fixture(t, { lan: true, detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  assert.equal((await h.link.sync(id)).mode, "direct");
+  const saved = structuredClone(h.providers[0]);
+  h.providers[0].responses = "http://elsewhere.example/v1";
+  assert.equal((await h.link.sync(id)).state, "error"); assert.equal(h.writes.length, 1);
+  h.providers[0] = { ...saved, key: { set: true, masked: "…edited-key" } };
+  assert.equal((await h.link.sync(id)).state, "error"); assert.equal(h.writes.length, 1);
+  h.providers[0] = { ...saved, off: true };
+  assert.equal((await h.link.sync(id)).state, "disabled"); assert.equal(h.writes.length, 1);
+  assert.deepEqual(h.sessions.status(id).forwards, []);
+});
+
+test("legacy v1 tunnel records migrate to direct mode without changing provider identity", async (t) => {
+  const h = await fixture(t, { detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const initial = await h.link.sync(id);
+  assert.equal(initial.mode, "ssh");
+  await h.link.close(); await h.sessions.disconnect(id);
+  const data = JSON.parse(await readFile(h.link.file, "utf8"));
+  data.version = 1; data.records = data.records.map(({ connectionId, binding, port }) => ({ connectionId, binding, port }));
+  await writeFile(h.link.file, JSON.stringify(data));
+  h.control.lan = true; await h.sessions.connect(h.profile);
+  const restarted = new ProviderLink(h.options); t.after(() => restarted.close());
+  const next = await restarted.sync(id);
+  assert.equal(next.mode, "direct", JSON.stringify(next)); assert.equal(next.providerId, initial.providerId);
+  assert.equal(h.providers.length, 1); assert.deepEqual(h.sessions.status(id).forwards, []);
+  assert.equal(JSON.parse(await readFile(h.link.file, "utf8")).version, 2);
+});
+
+test("a pending direct key rotation is reconciled after restart without a second provider write", async (t) => {
+  const h = await fixture(t, { lan: true, detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  assert.equal((await h.link.sync(id)).mode, "direct");
+  h.control.gatewayKey = randomBytes(24).toString("base64url");
+  await writeFile(join(h.directory, "caller-keys.json"), JSON.stringify([{ id: "lan-default", lan: true, secret: h.control.gatewayKey }]));
+  h.control.loseSaveReply = true;
+  assert.equal((await h.link.sync(id)).state, "error"); assert.equal(h.writes.length, 2);
+  assert.equal(JSON.parse(await readFile(h.link.file, "utf8")).records[0].pending.mode, "direct");
+  await h.link.close();
+  const restarted = new ProviderLink(h.options); t.after(() => restarted.close());
+  assert.equal((await restarted.sync(id)).mode, "direct"); assert.equal(h.writes.length, 2);
+  assert.equal(JSON.parse(await readFile(h.link.file, "utf8")).records[0].pending, undefined);
+});
+
+test("verified direct access reuses a manual LAN provider and leaves manual reverse forwards untouched", async (t) => {
+  const h = await fixture(t, { lan: true, detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const forward = await h.sessions.addForward(id, { id: "manual", direction: "s2c", bindPort: 0, targetHost: h.gatewayHost, targetPort: h.gatewayPort });
+  h.providers.push({ id: "my-ssh", preset: "remote-magpie", chat: `http://127.0.0.1:${forward.bindPort}/v1` });
+  const first = await h.link.sync(id);
+  assert.equal(first.mode, "direct"); assert.notEqual(first.providerId, "my-ssh");
+  assert.deepEqual(h.sessions.status(id).forwards.map((item) => item.id), [forward.id]);
+  h.providers.splice(h.providers.findIndex((item) => item.id === first.providerId), 1);
+  h.providers.push({ id: "my-lan", preset: "remote-magpie", chat: `http://${h.gatewayHost}:${h.gatewayPort}/v1`, name: "My LAN" });
+  assert.equal((await h.link.sync(id)).providerId, "my-lan"); assert.equal(h.writes.length, 1);
+  h.providers.at(-1).off = true;
+  assert.equal((await h.link.sync(id)).state, "disabled"); assert.equal(h.writes.length, 1);
+  assert.deepEqual(h.sessions.status(id).forwards.map((item) => item.id), [forward.id]);
+});
+
+test("a manually edited managed loopback port is not adopted as a legacy tunnel", async (t) => {
+  const h = await fixture(t), id = h.profile.id;
+  const first = await h.link.sync(id), otherPort = new URL(first.endpoint).port === "12345" ? 12346 : 12345;
+  const edited = first.endpoint.replace(":" + new URL(first.endpoint).port + "/", ":" + otherPort + "/");
+  Object.assign(h.providers[0], { chat: edited + "/v1", responses: edited + "/v1", anthropic: edited });
+  assert.equal((await h.link.sync(id)).state, "error");
+  assert.equal(h.providers[0].anthropic, edited); assert.equal(h.writes.length, 1);
+  assert.equal(h.sessions.status(id).forwards[0].bindPort, Number(new URL(first.endpoint).port));
+});
+
+test("direct cutover preserves a same-ID forward whose target was manually replaced", async (t) => {
+  const h = await fixture(t, { detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const first = await h.link.sync(id);
+  assert.equal(first.mode, "ssh");
+  const original = h.sessions.status(id).forwards[0];
+  await h.sessions.removeForward(id, original.id);
+  await h.sessions.addForward(id, { id: original.id, name: original.name, direction: "s2c", bindHost: original.bindHost, bindPort: original.bindPort, targetHost: "127.0.0.1", targetPort: h.gatewayPort });
+  h.control.lan = true;
+  assert.equal((await h.link.sync(id)).mode, "direct");
+  assert.equal(h.sessions.status(id).forwards[0].targetPort, h.gatewayPort);
+  assert.equal(h.sessions.status(id).forwards[0].bindPort, original.bindPort);
 });
 
 test("LAN discovery respects the named sharing key and never falls back to a disabled or revoked key", async (t) => {

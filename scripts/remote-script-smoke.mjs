@@ -11,6 +11,10 @@ import { actionScript, probeScript, recoveryScript, scriptCommand, shellQuote } 
 import { parseProbe } from "../src/remote.mjs";
 import { backupInventoryScript, parseBackups } from "../src/remote-backups.mjs";
 import { listenerScopeFunction } from "../src/remote-listeners.mjs";
+import { createServer } from "node:http";
+import { networkProbeScript, parseNetwork } from "../src/lan-detection.mjs";
+import { remoteHTTP, remoteHTTPScript, remoteProviderAPI } from "../src/remote-http.mjs";
+import { forwardConflictScript, parseForwardConflict } from "../src/forward-conflicts.mjs";
 
 // Runs generated POSIX scripts with a fake Magpie executable and service manager.
 // It never downloads a release or invokes an installed Magpie.
@@ -20,7 +24,7 @@ const bash = process.env.MIGPIE_BASH || (bundledBash && existsSync(bundledBash) 
 const directory = await mkdtemp(join(tmpdir(), "migpie-script-smoke-"));
 const home = join(directory, "home"), tools = join(directory, "tools");
 const run = async (script, onStdout, input = "") => {
-  const setup = `export HOME="$(cd ${shellQuote(home.replaceAll("\\", "/"))} && pwd -P)"\nexport XDG_CONFIG_HOME="$HOME/.config"\nunset MAGPIE_ADDR\nexport PATH="$(cd ${shellQuote(tools.replaceAll("\\", "/"))} && pwd -P):$HOME/.local/bin:/usr/bin:/bin"\n`;
+  const setup = `export HOME="$(cd ${shellQuote(home.replaceAll("\\", "/"))} && pwd -P)"\nexport XDG_CONFIG_HOME="$HOME/.config"\nunset MAGPIE_ADDR\nexport PATH="$(cd ${shellQuote(tools.replaceAll("\\", "/"))} && pwd -P):$HOME/.local/bin:/usr/bin:/bin:/mingw64/bin"\n`;
   const path = join(directory, "script-" + randomUUID() + ".sh");
    const isolated = script.replaceAll("/proc/net/tcp6", home.replaceAll("\\", "/") + "/tcp6").replaceAll("/proc/net/tcp", home.replaceAll("\\", "/") + "/tcp");
    await writeFile(path, setup + (input ? "exec " + scriptCommand(isolated) + "\n" : isolated));
@@ -38,6 +42,99 @@ const run = async (script, onStdout, input = "") => {
 const id = "c2be46f1-cf7c-4e27-a5ef-c0786bb4fb05";
 try {
   await Promise.all([mkdir(home), mkdir(tools)]);
+  // Exercise the generated inspection script with both tools, hidden process
+  // details, empty results and tool failures, without inspecting the host.
+  const fakeTool = (name, body) => writeFile(join(tools, name), "#!/bin/sh\n" + body + "\n", { mode: 0o755 });
+  await fakeTool("ss", `test "$*" = '-H -ltnpe sport = :3425' || exit 2
+printf '%s\\n' 'LISTEN 0 128 127.0.0.1:3425 0.0.0.0:* users:(("node",pid=1234,fd=8)) uid:1000 ino:42' 'LISTEN 0 128 127.0.0.1:3426 0.0.0.0:* users:(("other",pid=9999,fd=9))'`);
+  await fakeTool("ps", `test "$*" = '-p 1234 -o pid= -o user= -o comm=' || exit 2
+printf ' 1234 alice node\\n'`);
+  await fakeTool("id", `test "$*" = '-nu 1000' || exit 2
+printf 'alice\\n'`);
+  let inspected = await run(forwardConflictScript(3425));
+  assert.equal(inspected.code, 0, inspected.stderr);
+  let conflict = parseForwardConflict(inspected.stdout, 3425);
+  assert.equal(conflict.listeners.length, 1);
+  assert.equal(conflict.listeners[0].processes[0].name, "node");
+  assert.equal(conflict.listeners[0].processes[0].user, "alice");
+  assert.ok(!inspected.stdout.includes("9999"));
+  await fakeTool("ss", `printf '%s\\n' 'LISTEN 0 128 [::]:3425 [::]:* uid:1000 ino:42'`);
+  conflict = parseForwardConflict((await run(forwardConflictScript(3425))).stdout, 3425);
+  assert.equal(conflict.listeners[0].address, "[::]:3425");
+  assert.equal(conflict.listeners[0].user, "alice");
+  assert.deepEqual(conflict.listeners[0].processes, []);
+  await fakeTool("ss", "exit 0");
+  assert.deepEqual(parseForwardConflict((await run(forwardConflictScript(3425))).stdout, 3425).listeners, []);
+  await fakeTool("ss", "exit 2");
+  await fakeTool("lsof", `test "$*" = '-nP -a -iTCP:3425 -sTCP:LISTEN -FpcuLfn' || exit 2
+printf 'p1234\\ncnode\\nu1000\\nLalice\\nf8\\nn[::1]:3425\\n'`);
+  conflict = parseForwardConflict((await run(forwardConflictScript(3425))).stdout, 3425);
+  assert.equal(conflict.listeners[0].address, "[::1]:3425");
+  assert.equal(conflict.listeners[0].processes[0].user, "alice");
+  await fakeTool("lsof", "exit 1");
+  assert.deepEqual(parseForwardConflict((await run(forwardConflictScript(3425))).stdout, 3425).listeners, []);
+  await fakeTool("lsof", "printf 'private failure details\\n' >&2\nexit 1");
+  inspected = await run(forwardConflictScript(3425));
+  assert.equal(parseForwardConflict(inspected.stdout, 3425).available, false);
+  assert.ok(!inspected.stdout.includes("private failure details"));
+  await Promise.all(["ss", "ps", "id", "lsof"].map((name) => rm(join(tools, name))));
+  console.log("Forward conflicts: POSIX ss/lsof scripts, exact port filtering, process/user lookup, hidden owners, empty results and unavailable tools passed.");
+  const requests = [], httpKey = "script-fixture-web-key-123456789";
+  const httpServer = createServer((request, response) => {
+    void (async () => {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ path: request.url, headers: request.headers, body });
+      if (request.url === "/?k=" + httpKey) {
+        response.writeHead(303, { Location: "/must-not-follow", "Set-Cookie": "magpie_web_fixture=" + httpKey + "; HttpOnly; Path=/" }).end();
+      } else if (request.url === "/redirect") response.writeHead(302, { Location: "/must-not-follow" }).end();
+      else if (request.url === "/denied") response.writeHead(401).end("private-error-output");
+      else if (request.url === "/api/providers" || request.url === "/api/provider/save") {
+        assert.equal(request.headers.cookie, "magpie_web_fixture=" + httpKey);
+        response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ providers: [], ...(body && { saved: JSON.parse(body) }) }));
+      } else response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+    })().catch(() => { response.writeHead(500).end(); });
+  });
+  await new Promise((done) => httpServer.listen(0, "127.0.0.1", done));
+  try {
+    const address = "http://127.0.0.1:" + httpServer.address().port;
+    await writeFile(join(home, ".curlrc"), 'location\nheader = "X-From-Curlrc: unsafe"\n');
+    const noProxy = 'export http_proxy=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 NO_PROXY= no_proxy=\n';
+    const executed = [];
+    const httpSessions = { async execute(_id, command, { input }) {
+      assert.equal(command, "sh -s"); executed.push(command);
+      const reply = await run(noProxy + input);
+      assert.ok([0, 22].includes(reply.code), "Isolated curl exited " + reply.code + ": " + reply.stderr);
+      return reply;
+    } };
+    const credential = "fixture-'\"\\$()`-shared-key", body = { name: "本机 𠮷 ' \" \\ \n", key: credential };
+    assert.equal((await remoteHTTP(httpSessions, "fixture", address + "/echo", { method: "POST", headers: { Authorization: "Bearer " + credential }, body })).status, 200);
+    assert.equal(requests.at(-1).headers.authorization, "Bearer " + credential);
+    assert.deepEqual(JSON.parse(requests.at(-1).body), body);
+    assert.equal((await remoteHTTP(httpSessions, "fixture", address + "/redirect")).status, 302);
+    await assert.rejects(remoteHTTP(httpSessions, "fixture", address + "/denied"), { code: "PROVIDER_LINK_HTTP" });
+    const denied = await run(noProxy + remoteHTTPScript(address + "/denied"));
+    assert.equal(denied.code, 22); assert.equal(denied.stderr, ""); assert.ok(!denied.stdout.includes("private-error-output"));
+    const api = await remoteProviderAPI(httpSessions, "fixture", { url: address + "/?k=" + httpKey });
+    assert.deepEqual(await api("/api/providers"), { providers: [] });
+    assert.deepEqual((await api("/api/provider/save", body)).saved, body);
+    assert.ok(requests.every((request) => request.path !== "/must-not-follow" && !request.headers["x-from-curlrc"]));
+    assert.ok(executed.every((command) => !command.includes(credential) && !command.includes(httpKey)));
+  } finally {
+    httpServer.closeAllConnections(); await new Promise((done) => httpServer.close(done));
+    await rm(join(home, ".curlrc"));
+  }
+  await writeFile(join(tools, "ip"), "#!/bin/sh\ncase \"$1\" in -4) printf '%s dev eth0 src 192.168.10.3\\n' \"$4\";; -6) printf '%s dev eth1 src fd12::3\\n' \"$4\";; *) exit 2;; esac\n", { mode: 0o755 });
+  const hosts = ["192.168.10.2", "fd12::2"];
+  const networkReply = await run("export SSH_CONNECTION='192.168.10.2 1234 192.168.10.3 22'\n" + networkProbeScript(hosts));
+  assert.equal(networkReply.code, 0, networkReply.stderr);
+  const network = parseNetwork(networkReply.stdout, hosts);
+  assert.equal(network.curl, true); assert.deepEqual(network.ssh, ["192.168.10.2", "1234", "192.168.10.3", "22"]);
+  assert.equal(network.routes.get(hosts[0]), "192.168.10.2 dev eth0 src 192.168.10.3");
+  assert.equal(network.routes.get(hosts[1]), "fd12::2 dev eth1 src fd12::3");
+  await rm(join(tools, "ip"));
+  console.log("LAN scripts: POSIX IPv4/IPv6 network evidence and actual curl authentication, JSON escaping, proxy/curlrc bypass, no redirects and SSH-stdin credentials passed.");
   const fake = `#!/bin/sh
 set -eu
 state="$HOME/service-state"

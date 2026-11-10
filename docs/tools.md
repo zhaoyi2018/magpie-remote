@@ -29,6 +29,7 @@
 | `remote_operation` | `connectionId`；可选 `operationId` 或 `history` | 默认返回最新任务；按 ID 查当前或历史；`history: true` 返回当前与最多 20 条旧终态摘要，不包含原始命令输出或凭据 |
 | `remote_backups` | `connectionId` | 列出远端备份格式、大小、版本与校验值，不读取配置内容；恢复和删除须另行预览 |
 | `remote_web` | `connectionId`；可选 `port` | 显式读取官方管理链接并建立临时回环 SSH 转发；返回的链接含管理密钥 |
+| `remote_provider_sync` | `connectionId` | 验证本机局域网网关与远端网络，优先直连，否则使用 SSH；返回不含凭据的状态、`mode: "direct" / "ssh"` 和地址 |
 
 远程生命周期的操作范围、配置归档、断线核实和卸载边界见[远程 Magpie 管理](remote.md)。
 
@@ -61,6 +62,7 @@ HTTP `GET api/snapshot` 使用 `includeStatus: true, includeLogs: false`，不�
 | `forwardFailurePolicy` | 可选 `rollback`（默认）或 `continue`；预设发生可恢复错误时，全部回滚或保留连接并继续其余预设；远程分配状态不明时仍关闭 SSH |
 | `autoConnect` | 可选布尔值，默认 false；插件宿主启动或重载时尝试连接一次 |
 | `autoReconnect` | 可选布尔值，默认 false；网络故障自动退避重试；显式断开或宿主关闭时取消 |
+| `autoLinkLocalMagpie` | 可选布尔值，默认 true；远端 Web 就绪时自动对接本机共享网关，验证直连或使用 SSH 回退 |
 | `identityFile`, `knownHostsFile` | 可选绝对路径，或以 `~/` 开头 |
 | `agent` | 可选 socket 路径、Windows 命名管道或受 ssh2 支持的 agent 标识 |
 | `passwordEnv`, `passphraseEnv` | 可选环境变量名称，不能填写秘密原文 |
@@ -137,5 +139,7 @@ const saved = await call("save_connection", {
 管理 HTTP API 的操作错误体为 `{error, code, message, category, retryable}`；缺少可用凭据时还返回 `credentialFields`（`password` / `passphrase`），页面据此提示本次输入。`category` 区分 `network`、`authentication`、`credentials`、`trust`、`forward`、`configuration`、`cancelled` 和其他 `operation`。只有已识别的网络中断、连接拒绝、网络不可达、临时 DNS 故障及 SSH 超时可重试；未知握手错误与无法解析的主机名不会无限重试。
 
 常见代码包括 `SSH_NETWORK`、`SSH_DISCONNECTED`、`SSH_TIMEOUT`、`SSH_AUTH_FAILED`、`SSH_CONNECTION_FAILED`、`CREDENTIALS_REQUIRED`、`KEY_INVALID`、`KEY_UNAVAILABLE`、`HOST_KEY_REJECTED`、`HOST_KEY_UNAVAILABLE`、`FORWARD_BIND_FAILED`、`FORWARD_REJECTED`、`FORWARD_TIMEOUT`、`CONFIG_INVALID`、`CONFIG_UNREADABLE`、`CONFIG_BACKUP_FAILED`、`CONFIG_BACKUP_INVALID` 和 `OPERATION_CANCELLED`。管理地址过期仍返回 `MANAGEMENT_EXPIRED`。
+
+`FORWARD_REJECTED` 的消息包含远端监听地址与端口，并在可查询时附上对应监听的进程名、PID、用户或 UID。无可见监听、进程信息受权限限制、查询不可用或超时分别给出说明；仍使用原错误代码，不将查询失败改报为 SSH 断开。相同说明也出现在规则的 `forwardErrors[].message` 和连接运行日志中。详细行为见[常见问题](usage.md#常见问题)。
 
 接口定义来源：[plugin.mjs](../src/plugin.mjs)；运行校验来源：[config.mjs](../src/config.mjs)。返回[文档导航](README.md)。

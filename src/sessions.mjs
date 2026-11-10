@@ -6,6 +6,7 @@ import { prepareAuthentication, credentialRequest } from "./authentication.mjs";
 import { OperationError, errorDetails, sshFailure } from "./errors.mjs";
 import { executeRemote } from "./remote-exec.mjs";
 import { loopbackHost, privateForward, verifyRemoteListener } from "./remote-listeners.mjs";
+import { forwardRejectionMessage } from "./forward-conflicts.mjs";
 
 const { Client } = ssh2;
 
@@ -260,7 +261,11 @@ export class SessionManager {
       session.forwardErrors.delete(forward.id);
       this.#log(session, "info", "转发「" + (forward.name ?? forward.id) + "」已启动（" + forward.direction + "）：" + forward.bindHost + ":" + forward.bindPort + " → " + forward.targetHost + ":" + forward.targetPort);
       return this.#forwardView(forward);
-    } catch (error) {
+    } catch (failure) {
+      const error = remoteRejected && session.state === "connected"
+        ? new OperationError("FORWARD_REJECTED", await forwardRejectionMessage(session.client, forward, executeRemote,
+          { signal, timeoutMs: Math.min(3000, this.forwardTimeoutMs) }), { cause: failure })
+        : failure;
       this.#log(session, "error", "转发「" + (forward.name ?? forward.id) + "」启动失败：" + error.message);
       session.forwards.delete(forward.id);
       session.forwardErrors.set(forward.id, { id: forward.id, message: error.message });

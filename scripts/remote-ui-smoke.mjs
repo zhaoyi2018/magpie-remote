@@ -155,7 +155,8 @@ try {
   } });
   cleanup.unshift(() => remote.close());
   const providerLink = {
-    status(id) { return fixture.state.webEnabled ? { state: "ready", message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture", endpoint: "http://127.0.0.1:23425/" + id, gatewayAddress: "http://192.168.10.2:4567" } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
+    mode: "ssh",
+    status(id) { return fixture.state.webEnabled ? { state: "ready", mode: this.mode, message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture-" + id, endpoint: this.mode === "direct" ? "http://192.168.10.2:4567" : "http://127.0.0.1:23425/" + id, gatewayAddress: "http://192.168.10.2:4567" } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
     async sync(id) { return this.status(id); },
   };
   const tools = createTools(store, sessions, remote, providerLink);
@@ -421,6 +422,21 @@ try {
   await selectedRow("生产服务器").click(); await openRemote();
   await field("remote-local-provider-address").filter({ hasText: "remote-alpha" }).waitFor();
   console.log("Remote UI: automatic local-provider status, explicit retry and late connection response isolation passed.");
+  await field("remote-local-provider-mode").filter({ hasText: "访问方式：SSH 隧道" }).waitFor();
+  providerLink.mode = "direct";
+  await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
+  await field("remote-local-provider-mode").filter({ hasText: "局域网直连，无需 SSH 隧道" }).waitFor();
+  assert.match(await field("remote-local-provider-address").textContent(), /^局域网地址 http:\/\/192\.168\.10\.2:4567/);
+  assert.ok(!(await field("remote-local-provider-address").textContent()).includes("127.0.0.1"));
+  await field("disconnect").click(); await field("detail-state").filter({ hasText: "未连接" }).waitFor();
+  await field("remote-local-provider-state").filter({ hasText: "局域网配置保留，直连状态待检测" }).waitFor();
+  assert.equal(await field("remote-local-provider-sync").isDisabled(), true);
+  await field("connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor();
+  await detect();
+  providerLink.mode = "ssh";
+  await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
+  await field("remote-local-provider-mode").filter({ hasText: "访问方式：SSH 隧道" }).waitFor();
+  console.log("Remote UI: direct/SSH mode labels, direct LAN endpoint and disconnected direct configuration state passed.");
 
   sessions.recordLog("remote-alpha", "info", "alpha-only-log-marker");
   sessions.recordLog("remote-beta", "info", "beta-only-log-marker");
