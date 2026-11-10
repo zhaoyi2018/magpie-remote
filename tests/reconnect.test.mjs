@@ -145,7 +145,15 @@ test("removed host trust after a network interruption pauses rather than bypassi
 
 test("a silent network outage times out and recovers both tunnel directions without affecting another session", async (t) => {
   const fixture = await sshServer(t), echo = await echoServer(t), proxy = await networkProxy(t, fixture.port);
-  const sessions = manager(t, { keepaliveIntervalMs: 40, keepaliveCountMax: 2, connectTimeoutMs: 100 });
+  const normalConnectTimeoutMs = 2000, blockedConnectTimeoutMs = 100;
+  // Healthy SSH authentication must remain valid beyond the short budget used
+  // only for retries while the proxy deliberately drops every packet.
+  fixture.server.on("connection", (client) => {
+    const [authenticate] = client.listeners("authentication");
+    client.removeListener("authentication", authenticate);
+    client.on("authentication", (context) => setTimeout(() => authenticate(context), 120));
+  });
+  const sessions = manager(t, { keepaliveIntervalMs: 200, keepaliveCountMax: 2, connectTimeoutMs: normalConnectTimeoutMs });
   const profile = { ...fixture.profile, id: "interrupted", port: proxy.port, autoReconnect: true, forwards: [
     { id: "local", direction: "c2s", bindPort: 0, targetPort: echo.port },
     { id: "remote", direction: "s2c", bindPort: 0, targetPort: echo.port },
@@ -153,11 +161,13 @@ test("a silent network outage times out and recovers both tunnel directions with
   const connected = await sessions.connect(profile);
   await sessions.connect({ ...fixture.profile, id: "independent" });
   const healthy = await sessions.addForward("independent", { id: "healthy", direction: "c2s", bindPort: 0, targetPort: echo.port });
+  sessions.connectTimeoutMs = blockedConnectTimeoutMs;
   proxy.interrupt();
   await until(() => sessions.status(profile.id).error?.code === "SSH_TIMEOUT");
   await until(() => sessions.status(profile.id).reconnect.attempts >= 2);
   for (const forward of connected.forwards) await assert.rejects(exchange(forward.bindPort), /ECONNREFUSED/);
   assert.ok((await exchange(healthy.bindPort)).length);
+  sessions.connectTimeoutMs = normalConnectTimeoutMs;
   proxy.resume();
   await until(() => sessions.status(profile.id).state === "connected" && sessions.status(profile.id).reconnect.state === "idle");
   for (const forward of sessions.status(profile.id).forwards) assert.ok((await exchange(forward.bindPort)).length);
