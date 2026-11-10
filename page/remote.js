@@ -134,7 +134,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     if (["start", "stop", "restart"].includes(action) && !instance.service?.installed) return "尚未安装用户服务，请先启用 Web。";
     if (action === "start" && instance.service?.state === "running") return "服务已在运行。";
     if (action === "stop" && instance.service?.state === "stopped") return "服务已停止。";
-    if (action === "enable_web" && instance.web?.enabled && instance.service?.installed) return "官方 Web 与用户服务已启用。";
+    if (action === "enable_web" && instance.web?.enabled && instance.service?.installed && instance.service.scope === "loopback") return "官方 Web 与用户服务已启用。";
     return "";
   }
   function backupListReason() {
@@ -227,6 +227,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       const button = $("remote-action-" + action), reason = actionReason(action);
       button.disabled = Boolean(reason); button.title = reason || "预览变更后确认执行";
     }
+    text("remote-action-enable_web", instance?.web?.enabled && instance.service?.installed && instance.service.scope !== "loopback" ? "重建回环配置" : "启用 Web");
     text("remote-action-hint", baseReason() || (instance?.installed ? "每次变更前先预览，更新会保留当前配置与备份。" : "安装到当前 SSH 用户的默认位置；安装后可启用 Web 与用户服务。"));
     text("remote-service-hint", instance && !instance.systemd ? "未检测到 systemd，无法管理用户服务；其他操作是否可用见对应按钮提示。" : instance?.installed && !instance.service?.installed ? (status.actions?.enable_web?.enabled ? "尚未安装用户服务。请先点击「启用 Web」创建并启动服务，再使用启停按钮。" : "尚未安装用户服务。" + (status.actions?.enable_web?.reason || "请先检测环境。")) : "启用 Web 会配置用户服务；服务启停不会断开 SSH 连接。");
     drawUpdate(detecting);

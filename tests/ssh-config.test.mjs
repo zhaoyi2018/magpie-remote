@@ -6,7 +6,7 @@ import { readSSHConfig } from "../src/ssh-config.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { createTools } from "../src/plugin.mjs";
-import { temporary } from "./helpers.mjs";
+import { sshServer, temporary } from "./helpers.mjs";
 
 async function fixture(t, content) {
   const home = await temporary(t);
@@ -156,4 +156,21 @@ test("SSH import deduplicates identical forwards and honors ClearAllForwardings"
   const result = await f.read();
   assert.equal(result.candidates.find((item) => item.alias === "repeated").profile.forwards.length, 1);
   assert.deepEqual(result.candidates.find((item) => item.alias === "cleared").profile.forwards, []);
+});
+
+test("SSH import warns and skips public reverse listeners before authentication or preset startup", async (t) => {
+  const ssh = await sshServer(t);
+  const content = `Host imported\n HostName 127.0.0.1\n User tester\n IdentityFile none\n Port ${ssh.port}\n RemoteForward 0.0.0.0:18080 127.0.0.1:8080\n RemoteForward [::]:18081 127.0.0.1:8080\n RemoteForward 192.168.1.2:18082 127.0.0.1:8080\n LocalForward 0 127.0.0.1:8080\n`;
+  const f = await fixture(t, content), preview = await f.read(), candidate = preview.candidates[0];
+  assert.equal(candidate.selectable, true);
+  assert.equal(candidate.warnings.length, 3);
+  assert.ok(candidate.warnings.every((message) => /remoteforward.*未导入.*回环/.test(message)));
+  assert.deepEqual(candidate.profile.forwards.map((forward) => forward.direction), ["c2s"]);
+  const store = new ProfileStore(join(f.home, "connections.json")), sessions = new SessionManager({ env: {} });
+  t.after(() => sessions.close());
+  const imported = await store.importProfiles([{ ...candidate.profile, hostFingerprint: ssh.profile.hostFingerprint, knownHostsFile: ssh.profile.knownHostsFile }]);
+  const connected = await sessions.connect(imported.imported[0], { credentials: { password: "local-test-secret" } });
+  assert.equal(connected.state, "connected");
+  assert.equal(connected.forwards.length, 1);
+  assert.equal(await readFile(f.configPath, "utf8"), content);
 });

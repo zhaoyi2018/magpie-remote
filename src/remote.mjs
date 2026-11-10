@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { identifier } from "./config.mjs";
 import { OperationError, errorDetails } from "./errors.mjs";
@@ -123,6 +123,11 @@ export class RemoteManager {
   #tasks = new Set();
   #queue = Promise.resolve();
   #ready;
+  #stateError;
+  #damagedContents;
+  #preservedFile;
+  #preservedDigest;
+  #retrying;
   #closed = false;
   #shutdown = new AbortController();
 
@@ -132,15 +137,17 @@ export class RemoteManager {
     void this.#ready.catch(() => {});
   }
 
-  async #load() {
+  async #load({ allowMissing = true } = {}) {
+    let contents;
     try {
-      const contents = await readFile(this.file, "utf8");
-      if (Buffer.byteLength(contents) > 8 * 1024 * 1024) throw new Error("remote state too large");
+      contents = await readFile(this.file);
+      if (contents.length > 8 * 1024 * 1024) throw new Error("remote state too large");
       const data = JSON.parse(contents);
       if (data.version !== 1 || !Array.isArray(data.records)) throw new Error("invalid remote state");
+      const records = new Map();
       for (const record of data.records) {
         identifier(record.connectionId);
-        if (!/^[a-f0-9]{64}$/.test(record.binding ?? "") || this.#records.has(record.connectionId)) throw new Error("invalid remote binding");
+        if (!/^[a-f0-9]{64}$/.test(record.binding ?? "") || records.has(record.connectionId)) throw new Error("invalid remote binding");
         if (record.operation !== undefined) record.operation = operationSummary(record.operation);
         if (record.history !== undefined && (!Array.isArray(record.history) || record.history.length > operationHistoryLimit)) throw new Error("invalid operation history");
         record.history = (record.history ?? []).map(operationSummary);
@@ -158,14 +165,56 @@ export class RemoteManager {
             operation.message = "插件已重启，请连接后检测远端操作结果";
           }
         }
-        this.#records.set(record.connectionId, record);
+        records.set(record.connectionId, record);
       }
+      this.#records = records;
+      this.#stateError = undefined;
+      this.#damagedContents = undefined;
     } catch (cause) {
-      if (cause.code !== "ENOENT") throw new OperationError("REMOTE_STATE_INVALID", "远程管理记录无法读取，请检查文件后重试；未覆盖原文件", { cause });
+      if (cause.code === "ENOENT" && allowMissing) return;
+      this.#damagedContents = contents;
+      this.#stateError = new OperationError("REMOTE_STATE_INVALID", "远程管理记录无法读取，远端变更保持暂停；请保留任务记录并修复文件后重新读取", { cause });
+      throw this.#stateError;
     }
   }
 
+  async storageStatus() {
+    await this.#ready.catch(() => {});
+    return this.#stateError ? {
+      state: "blocked", code: this.#stateError.code, message: this.#stateError.message, file: this.file,
+      ...(this.#preservedFile && { preservedFile: this.#preservedFile }),
+    } : { state: "ready" };
+  }
+
+  async retryState() {
+    if (this.#retrying) return this.#retrying;
+    const retry = (async () => {
+      await this.#ready.catch(() => {});
+      if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭");
+      if (!this.#stateError) return this.storageStatus();
+      if (this.#tasks.size) throw new OperationError("REMOTE_BUSY", "请先等待远端任务结束，再重新读取记录");
+      // Preserve the bytes observed at failure, even if the file was repaired since.
+      // Never fall back to an older snapshot: it may predate a dispatched task.
+      const digest = this.#damagedContents && createHash("sha256").update(this.#damagedContents).digest("hex");
+      if (digest && digest !== this.#preservedDigest) {
+        const directory = this.file + ".recovery", file = join(directory, randomUUID() + ".json");
+        try {
+          await mkdir(directory, { recursive: true, mode: 0o700 });
+          await writeFile(file, this.#damagedContents, { flag: "wx", mode: 0o600 });
+        } catch (cause) { throw new OperationError("REMOTE_STATE_PRESERVE_FAILED", "无法保留损坏记录，已取消重新读取，请检查本地目录权限和空间", { cause }); }
+        this.#preservedFile = file; this.#preservedDigest = digest;
+      }
+      this.#ready = this.#load({ allowMissing: false });
+      await this.#ready.catch(() => {});
+      return this.storageStatus();
+    })();
+    this.#retrying = retry;
+    try { return await retry; }
+    finally { if (this.#retrying === retry) this.#retrying = undefined; }
+  }
+
   #save() {
+    if (this.#stateError) return Promise.reject(this.#stateError);
     const records = [...this.#records.values()].map((record) => ({ ...record, ...(record.operation && { operation: operationSummary(record.operation) }), history: record.history.map(operationSummary) }));
     const contents = JSON.stringify({ version: 1, records }, null, 2) + "\n";
     const pending = this.#queue.catch(() => {}).then(async () => {
@@ -625,7 +674,15 @@ export class RemoteManager {
   }
 
   async assertProfileChange(profile) {
-    await this.#ready;
+    try { await this.#ready; }
+    catch (error) {
+      if (error.code !== "REMOTE_STATE_INVALID") throw error;
+      const current = (await this.store.list()).find((item) => item.id === profile.id);
+      // New local profiles and same-server credential repairs cannot erase task
+      // evidence. Rebinding, deleting and global restore still require valid state.
+      if (!current || hash([current.id, current.host, current.port, current.username]) === hash([profile.id, profile.host, profile.port, profile.username])) return;
+      throw error;
+    }
     const record = this.#records.get(profile.id);
     if (record?.operation?.state === "running") await this.assertIdle(profile.id);
     if (record?.operation?.state === "unknown" && record.binding !== hash([profile.id, profile.host, profile.port, profile.username])) await this.assertIdle(profile.id);
@@ -641,5 +698,5 @@ export class RemoteManager {
     this.#records.delete(id); this.#previews.delete(id); this.#webForwards.delete(id); await this.#save();
   }
 
-  async close() { this.#closed = true; this.#shutdown.abort(); await Promise.allSettled([...this.#tasks]); await this.#queue.catch(() => {}); }
+  async close() { this.#closed = true; this.#shutdown.abort(); await this.#retrying?.catch(() => {}); await Promise.allSettled([...this.#tasks]); await this.#queue.catch(() => {}); }
 }

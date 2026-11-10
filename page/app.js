@@ -30,6 +30,8 @@ import { createRemoteManager } from "./remote.js";
   let listSignature, forwardSignature, settingsSignature, logSignature;
   let importPreview = null, previewPath = "", previewSequence = 0, importing = false;
   let serviceFailure = null;
+  let remoteStorage = null, retryingStorage = false;
+  let logData = { connectionId: null, entries: [], loaded: false, error: "" }, logReading = null, logSequence = 0;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -233,6 +235,7 @@ import { createRemoteManager } from "./remote.js";
         startDiscoveryFrame();
         $("storage-warning").textContent = snapshot.storageWarning?.message ?? "";
         $("storage-warning").hidden = !snapshot.storageWarning;
+        remoteStorage = snapshot.remoteStorage ?? null;
         reconcileSelection();
         $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
         $("service-error").hidden = true;
@@ -280,6 +283,7 @@ import { createRemoteManager } from "./remote.js";
     })();
     try { await refreshing; } finally { refreshing = null; }
     if (newEndpoint && !pendingCalls && !state.busy.size && !document.hidden) return refresh();
+    void refreshLogs();
   }
   async function run(id, name, operation, message) {
     const owner = Symbol();
@@ -301,6 +305,13 @@ import { createRemoteManager } from "./remote.js";
     return failure;
   }
   function render() {
+    $("remote-storage-warning").hidden = remoteStorage?.state !== "blocked";
+    $("remote-storage-message").textContent = remoteStorage?.message ?? "";
+    $("remote-storage-file").textContent = remoteStorage?.file ? "记录文件：" + remoteStorage.file : "";
+    $("remote-storage-preserved").textContent = remoteStorage?.preservedFile ? "已保留原件：" + remoteStorage.preservedFile : "";
+    $("remote-storage-preserved").hidden = !remoteStorage?.preservedFile;
+    $("remote-storage-retry").disabled = !state.online || retryingStorage;
+    $("remote-storage-retry").textContent = retryingStorage ? "正在保留并读取…" : "保留原件并重新读取";
     if ($("connection-editor").open) connectionEditor.sync();
     if ($("forward-editor").open) syncForwardAction();
     $("new-connection").disabled = $("empty-add").disabled = $("import-config").disabled = !state.online;
@@ -470,10 +481,38 @@ import { createRemoteManager } from "./remote.js";
       row.append(element("dt", "", label), element("dd", "", value)); $("settings-list").append(row);
     }
   }
-  function renderLogs({ connection, session }) {
+  async function refreshLogs() {
+    const id = selected()?.connection.id;
+    if (!id || state.tab !== "logs" || !state.online || document.hidden) return;
+    if (logData.connectionId !== id) logData = { connectionId: id, entries: [], loaded: false, error: "" };
+    if (logReading?.id === id) return logReading.promise;
+    const sequence = ++logSequence, owner = { id, promise: null };
+    logReading = owner;
+    renderLogs(selected());
+    owner.promise = (async () => {
+      try {
+        const result = await call("session_logs", { connectionId: id });
+        if (sequence !== logSequence || state.selected !== id || state.tab !== "logs") return;
+        if (result?.connectionId !== id || !Array.isArray(result.logs)) throw new Error("日志与当前连接不匹配，请重试");
+        logData = { connectionId: id, entries: result.logs, loaded: true, error: "" };
+      } catch (error) {
+        if (sequence === logSequence && state.selected === id && state.tab === "logs") logData.error = "日志读取失败：" + error.message + "。将在下次刷新时重试。";
+      } finally {
+        if (logReading === owner) logReading = null;
+        if (state.selected === id && state.tab === "logs") renderLogs(selected());
+      }
+    })();
+    return owner.promise;
+  }
+  function renderLogs({ connection }) {
+    if (state.tab !== "logs") return;
     const filter = $("log-filter").value;
-    const logs = (session.logs ?? []).filter((item) => filter === "all" || item.level === "error").slice().reverse();
-    const signature = JSON.stringify([connection.id, filter, logs]);
+    const current = logData.connectionId === connection.id;
+    const logs = (current ? logData.entries : []).filter((item) => filter === "all" || item.level === "error").slice().reverse();
+    $("runtime-log-error").textContent = current ? logData.error : "";
+    $("runtime-log-error").hidden = !current || !logData.error;
+    const loading = !current || !logData.loaded;
+    const signature = JSON.stringify([connection.id, filter, logs, loading, current && logData.error]);
     if (logSignature === signature) return;
     logSignature = signature; $("log-list").replaceChildren();
     for (const log of logs) {
@@ -483,7 +522,7 @@ import { createRemoteManager } from "./remote.js";
       row.append(time, element("span", "log-level", { info: "信息", warn: "提示", error: "错误" }[log.level] ?? log.level), element("span", "log-message", log.message));
       $("log-list").append(row);
     }
-    if (!logs.length) $("log-list").append(element("p", "no-matches", filter === "error" ? "暂无错误日志" : "暂无运行日志，连接后会在这里记录 SSH、转发与远程 Magpie 事件。"));
+    if (!logs.length) $("log-list").append(element("p", "no-matches", current && logData.error ? "日志暂不可用，请稍后重试。" : loading ? "正在读取日志…" : filter === "error" ? "暂无错误日志" : "暂无运行日志，连接后会在这里记录 SSH、转发与远程 Magpie 事件。"));
   }
   function updateDuration() {
     const session = selected()?.session;
@@ -493,6 +532,7 @@ import { createRemoteManager } from "./remote.js";
     $("connection-time").textContent = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((n) => String(n).padStart(2, "0")).join(":");
   }
   function setTab(tab, focus = false) {
+    if (state.tab !== tab) { logSequence++; logReading = null; }
     state.tab = tab;
     for (const name of tabs) {
       $("tab-" + name).setAttribute("aria-selected", String(tab === name));
@@ -500,6 +540,7 @@ import { createRemoteManager } from "./remote.js";
       $("panel-" + name).hidden = tab !== name;
     }
     remote.render(selected() ?? null, { online: state.online, active: tab === "remote" });
+    if (tab === "logs") void refreshLogs();
     if (focus) $("tab-" + tab).focus();
   }
   function hideMenu(restoreFocus = false) {
@@ -777,6 +818,16 @@ import { createRemoteManager } from "./remote.js";
   $("search").addEventListener("input", () => { reconcileSelection(); render(); });
   document.querySelectorAll("[data-filter]").forEach((node) => node.addEventListener("click", () => { state.filter = node.dataset.filter; reconcileSelection(); render(); }));
   $("refresh").addEventListener("click", async () => { await refresh(); void remote.refresh({ force: true }); });
+  $("remote-storage-retry").addEventListener("click", async () => {
+    if (retryingStorage || !state.online) return;
+    retryingStorage = true; render();
+    try {
+      remoteStorage = await call("remote_state_retry");
+      toast(remoteStorage.state === "ready" ? "远程任务记录已重新读取" : "记录仍需修复，远端变更继续暂停");
+      await refresh(true); void remote.refresh();
+    } catch (error) { toast(error.message); }
+    finally { retryingStorage = false; render(); }
+  });
   for (const tab of tabs) {
     $("tab-" + tab).addEventListener("click", () => setTab(tab));
     $("tab-" + tab).addEventListener("keydown", (event) => {
@@ -854,6 +905,7 @@ import { createRemoteManager } from "./remote.js";
   startDiscoveryFrame(); render(); void refresh(); startPolling();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
   addEventListener("pagehide", (event) => {
+    logSequence++; logReading = null;
     clearInterval(polling); clearInterval(clock); polling = clock = null;
     if (event.persisted) remote.suspend(); else remote.close();
     $("login-password").value = $("login-passphrase").value = "";

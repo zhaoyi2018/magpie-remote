@@ -39,9 +39,14 @@ export class SessionManager {
     this.passwordVault = passwordVault;
   }
 
-  status(id) {
-    const views = [...this.#sessions.values()].map((session) => this.#view(session));
-    return id === undefined ? views : views.find((item) => item.id === id) ?? { id, state: "disconnected", forwards: [] };
+  status(id, { includeLogs = true } = {}) {
+    if (id === undefined) return [...this.#sessions.values()].map((session) => this.#view(session, { includeLogs }));
+    const session = this.#sessions.get(id);
+    return session ? this.#view(session, { includeLogs }) : { id, state: "disconnected", forwards: [] };
+  }
+
+  logs(id) {
+    return (this.#sessions.get(id)?.logs ?? []).map((entry) => ({ ...entry }));
   }
 
   recordLog(id, level, message) {
@@ -553,11 +558,11 @@ export class SessionManager {
       targetConnection: { ...targetConnection, ...(targetConnection.error && { error: { ...targetConnection.error } }) } };
   }
 
-  #view(session) {
+  #view(session, { includeLogs = true } = {}) {
     const { id, host, port, username, state, connectedAt, lastConnectedAt, hostFingerprint, lastError } = session;
     return {
       id, host, port, username, state, connectedAt, lastConnectedAt, hostFingerprint,
-      logs: session.logs.map((entry) => ({ ...entry })),
+      ...(includeLogs && { logs: this.logs(id) }),
       forwardErrors: [...session.forwardErrors.values()].map((entry) => ({ ...entry })),
       ...(lastError && { lastError }),
       ...(session.error && { error: { ...session.error } }),

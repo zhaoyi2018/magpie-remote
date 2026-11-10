@@ -3,6 +3,7 @@ import { homedir, hostname, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { text, validateForward, validateProfile } from "./config.mjs";
+import { privateForward } from "./remote-listeners.mjs";
 
 const repeated = new Set(["identityfile", "localforward", "remoteforward"]);
 const mapped = new Set(["hostname", "user", "port", "identityfile", "identityagent", "userknownhostsfile", "localforward", "remoteforward", "gatewayports", "clearallforwardings"]);
@@ -237,7 +238,7 @@ export async function readSSHConfig({ configPath, home = homedir(), systemPath, 
               if (rule.length !== 2) throw new Error("转发需要监听端口和目标地址两个参数");
               const binding = networkAddress(rule[0], true, direction === "c2s" && values.get("gatewayports")?.[0]?.toLowerCase() === "yes");
               const target = networkAddress(rule[1]);
-              const forward = validateForward({ id: `${direction}-${index + 1}`, direction, bindHost: binding.host, bindPort: binding.port, targetHost: target.host, targetPort: target.port });
+              const forward = privateForward(validateForward({ id: `${direction}-${index + 1}`, direction, bindHost: binding.host, bindPort: binding.port, targetHost: target.host, targetPort: target.port }));
               if (!profile.forwards.some((item) => item.direction === direction && item.bindHost === forward.bindHost && item.bindPort === forward.bindPort && item.targetHost === forward.targetHost && item.targetPort === forward.targetPort)) profile.forwards.push(forward);
             } catch (error) { warnings.add(`${key} 第 ${index + 1} 条未导入：${error.message}`); }
           }

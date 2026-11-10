@@ -29,6 +29,7 @@
     </header>
     <div id="service-error" class="service-error" role="alert" hidden><span id="service-error-message">管理服务已断开，当前显示最后读取的状态。</span><button id="reopen" class="button" type="button">重新打开</button></div>
     <p id="storage-warning" class="storage-warning" role="status" hidden></p>
+    <details id="remote-storage-warning" class="storage-warning" hidden><summary>远程任务记录需要修复</summary><p id="remote-storage-message" role="status"></p><p>可继续新建连接或修复同一服务器的连接配置。请只修复记录格式，保留所有任务及服务器标识；删除记录或替换为旧备份可能丢失尚未核实的任务。</p><p id="remote-storage-file"></p><p id="remote-storage-preserved" hidden></p><button id="remote-storage-retry" class="button" type="button">保留原件并重新读取</button></details>
     <div class="app-layout" id="app-layout">
       <aside class="sidebar" id="server-pane" aria-label="连接配置">
         <div class="sidebar-heading"><h2>服务器</h2><span id="connection-count" class="count-pill">0</span></div>
@@ -141,6 +142,7 @@
           </section>
           <section id="panel-logs" class="tab-panel" role="tabpanel" aria-labelledby="tab-logs" tabindex="0" hidden>
             <div class="section-heading"><div><h3>运行日志</h3><p>记录 SSH、转发与远程 Magpie 操作，保留最近 200 条，宿主重启后清空。</p></div><label class="log-filter"><span class="sr-only">日志级别</span><select id="log-filter"><option value="all">全部日志</option><option value="error">仅错误</option></select></label></div>
+            <p id="runtime-log-error" class="field-error" role="status" hidden></p>
             <div id="log-list" class="log-list" aria-label="连接运行日志"></div>
             <section class="operation-history" aria-labelledby="operation-history-title"><div class="section-heading"><div><h4 id="operation-history-title">远程任务历史</h4><p>保留当前任务与最近 20 条已结束任务，宿主重启后仍可查看。</p></div><label class="log-filter"><span class="sr-only">任务状态</span><select id="history-filter"><option value="all">全部任务</option><option value="failed">仅失败</option><option value="unknown">待核实</option></select></label></div><p id="history-error" class="field-error" role="alert" hidden></p><div id="operation-history-list" class="log-list" aria-label="远程任务历史"></div></section>
           </section>

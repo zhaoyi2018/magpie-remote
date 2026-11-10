@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
@@ -108,7 +108,7 @@ async function remoteFixture(context) {
             state.backups = state.backups.filter((backup) => backup.id !== selected);
           }
           if (action === "install") state.installed = true;
-          if (action === "enable_web") { state.serviceInstalled = true; state.webEnabled = true; state.serviceActive = "active"; }
+          if (action === "enable_web") { state.serviceInstalled = true; state.webEnabled = true; state.serviceActive = "active"; state.serviceScope = "loopback"; }
           if (["start", "restart"].includes(action)) state.serviceActive = "active";
           if (action === "stop") state.serviceActive = "inactive";
           if (action === "uninstall") { state.installed = false; state.serviceInstalled = false; state.webEnabled = false; }
@@ -399,6 +399,18 @@ try {
   await preview("enable_web"); await field("remote-apply").click();
   await waitOperation("已完成"); await waitEnabled("remote-open-web");
   console.log("Remote UI: legacy 0.1.1327 can enable its first service; platform, container, systemd, service and TLS checks passed.");
+  fixture.state.serviceScope = "unknown"; await detect();
+  assert.equal(await field("remote-action-start").isDisabled(), true);
+  assert.equal(await field("remote-action-restart").isDisabled(), true);
+  assert.equal(await field("remote-action-enable_web").isEnabled(), true);
+  assert.equal(await field("remote-action-enable_web").textContent(), "重建回环配置");
+  fixture.state.serviceRebuildSafe = false; await detect();
+  assert.equal(await field("remote-action-enable_web").isDisabled(), true);
+  fixture.state.serviceRebuildSafe = true; await detect();
+  await preview("enable_web"); await field("remote-apply").click();
+  await waitOperation("已完成"); await waitEnabled("remote-action-restart");
+  assert.equal(await field("remote-action-enable_web").isDisabled(), true);
+  console.log("Remote UI: existing Web services can rebuild loopback settings while unsafe systemd overrides stay blocked.");
   await field("remote-local-provider-state").filter({ hasText: "本机 Magpie 已对接 · remote-alpha" }).waitFor();
   assert.match(await field("remote-local-provider-address").textContent(), /局域网网关 http:\/\/192\.168\.10\.2:4567/);
   const heldProvider = gateTool("remote_provider_sync");
@@ -409,6 +421,32 @@ try {
   await selectedRow("生产服务器").click(); await openRemote();
   await field("remote-local-provider-address").filter({ hasText: "remote-alpha" }).waitFor();
   console.log("Remote UI: automatic local-provider status, explicit retry and late connection response isolation passed.");
+
+  sessions.recordLog("remote-alpha", "info", "alpha-only-log-marker");
+  sessions.recordLog("remote-beta", "info", "beta-only-log-marker");
+  const logsBefore = count("session_logs");
+  await field("refresh").click();
+  assert.equal(count("session_logs"), logsBefore, "Remote and forwarding pages must not request runtime logs");
+  const heldLogs = gateTool("session_logs");
+  await field("tab-logs").click(); await heldLogs.entered;
+  await selectedRow("测试服务器").click(); await field("tab-logs").click();
+  heldLogs.release();
+  await field("log-list").filter({ hasText: "beta-only-log-marker" }).waitFor();
+  assert.ok(!(await field("log-list").textContent()).includes("alpha-only-log-marker"));
+  let failLogs = true;
+  await browserContext.route(api, async (route) => {
+    if (route.request().postDataJSON()?.method === "session_logs" && failLogs) { failLogs = false; await route.abort("failed"); }
+    else await route.continue();
+  });
+  await field("refresh").click();
+  await field("runtime-log-error").filter({ hasText: "日志读取失败" }).waitFor();
+  assert.ok((await field("log-list").textContent()).includes("beta-only-log-marker"), "Transient failure must preserve the selected connection's last logs");
+  await field("runtime-log-error").waitFor({ state: "hidden" });
+  await browserContext.unroute(api);
+  const backendSnapshot = await fetch(new URL("api/snapshot", web.url), { headers: { Authorization: "Bearer " + web.token } }).then((response) => response.json());
+  assert.ok(backendSnapshot.connections.every((item) => !Object.hasOwn(item.session, "logs")));
+  await selectedRow("生产服务器").click(); await openRemote();
+  console.log("Remote UI: runtime logs load only on demand and a late response cannot replace another connection's logs.");
 
   const capabilities = fixture.state.capabilities;
   fixture.state.capabilities = capabilities.replace("backup ", ""); await detect();
@@ -595,6 +633,33 @@ try {
   assert.ok(!/fixture-management-key|local-test-secret/.test(JSON.stringify(requests.filter((item) => ["remote_apply", "remote_preview"].includes(item.method)))));
   assert.equal(await field("remote-task-summary").count(), 1);
   assert.equal(await field("remote-operation").count(), 0);
+  await remote.close();
+  const savedRecords = await readFile(remote.file), damagedRecords = Buffer.from("{ damaged-task-records\r\n");
+  await writeFile(remote.file, damagedRecords);
+  const repairedRemote = new RemoteManager({ store, sessions, release: remote.release });
+  cleanup.unshift(() => repairedRemote.close());
+  const repairTools = createTools(store, sessions, repairedRemote, providerLink);
+  const repairWeb = await startManagementServer({ tools: repairTools, recovery });
+  await web.close(); web = repairWeb;
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.goto(harness.url);
+  await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
+  await field("remote-storage-warning").waitFor();
+  await field("remote-storage-warning").locator("summary").click();
+  assert.ok((await field("remote-storage-file").textContent()).includes(remote.file));
+  assert.equal(await field("new-connection").isEnabled(), true);
+  const actionsBeforeRepair = fixture.executions.filter((item) => item.kind === "action").length;
+  await field("remote-storage-retry").click();
+  await field("remote-storage-preserved").waitFor();
+  const blocked = await repairedRemote.storageStatus();
+  assert.equal(blocked.state, "blocked");
+  assert.deepEqual(await readFile(blocked.preservedFile), damagedRecords);
+  await writeFile(remote.file, savedRecords);
+  await waitEnabled("remote-storage-retry"); await field("remote-storage-retry").click();
+  await field("remote-storage-warning").waitFor({ state: "hidden" });
+  await openRemote(); await detect(); await waitEnabled("remote-action-restart");
+  assert.equal(fixture.executions.filter((item) => item.kind === "action").length, actionsBeforeRepair);
+  console.log("Remote UI: damaged task records preserve original bytes, expose local configuration and reload repaired records without replaying any deployment.");
   assert.deepEqual(errors, [], "Browser script errors");
   console.log(`Remote UI: 390px iframe and preview layout passed. Screenshots: ${screenshots}`);
 } finally {

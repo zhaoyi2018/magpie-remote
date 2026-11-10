@@ -10,7 +10,10 @@
 | `config_restore` | `backupId`, `revision`；可选 `stopConnections` | 保留旧配置后恢复；有活跃连接、连接请求或重试时需明确传 true，否则拒绝；恢复后保持停止 |
 | `ssh_config_preview` | 无；可选 `configPath` | 只读预览系统 SSH 配置，返回 revision、候选主机及是否已存在 |
 | `ssh_config_import` | `revision`, `aliases`；可选 `configPath`, `includeForwards` | 仅新增选中且支持的连接；原子保存，跳过已存在 id，不连接 SSH |
-| `connections` | 无，传 `{}` | 返回 `{connection, revision, session}` 数组；不创建连接 |
+| `connections` | 无；可选 `includeStatus`, `includeLogs` | 默认返回含日志的 `{connection, revision, session}` 数组；`includeLogs: false` 省略日志，不创建连接 |
+| `session_logs` | `connectionId` | 按需返回 `{connectionId, logs}`，只读取当前连接最近 200 条内存日志 |
+| `remote_state_status` | 无 | 读取本机远程任务文件的健康状态；文件损坏时仍可用 |
+| `remote_state_retry` | 无 | 先保留已观察到的损坏文件字节，再重新读取修复后的文件；不清空任务、不回退旧快照、不执行远端命令 |
 | `save_connection` | `connection`；更新时必填 `expectedRevision` | 新建或完整替换一条配置，返回 `{connection, revision}`；已有活跃会话时拒绝修改 |
 | `remove_connection` | `connectionId`, `expectedRevision` | 删除已断开的配置并清理其运行记录，返回 `removed: true` |
 | `connect` | `connectionId` | 认证后建立会话，并启动保存的预设转发；已连接时返回现有会话 |
@@ -31,7 +34,11 @@
 
 `remote_status.history` 为最多 20 条历史终态，当前任务仍在 `operation`；`remote_operation({connectionId, history: true})` 返回 `{connectionId, limit: 20, operations}`，当前任务排第一，所以最多 21 条。`history` 不能与 `operationId` 同时传入；按 ID 查不到时返回 `REMOTE_OPERATION_MISSING`。任务历史在宿主重启后保留，未知任务继续占据当前槽，直到取得明确完成证据。恢复任务的 `restore` 包含 `configState`、`serviceState`、`rollbackState` 及可选的 `recoveryDirectory`，详见[恢复语义](remote.md)。
 
-`config_backups({includeStatus: true})` 返回 `{backups, storageWarning}`；`connections({includeStatus: true})` 返回 `{connections, storageWarning}`。省略参数仍返回原数组。`storageWarning` 为 `null` 或 `{code, message, observedAt}`，目前只报告本次宿主内观察到的备份清理失败；不包含异常 cause 或文件内容。清理失败不撤销已提交配置，下次清理成功后警告清除。HTTP 快照同样返回该字段，页面以非阻断提示显示。
+`config_backups({includeStatus: true})` 返回 `{backups, storageWarning}`；`connections({includeStatus: true})` 返回 `{connections, storageWarning, remoteStorage}`。省略参数仍返回原数组。`storageWarning` 为 `null` 或 `{code, message, observedAt}`，目前只报告本次宿主内观察到的备份清理失败；不包含异常 cause 或文件内容。清理失败不撤销已提交配置，下次清理成功后警告清除。
+
+HTTP `GET api/snapshot` 使用 `includeStatus: true, includeLogs: false`，不携带任何连接的运行日志。日志页通过认证的 `session_logs` 按需读取当前连接；离开日志页或页面不可见时不再发起日志轮询。切换连接后丢弃旧请求的迟到响应，传输失败保留同一连接的上次日志并在下次刷新重试。旧的 `connections({})` 和 `status` 调用继续返回日志。
+
+`remoteStorage` 与 `remote_state_status` 均返回 `{state: "ready"}`，或 `{state: "blocked", code, message, file, preservedFile?}`，不返回文件内容。损坏时新建本地配置、编辑同一服务器的名称或认证设置仍可用；改服务器地址、端口、用户名、删除连接、全局恢复与远端变更继续受保护。`remote_state_retry` 对已读取的损坏字节计算摘要，相同内容只保留一次到 `.remote.json.recovery/<UUID>.json`，保留失败返回 `REMOTE_STATE_PRESERVE_FAILED` 且不重新加载。必须完整校验所有记录后才替换内存状态，缺失文件也不能解除损坏状态。可能已派发的运行任务重新加载为 `unknown`，不会自动重放。具体修复流程见[远程任务记录修复](remote.md#本机远程任务记录损坏时)。
 
 ## SSH 配置的选择导入
 

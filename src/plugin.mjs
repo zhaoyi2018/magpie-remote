@@ -93,6 +93,16 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
     return operation;
   };
   return {
+    remote_state_status: {
+      description: "Read local remote-task storage health without loading credentials or changing remote machines. Remains available when task records are damaged.",
+      args: args({}),
+      execute() { return remote.storageStatus(); },
+    },
+    remote_state_retry: {
+      description: "Preserve damaged remote-task records, then reread a manually repaired file. Never resets task history or replays remote operations; invalid or missing records remain blocked.",
+      args: args({}),
+      execute() { assertMutable(); return remote.retryState(); },
+    },
     remote_status: {
       description: "Read remote Magpie state and the latest operation. refresh=true explicitly probes the connected remote user; it never installs or changes Magpie. Cached state is marked stale when SSH disconnects.",
       args: args({ connectionId: idSchema, refresh: { type: "boolean", default: false } }, ["connectionId"]),
@@ -224,12 +234,21 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       },
     },
     connections: {
-      description: "List saved SSH profiles as {connection, revision, hasSavedPassword, session}, without passwords or ciphertext. includeStatus=true returns {connections, storageWarning}; otherwise returns an array. Use each profile's revision as expectedRevision when editing or deleting its configuration. Does not connect.",
-      args: args({ includeStatus: { type: "boolean", default: false } }, []),
-      async execute({ includeStatus = false } = {}) {
+      description: "List saved SSH profiles as {connection, revision, hasSavedPassword, session}, without passwords or ciphertext. includeLogs=false omits runtime logs; includeStatus=true returns {connections, storageWarning, remoteStorage}. Defaults preserve the legacy array and logs. Use revision as expectedRevision when editing or deleting. Does not connect.",
+      args: args({ includeStatus: { type: "boolean", default: false }, includeLogs: { type: "boolean", default: true } }, []),
+      async execute({ includeStatus = false, includeLogs = true } = {}) {
         if (typeof includeStatus !== "boolean") throw new Error("includeStatus 必须是布尔值");
-        const connections = (await store.list()).map((profile) => ({ connection: publicProfile(profile), revision: profileRevision(profile), hasSavedPassword: Boolean(profile.encryptedPassword), session: sessions.status(profile.id) }));
-        return includeStatus ? { connections, storageWarning: store.storageWarning } : connections;
+        if (typeof includeLogs !== "boolean") throw new Error("includeLogs 必须是布尔值");
+        const connections = (await store.list()).map((profile) => ({ connection: publicProfile(profile), revision: profileRevision(profile), hasSavedPassword: Boolean(profile.encryptedPassword), session: sessions.status(profile.id, { includeLogs }) }));
+        return includeStatus ? { connections, storageWarning: store.storageWarning, ...(remote.storageStatus && { remoteStorage: await remote.storageStatus() }) } : connections;
+      },
+    },
+    session_logs: {
+      description: "Read only one saved connection's last 200 runtime log entries. Returns copies, never credentials; independent from the lightweight connection snapshot.",
+      args: args({ connectionId: idSchema }),
+      async execute({ connectionId }) {
+        await store.get(connectionId);
+        return { connectionId, logs: sessions.logs(connectionId) };
       },
     },
     save_connection: {

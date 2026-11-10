@@ -119,18 +119,18 @@ systemctl --user show magpie.service --property=LoadState --value
 
 确认服务不再运行、单元为 `not-found` 后导出 HOME 外的 JSON，退出会话，由环境维护者回收整个一次性账户/VM。人工清理成功不能把已失败的验收 JSON 改成 passed；应换新账户按原步骤重跑。不应在日常 HOME 或生产会话照抄清理命令。
 
-## 本次交付验证矩阵
+## 验证范围与记录入口
 
 | 项目 | 本次状态 | 证据与限制 |
 | --- | --- | --- |
-| 两个新增 Node 脚本语法、帮助入口 | 已测 | `node --check` 与 `--help`，无下载或系统变更 |
-| 四文件 diff 空白检查 | 已测 | `git diff --check`；不包含真实环境验收 |
+| Node 脚本语法、帮助入口 | 已有检查入口 | `npm run check` 与 `--help`，无下载或系统变更 |
+| diff 空白检查 | 本机检查 | `git diff --check`；不包含真实环境验收 |
 | Node/SSH/浏览器门禁执行 | 见验证记录 | 本机整合回归与最终计数见[验证记录](verification.md)，机器可读结果在 `.local/release-check.json` |
-| CI Ubuntu/Windows × Node 22/24 | 已配置，未运行 | 工作流在推送/PR/手动触发后才产生结果 |
+| CI Ubuntu/Windows × Node 22/24 | 历史提交已通过 | 2026-11-10 的五个 job 通过记录见[验证记录](verification.md)；当前源码仍需独立门禁 |
 | 精确 Bun 1.4.3 | 本机未测 | 当前 Windows 环境无可用 Bun，不安装系统运行时 |
 | 实际 Magpie host 文件回归 | 本机未测 | 当前无可用实际宿主；发布门禁记录 not_run |
-| Linux 生成脚本替身 | 现有入口，非真实验收 | `test:remote` 的 curl/Magpie/systemd 均为替身，CI将执行 |
+| Linux 生成脚本替身 | 现有入口，非真实验收 | `test:remote` 的 curl/Magpie/systemd 均为替身；本轮结果见[验证记录](verification.md) |
 | 官方 CLI 下载、systemd 用户会话及完整生命周期 | 未测 | 当前无 VM/WSL/Linux；未下载 CLI、未连接生产 |
-| 第二官方资产更新 | 未测 | 只有显式第二资产并满足官方 latest 校验时才可执行 |
+| 第二官方资产更新 | 未测 | 需要显式固定的第二官方资产，版本更新且哈希不同；不依赖随时间变化的 latest |
 
 历史验证范围见 [验证记录](verification.md)，现有开发入口见 [开发说明](development.md)。历史成功记录不会自动填充新门禁的外部验收项。

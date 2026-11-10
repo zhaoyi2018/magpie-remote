@@ -31,7 +31,7 @@
 | `IdentityAgent` | Agent 地址；支持 `SSH_AUTH_SOCK` 及环境变量引用 |
 | `UserKnownHostsFile` | 第一条 known_hosts 路径；多条时提示，插件仍校验服务器公钥 |
 | `LocalForward` | TCP c2s 预设，支持指定监听地址及方括号 IPv6 地址 |
-| `RemoteForward` | TCP s2c 预设；不支持 SOCKS 动态转发和 Unix socket |
+| `RemoteForward` | 仅回环监听的 TCP s2c 预设；公开或局域网监听会警告并跳过，不支持 SOCKS 动态转发和 Unix socket |
 | `GatewayPorts` / `ClearAllForwardings` | 解析本地默认监听范围，以及是否清除预设转发 |
 
 路径支持 `~`、`${变量}`、`%%`、`%d`、`%u`；解析连接字段后还支持 `%h`、`%n`、`%p`、`%r`、`%k`、`%L`、`%l`。Include 阶段不支持依赖具体主机的替换符。相对私钥 / known_hosts 路径、未知替换符或缺失环境变量会提示，避免猜测文件位置。
@@ -39,6 +39,8 @@
 `Match all` 和能静态判断的 host、originalhost、user、localuser 条件可参与匹配。无法静态判断的 Match、ProxyJump、ProxyCommand、证书、HostKeyAlias 等会将受影响条目标记为需手动配置，不能勾选导入。`IdentitiesOnly yes` 和 `IdentityAgent none` 当前也不能等价映射，需手动配置。普通未映射选项会列在 warnings 中。未知或非 TCP 转发会提示并跳过该条转发，基本连接仍可导入。
 
 `StrictHostKeyChecking no` 等设置不会关闭本插件的主机公钥校验。未带入有效私钥时，连接前仍需提供可用的 Agent 或密码。导入仅新增配置和可选预设，不自动建立 SSH 会话。
+
+转发导入复用运行时的回环监听规则。`RemoteForward 0.0.0.0:18080 ...`、`[::]:18080 ...` 或局域网监听地址不会进入预设，预览在 warnings 中逐条说明原因，基本连接仍可导入。有效的回环规则与本地转发保留；不会静默将公开地址改成回环地址，也不修改源 SSH 文件。
 
 ## 预览接口
 

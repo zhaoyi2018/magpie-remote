@@ -10,7 +10,7 @@ import { probeScript } from "../src/remote-scripts.mjs";
 import { startManagementServer } from "../src/web-server.mjs";
 import { echoServer, exchange, sshServer, temporary, until } from "./helpers.mjs";
 
-test("management snapshots include real lifecycle logs across reconnects without persisting credentials", async (t) => {
+test("lightweight management snapshots omit logs while authenticated on-demand reads retain lifecycle history", async (t) => {
   const fixture = await sshServer(t);
   const echo = await echoServer(t);
   const store = new ProfileStore(join(await temporary(t), "connections.json"));
@@ -35,14 +35,23 @@ test("management snapshots include real lifecycle logs across reconnects without
   await tools.connect.execute({ connectionId: profile.id }, { credentials: { password: "local-test-secret" } });
   const response = await fetch(new URL("api/snapshot", web.url), { headers: { Authorization: "Bearer " + web.token } });
   const { connections: [row] } = await response.json();
-  assert.ok(row.session.logs.length > previous.logs.length);
-  assert.ok(row.session.logs.every((entry) => Number.isFinite(Date.parse(entry.time))));
+  assert.equal(Object.hasOwn(row.session, "logs"), false);
+  const logResponse = await fetch(new URL("api/call", web.url), { method: "POST", headers: { Authorization: "Bearer " + web.token, "Content-Type": "application/json" }, body: JSON.stringify({ method: "session_logs", args: { connectionId: profile.id } }) });
+  const { result: { logs, connectionId } } = await logResponse.json();
+  assert.equal(connectionId, profile.id);
+  assert.ok(logs.length > previous.logs.length);
+  assert.ok(logs.every((entry) => Number.isFinite(Date.parse(entry.time))));
   assert.equal(row.session.lastConnectedAt, row.session.connectedAt);
   assert.ok(!JSON.stringify(row).includes("local-test-secret"));
   assert.ok(!(await readFile(store.file, "utf8")).includes("local-test-secret"));
   assert.ok(!(await readFile(store.file, "utf8")).includes('"logs"'));
-  row.session.logs[0].message = "must not modify live history";
-  assert.notEqual(sessions.status(profile.id).logs[0].message, row.session.logs[0].message);
+  assert.ok(!JSON.stringify(logs).includes("local-test-secret"));
+  assert.ok((await tools.connections.execute())[0].session.logs.length > 0, "Legacy reads keep logs by default");
+  logs[0].message = "must not modify live history";
+  assert.notEqual(sessions.logs(profile.id)[0].message, logs[0].message);
+  await assert.rejects(tools.session_logs.execute({ connectionId: "missing" }), /不存在/);
+  const unauthenticated = await fetch(new URL("api/call", web.url), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method: "session_logs", args: { connectionId: profile.id } }) });
+  assert.equal(unauthenticated.status, 401);
 });
 
 test("failed authentication and forwarding are recorded as errors and history remains bounded", async (t) => {
@@ -115,10 +124,28 @@ test("remote service stop releases its actual Web listener, preserves SSH and un
   assert.ok((await exchange(independent.bindPort)).length);
   const response = await fetch(new URL("api/snapshot", web.url), { headers: { Authorization: "Bearer " + web.token } });
   const { connections: [row] } = await response.json();
-  assert.ok(row.session.logs.some((entry) => entry.message.includes("远程 Magpie：停止服务") && entry.message.includes("已完成")));
-  assert.ok(!JSON.stringify(row.session.logs).includes("runtime-test-management-key"));
+  assert.equal(Object.hasOwn(row.session, "logs"), false);
+  const { logs } = await tools.session_logs.execute({ connectionId: fixture.profile.id });
+  assert.ok(logs.some((entry) => entry.message.includes("远程 Magpie：停止服务") && entry.message.includes("已完成")));
+  assert.ok(!JSON.stringify(logs).includes("runtime-test-management-key"));
   const connectedAt = sessions.status(fixture.profile.id).connectedAt;
   for (const client of fixture.clients) client.end();
   await until(() => sessions.status(fixture.profile.id).state === "connected" && sessions.status(fixture.profile.id).connectedAt !== connectedAt);
   assert.deepEqual(sessions.status(fixture.profile.id).forwards.map((forward) => forward.id), ["kept"]);
+});
+
+test("a selected session snapshot never copies unrelated session logs and lightweight reads copy none", async (t) => {
+  const fixture = await sshServer(t), sessions = new SessionManager({ env: { MIGPIE_TEST_PASSWORD: "local-test-secret" } });
+  t.after(() => sessions.close());
+  for (const id of ["first", "second"]) await sessions.connect({ ...fixture.profile, id });
+  const readLogs = sessions.logs.bind(sessions), copied = [];
+  sessions.logs = (id) => { copied.push(id); return readLogs(id); };
+  assert.ok(sessions.status("first").logs.length > 0);
+  assert.deepEqual(copied, ["first"]);
+  copied.length = 0;
+  assert.equal(Object.hasOwn(sessions.status("second", { includeLogs: false }), "logs"), false);
+  assert.ok(sessions.status(undefined, { includeLogs: false }).every((session) => !Object.hasOwn(session, "logs")));
+  assert.deepEqual(copied, []);
+  const entries = sessions.logs("second"); entries[0].message = "client changed";
+  assert.notEqual(sessions.logs("second")[0].message, "client changed");
 });
