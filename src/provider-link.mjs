@@ -7,6 +7,7 @@ import { loadRecoveryKey } from "./web-server.mjs";
 import { isLANAddress, localGateway, magpieJSON, magpieSignIn, startProviderRelay } from "./local-gateway.mjs";
 import { detectDirectGateway } from "./lan-detection.mjs";
 import { remoteProviderAPI } from "./remote-http.mjs";
+import { providerSaveRequest } from "./provider-save.mjs";
 
 const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const forwardId = "magpie-local-provider";
@@ -241,8 +242,9 @@ export class ProviderLink {
         const currentProfile = await this.store.get(id);
         if (this.sessions.status(id).state !== "connected" || digest([currentProfile.id, currentProfile.host, currentProfile.port, currentProfile.username]) !== binding) throw new OperationError("PROVIDER_LINK_CONFLICT", "连接配置已变化，本次未写入远端供应商，请重新检测");
         await this.remote.assertIdle(id);
+        const body = providerSaveRequest(existing, { id: providerId, mode, endpoint, key });
         await this.#persist(id, { ...record, ...(saved?.mode && { mode: saved.mode, endpoint: saved.endpoint, keyProof: saved.keyProof }), pending: desired });
-        await api("/api/provider/save", { ...existing, id: providerId, name: existing?.name ?? (mode === "direct" ? "局域网 Magpie" : "局域网 Magpie（SSH）"), preset: "remote-magpie", chat: endpoint + "/v1", responses: endpoint + "/v1", anthropic: endpoint, key, proxy: existing?.proxy ?? "direct", new: false });
+        await api("/api/provider/save", body);
         const verified = (await api("/api/providers"))?.providers;
         if (!Array.isArray(verified) || !verified.some((item) => item.id === providerId && this.#matches(item, desired))) throw new OperationError("PROVIDER_LINK_API", "尚未确认远端已保存本机 Magpie 供应商，将在下次检测时核实");
       }

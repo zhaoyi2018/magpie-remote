@@ -138,7 +138,7 @@ try {
       if (!Array.isArray(pack?.files) || !pack.files.length) throw new Error("npm returned no package file inventory");
       report.package = { name: pack.name, version: pack.version, filename: pack.filename, size: pack.size, unpackedSize: pack.unpackedSize, files: pack.files };
       const names = new Set(pack.files.map((file) => file.path));
-      for (const required of ["package.json", "index.mjs", "src/remote.mjs", "src/remote-scripts.mjs", "src/remote-backups.mjs", "src/remote-results.mjs", "src/provider-link.mjs", "src/lan-detection.mjs", "src/remote-http.mjs", "src/forward-conflicts.mjs"]) if (!names.has(required)) throw new Error(`Required package file missing: ${required}`);
+      for (const required of ["package.json", "index.mjs", "src/remote.mjs", "src/remote-scripts.mjs", "src/remote-backups.mjs", "src/remote-results.mjs", "src/provider-link.mjs", "src/provider-save.mjs", "src/lan-detection.mjs", "src/remote-http.mjs", "src/forward-conflicts.mjs"]) if (!names.has(required)) throw new Error(`Required package file missing: ${required}`);
       for (const name of names) if (/^(?:node_modules|tests|scripts|\.github|\.local|\.sandbox)\/|(?:^|\/)\.runtime\/|(?:^|\/)\.env(?:\.|$)|(?:^|\/)\.ssh\//.test(name)) throw new Error(`Private/development file in package: ${name}`);
     } catch (error) { rejectCheck(packed.check, error.message); }
   }

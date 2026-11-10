@@ -32,6 +32,8 @@ npm test
 
 `tests/lan-detection.test.mjs` 验证 IPv4/IPv6 子网辅助排序、跨网段与下一跳路由、缺少路由或不同 SSH 入口时仍验证实际 HTTP、失效网卡地址拒绝、取消和鉴权失败回退；`tests/remote-http.test.mjs` 验证 HTTP 解析及受限供应商管理请求。`tests/provider-link.test.mjs` 使用真实临时局域网监听和 SSH 会话，覆盖同网段/跨网段路由证据下的零转发直连、按实际可达性双向切换、供应商去重、保存响应丢失回读、密钥轮换、插件重启、旧记录迁移及手动配置保护；路由证据使用受控响应。`test:remote` 还在隔离 POSIX shell 中运行实际 curl，验证 JSON 与凭据转义、代理及 curlrc 绕过和禁止重定向；页面回归验证访问方式、直连地址与 SSH 断开后的待检测提示。
 
+`provider-save.mjs` 按官方 Web 编辑器的请求字段构造保存数据。`tests/provider-save.test.mjs` 验证新增/更新标记、可编辑设置与 false/0/null 保留、只读/脱敏字段隔离、模型选择投影、旧版模型列表兼容和异常结构拒绝。对接测试的 HTTP 服务返回真实接口形式的模型/令牌展示对象，并校验保存字段类型及新增 ID 冲突，避免宽松的整对象 upsert 掩盖 HTTP 400。
+
 `tests/remote-exec.test.mjs` 使用本机真实 SSH 通道验证标准输入、双输出、分片 UTF-8 实时标准输出、退出状态、输出上限、超时与断线。`tests/remote.test.mjs` 使用隔离状态文件和注入的远端响应验证生命周期预览、去重、环境变化、普通配置归档、恢复预览绑定、分片进度校验、下载阶段断线后的未知结果、卸载范围和 Web 转发冲突。`npm run test:remote` 通过标准输入向真实 POSIX shell 传入生成脚本，使用临时 HOME 和假的 Magpie / systemd 命令，并用逐步写入的临时文件验证下载字节在任务结束前输出；Windows 自动定位 Git Bash，也可用 `MIGPIE_BASH` 指定。它验证脚本行为，不下载程序或改变真实服务。
 
 `npm run test:ui:remote` 通过真实管理服务、受控 SSH 测试服务和 `allow-scripts` iframe，验证远程面板的检测、预览确认、后台任务、下载字节与速度、可信总量下的百分比、阶段切换与终态清理、刷新和跨连接响应隔离，以及未知结果、无口令备份与恢复、统一日志去重、敏感链接清理和 390px 布局。SSH 测试服务仅识别固定脚本并返回测试响应，不执行部署。截图默认保存到 `.local/remote-ui-regression/`。

@@ -69,9 +69,18 @@ async function fixture(t, { lan = false, detection = false, reachable = lan } = 
       let input = "";
       request.on("data", (chunk) => { input += chunk; });
       request.on("end", () => {
-        const value = JSON.parse(input); writes.push(value);
-        const provider = { ...value, key: { set: true, masked: "…" + value.key.slice(-6) } };
+        const value = JSON.parse(input);
+        if ((value.balanceToken !== undefined && typeof value.balanceToken !== "string")
+          || (value.models !== undefined && (!Array.isArray(value.models) || value.models.some((model) => typeof model !== "string")))) return json(response, { error: "Invalid save field types" }, 400);
+        control.beforeSave?.(value);
         const index = providers.findIndex((entry) => entry.id === value.id);
+        if (value.new === true && index >= 0) return json(response, { error: "Provider already exists" }, 400);
+        writes.push(value);
+        const previous = providers[index], chosen = value.models ?? previous?.chosen ?? [];
+        const { new: _new, from: _from, ...editable } = value;
+        const provider = { ...previous, ...editable, key: { set: true, masked: "…" + value.key.slice(-6) },
+          balanceToken: previous?.balanceToken ?? { takes: false, set: false }, testsAs: {}, ready: true,
+          chosen, models: (previous?.models ?? [{ id: "local/model-a", name: "本机模型", on: true }]).map((model) => ({ ...model, on: chosen.length ? chosen.includes(model.id) : !value.noModels })) };
         if (index < 0) providers.push(provider); else providers[index] = provider;
         if (control.loseSaveReply) { control.loseSaveReply = false; request.socket.destroy(); return; }
         json(response, { providers });
@@ -182,13 +191,20 @@ test("changing between LAN and SSH updates one owned provider and preserves unre
   const initial = await h.link.sync(id);
   assert.equal(initial.mode, "ssh", JSON.stringify(initial));
   assert.match(initial.message, /验证本机局域网网关.*curl 退出码 28/);
+  assert.equal(h.writes[0].new, true); assert.equal(h.writes[0].from, undefined);
   const unrelated = await h.sessions.addForward(id, { id: "kept", direction: "c2s", bindPort: 0, targetPort: h.gatewayPort });
   h.providers[0].name = "My provider"; h.providers[0].priority = 7;
+  Object.assign(h.providers[0], { chosen: ["local/model-a"], maxConcurrency: 2, routing: "order", queueLimit: 0, headers: { "X-Fixture": "preserved" } });
   h.control.reachable = true;
   const direct = await h.link.sync(id);
   assert.equal(direct.mode, "direct", JSON.stringify(direct));
   assert.equal(direct.providerId, initial.providerId);
   assert.equal(h.providers.length, 1); assert.equal(h.providers[0].name, "My provider"); assert.equal(h.providers[0].priority, 7);
+  const updated = h.writes.at(-1);
+  assert.equal(updated.new, false); assert.equal(updated.from, initial.providerId);
+  assert.deepEqual(updated.models, ["local/model-a"]); assert.equal(updated.maxConcurrency, 2);
+  assert.equal(updated.routing, "order"); assert.equal(updated.queueLimit, 0); assert.deepEqual(updated.headers, { "X-Fixture": "preserved" });
+  for (const field of ["balanceToken", "testsAs", "ready", "chosen"]) assert.equal(field in updated, false, field);
   assert.deepEqual(h.sessions.status(id).forwards.map((forward) => forward.id), [unrelated.id]);
   h.control.reachable = false;
   const fallback = await h.link.sync(id);
@@ -239,6 +255,24 @@ test("a management failure preserves the old model tunnel until a successful dir
   const recovered = await h.link.sync(id);
   assert.equal(recovered.mode, "direct"); assert.equal(recovered.providerId, first.providerId);
   assert.deepEqual(h.sessions.status(id).forwards, []); assert.equal(h.providers.length, 1);
+});
+
+test("a provider appearing after the list read is protected by Add semantics", async (t) => {
+  const h = await fixture(t, { detection: true, reachable: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  let manual;
+  h.control.beforeSave = (body) => {
+    assert.equal(body.new, true);
+    manual = { id: body.id, name: "Added elsewhere", preset: "remote-magpie", chat: "http://manual.example/v1", key: { set: true, masked: "…manual-key" } };
+    h.providers.push(structuredClone(manual)); h.control.beforeSave = undefined;
+  };
+  const rejected = await h.link.sync(id);
+  assert.equal(rejected.state, "error"); assert.match(rejected.message, /保存远端供应商.*HTTP 400/);
+  assert.deepEqual(h.providers, [manual]); assert.equal(h.writes.length, 0);
+  const retry = await h.link.sync(id);
+  assert.equal(retry.state, "error"); assert.match(retry.message, /手动修改/);
+  assert.deepEqual(h.providers, [manual]); assert.equal(h.writes.length, 0);
+  assert.deepEqual(h.sessions.status(id).forwards, []);
 });
 
 test("a lost transport-switch reply retains the old tunnel until readback confirms the direct provider", async (t) => {
