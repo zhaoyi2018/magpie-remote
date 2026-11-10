@@ -78,12 +78,15 @@ import { createRemoteManager } from "./remote.js";
         && (state.filter === "all" || (state.filter === "connected" ? status === "connected" : status !== "connected"));
     });
   }
+  function resetTabScroll() {
+    for (const tab of tabs) $("panel-" + tab).scrollTop = 0;
+  }
   function reconcileSelection() {
     const rows = visibleRows();
     if (!rows.some((row) => row.connection.id === state.selected)) {
       state.selected = rows[0]?.connection.id ?? null;
       setTab("forwards");
-      $("connection-detail").scrollTop = 0;
+      resetTabScroll();
     }
   }
   function pick(row) {
@@ -91,7 +94,7 @@ import { createRemoteManager } from "./remote.js";
     state.selected = row.connection.id;
     if (isNarrow()) listCollapsed = true;
     setTab("forwards"); render();
-    $("connection-detail").scrollTop = 0;
+    resetTabScroll();
     if (isNarrow()) $("toggle-list").focus();
   }
   function isNarrow() { return matchMedia("(max-width: 760px)").matches; }

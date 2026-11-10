@@ -638,7 +638,7 @@ try {
   console.log("Remote UI: a lost apply response remains locked through management-service reconnection and connection changes.");
 
   await page.setViewportSize({ width: 1280, height: 1100 });
-  await field("connection-detail").evaluate((node) => { node.scrollTop = 0; });
+  await field("panel-remote").evaluate((node) => { node.scrollTop = 0; });
   await page.screenshot({ path: join(screenshots, "desktop.png"), fullPage: true });
   await page.locator("#theme").click();
   await field("panel-remote").evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
@@ -649,7 +649,7 @@ try {
   await field("toggle-list").evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
   if (await field("toggle-list").getAttribute("aria-expanded") === "true") await field("toggle-list").click();
   await until(() => field("remote-install-state").isVisible(), "Narrow layout did not expose remote management");
-  await field("connection-detail").evaluate((node) => { node.scrollTop = 240; });
+  await field("panel-remote").evaluate((node) => { node.scrollTop = 240; });
   const layout = await field("panel-remote").evaluate(() => ({ viewport: innerWidth, body: document.documentElement.scrollWidth, detail: document.getElementById("connection-detail").clientWidth, scroll: document.getElementById("connection-detail").scrollWidth }));
   assert.equal(layout.viewport, 390); assert.ok(layout.body <= layout.viewport + 1); assert.ok(layout.scroll <= layout.detail + 1);
   await page.screenshot({ path: join(screenshots, "narrow-390.png"), fullPage: true });
