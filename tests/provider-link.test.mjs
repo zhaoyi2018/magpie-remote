@@ -31,7 +31,7 @@ const directFetch = (url, { body, ...options } = {}) => new Promise((resolve, re
   request.on("error", reject); request.end(body);
 });
 
-async function fixture(t, { lan = false, detection = false } = {}) {
+async function fixture(t, { lan = false, detection = false, reachable = lan } = {}) {
   assert.ok(lanHost, "The LAN integration fixture needs an assigned private IPv4 address");
   const directory = await temporary(t), ssh = await sshServer(t);
   const store = new ProfileStore(join(directory, "connections.json"));
@@ -40,7 +40,7 @@ async function fixture(t, { lan = false, detection = false } = {}) {
   t.after(() => sessions.close());
   await sessions.connect(ssh.profile);
   const gatewayCalls = [], providers = [], writes = [];
-  const control = { loseSaveReply: false, running: true, busy: false, gatewayKey: randomBytes(24).toString("base64url"), detection, lan, reachable: true, webCalls: 0 };
+  const control = { loseSaveReply: false, running: true, busy: false, gatewayKey: randomBytes(24).toString("base64url"), detection, lan, reachable, webCalls: 0 };
   const gateway = createServer((request, response) => {
     gatewayCalls.push({ method: request.method, url: request.url, authorization: request.headers.authorization, host: request.headers.host, peer: request.socket.remoteAddress });
     if (request.headers.authorization !== "Bearer " + control.gatewayKey) return json(response, { error: "LAN gateway key required" }, 401);
@@ -102,7 +102,8 @@ async function fixture(t, { lan = false, detection = false } = {}) {
         if (input.startsWith("# MIGPIE_LAN_NETWORK_V1")) {
           if (!control.detection) return finish("", 69);
           const hosts = [...input.matchAll(/route get '([^']+)'/g)].map((match) => match[1]);
-          return finish("MIGPIE_LAN_NETWORK_V1\nssh\t" + Buffer.from(`${lanHost} 12345 ${lanHost} 22`).toString("base64") + "\ncurl\ttrue\n" + hosts.map((host) => "route\t" + host + "\t" + Buffer.from(control.lan && host === lanHost ? host + " dev fixture src " + lanHost : host + " via 192.0.2.1 dev fixture src 192.0.2.2").toString("base64")).join("\n") + "\n");
+          const remoteHost = control.lan ? lanHost : lanHost.startsWith("10.") ? "192.168.1.81" : "10.10.10.81";
+          return finish("MIGPIE_LAN_NETWORK_V1\nssh\t" + Buffer.from(`${lanHost} 12345 ${remoteHost} 22`).toString("base64") + "\ncurl\ttrue\n" + hosts.map((host) => "route\t" + host + "\t" + Buffer.from(control.lan && host === lanHost ? host + " dev fixture src " + lanHost : host + " via 10.10.10.1 dev fixture src " + remoteHost).toString("base64")).join("\n") + "\n");
         }
         if (!input.startsWith("# MIGPIE_HTTP_V1")) return finish("", 70);
         const option = /(?<![\w-])(?:url|request|header|data) = ("(?:\\.|[^"\\])*")/g;
@@ -146,8 +147,9 @@ test("gateway discovery uses LAN interfaces and the actual port instead of the h
   await assert.rejects(discover({}, { Tun: [{ address: "198.18.0.1", internal: false, family: "IPv4" }] }), { code: "LOCAL_MAGPIE_LAN_REQUIRED" });
 });
 
-test("verified LAN integration uses the actual gateway IP, shared key and no SSH port forwards", async (t) => {
-  const h = await fixture(t, { lan: true, detection: true });
+for (const lan of [true, false]) {
+test(`verified ${lan ? "on-link" : "routed cross-subnet"} LAN integration uses the actual gateway IP, shared key and no SSH port forwards`, async (t) => {
+  const h = await fixture(t, { lan, detection: true, reachable: true });
   // Reconnect so the fixture's exec handler owns this authenticated client.
   await h.sessions.disconnect(h.profile.id); await h.sessions.connect(h.profile);
   const state = await h.link.sync(h.profile.id);
@@ -171,6 +173,7 @@ test("verified LAN integration uses the actual gateway IP, shared key and no SSH
   assert.match(disconnected.message, /局域网供应商配置保留/);
   assert.equal((await directFetch(saved.chat + "/models", { headers: { Authorization: "Bearer " + saved.key } })).status, 200);
 });
+}
 
 test("changing between LAN and SSH updates one owned provider and preserves unrelated forwards and settings", async (t) => {
   const h = await fixture(t, { detection: true }), id = h.profile.id;
@@ -179,7 +182,7 @@ test("changing between LAN and SSH updates one owned provider and preserves unre
   assert.equal(initial.mode, "ssh", JSON.stringify(initial));
   const unrelated = await h.sessions.addForward(id, { id: "kept", direction: "c2s", bindPort: 0, targetPort: h.gatewayPort });
   h.providers[0].name = "My provider"; h.providers[0].priority = 7;
-  h.control.lan = true;
+  h.control.reachable = true;
   const direct = await h.link.sync(id);
   assert.equal(direct.mode, "direct", JSON.stringify(direct));
   assert.equal(direct.providerId, initial.providerId);
@@ -202,7 +205,7 @@ test("a lost transport-switch reply retains the old tunnel until readback confir
   const h = await fixture(t, { detection: true }), id = h.profile.id;
   await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
   assert.equal((await h.link.sync(id)).mode, "ssh");
-  h.control.lan = true; h.control.loseSaveReply = true;
+  h.control.reachable = true; h.control.loseSaveReply = true;
   assert.equal((await h.link.sync(id)).state, "error");
   assert.ok(h.sessions.status(id).forwards.some((forward) => forward.id === "magpie-local-provider"));
   const writes = h.writes.length;
@@ -253,7 +256,7 @@ test("legacy v1 tunnel records migrate to direct mode without changing provider 
   const data = JSON.parse(await readFile(h.link.file, "utf8"));
   data.version = 1; data.records = data.records.map(({ connectionId, binding, port }) => ({ connectionId, binding, port }));
   await writeFile(h.link.file, JSON.stringify(data));
-  h.control.lan = true; await h.sessions.connect(h.profile);
+  h.control.reachable = true; await h.sessions.connect(h.profile);
   const restarted = new ProviderLink(h.options); t.after(() => restarted.close());
   const next = await restarted.sync(id);
   assert.equal(next.mode, "direct", JSON.stringify(next)); assert.equal(next.providerId, initial.providerId);
@@ -310,7 +313,7 @@ test("direct cutover preserves a same-ID forward whose target was manually repla
   const original = h.sessions.status(id).forwards[0];
   await h.sessions.removeForward(id, original.id);
   await h.sessions.addForward(id, { id: original.id, name: original.name, direction: "s2c", bindHost: original.bindHost, bindPort: original.bindPort, targetHost: "127.0.0.1", targetPort: h.gatewayPort });
-  h.control.lan = true;
+  h.control.reachable = true;
   assert.equal((await h.link.sync(id)).mode, "direct");
   assert.equal(h.sessions.status(id).forwards[0].targetPort, h.gatewayPort);
   assert.equal(h.sessions.status(id).forwards[0].bindPort, original.bindPort);

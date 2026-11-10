@@ -79,24 +79,27 @@ export async function detectDirectGateway(sessions, id, gateways, { signal, inte
   } catch { return { reason: "无法确认远端网络环境", remoteHTTP: false }; }
   if (!network.curl) return { reason: "远端缺少直连检测所需的 curl", remoteHTTP: false };
   const entries = Object.values(interfaces).flatMap((values) => values ?? []);
-  let eligible = false;
-  for (const gateway of candidates) {
+  const eligible = candidates.flatMap((gateway) => {
     const entry = entries.find((item) => sameAddress(item.address, gateway.host) && !item.internal);
-    if (!entry) continue;
+    if (!entry) return [];
     const route = network.routes.get(gateway.host).trim(), words = route.split(/\s+/);
     const source = words[words.indexOf("src") + 1];
     const routed = words.includes("via") || /\b(?:unreachable|blackhole|prohibit|throw)\b/.test(route);
     const [client, , server] = network.ssh;
-    const same = route ? !routed && words.includes("dev") && words.includes("src") && sameSubnet(source, entry)
+    const onLink = route ? !routed && words.includes("dev") && words.includes("src") && sameSubnet(source, entry)
       : network.ssh.length === 4 && entries.some((item) => !item.internal && sameAddress(item.address, client)) && sameSubnet(server, entry);
-    if (!same) continue;
-    eligible = true;
+    return [{ gateway, onLink }];
+  }).sort((left, right) => Number(right.onLink) - Number(left.onLink));
+  // Route/subnet evidence only prioritizes probes. Routed LANs, missing route
+  // details and a different SSH ingress address still need an actual HTTP test.
+  for (const { gateway } of eligible) {
     if (signal?.aborted) break;
     try {
       const response = await remoteHTTP(sessions, id, gateway.url + "/", { signal, headers: { Authorization: "Bearer " + gateway.key, "x-api-key": gateway.key }, maxBytes: 16384 });
+      if (signal?.aborted) break;
       const info = JSON.parse(response.body);
       if (response.status === 200 && info?.name === "magpie" && info.version === gateway.info.version) return { gateway, remoteHTTP: true, reason: "远端已通过局域网地址和共享密钥验证网关" };
     } catch { /* Keep the existing transport until a direct route is verified. */ }
   }
-  return { remoteHTTP: true, reason: eligible ? "远端局域网网关不可达或鉴权未通过" : "未确认两端位于同一局域网网段" };
+  return { remoteHTTP: true, reason: signal?.aborted ? "直连检测已取消" : eligible.length ? "远端局域网网关不可达或鉴权未通过" : "本机局域网网关地址已变化或不属于当前网卡" };
 }

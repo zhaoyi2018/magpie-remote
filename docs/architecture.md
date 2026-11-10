@@ -98,7 +98,7 @@ sequenceDiagram
 
 ## 远程 Magpie 生命周期
 
-`ProviderLink` 在 SSH 认证成功后启动，并每 30 秒核对连接的局域网供应商对接，与同一连接的配置和远端操作共用串行队列。`local-gateway.mjs` 从本机配置及网卡识别真实共享入口、端口与有效共享密钥；宿主回环地址只用于确定端口。`lan-detection.mjs` 比较实际网卡 CIDR/掩码与远端路由源地址；无路由输出时核对 SSH 两端地址。确认同网段后，通过远端带密钥 HTTP 请求核对入口。成功时模型供应商直接使用局域网 IP；否则通过远端回环反向端口访问受认证、仅开放模型接口的本机转接服务，保留流量控制与流式响应。
+`ProviderLink` 在 SSH 认证成功后启动，并每 30 秒核对连接的局域网供应商对接，与同一连接的配置和远端操作共用串行队列。`local-gateway.mjs` 从本机配置及网卡识别真实共享入口、端口与有效共享密钥；宿主回环地址只用于确定端口。`lan-detection.mjs` 以实际网卡归属限制候选入口，子网、远端路由源地址或 SSH 两端地址仅决定探测顺序；不同子网、存在下一跳或缺少路由细节仍通过远端带密钥 HTTP 请求核对入口。成功时模型供应商直接使用局域网 IP；否则通过远端回环反向端口访问受认证、仅开放模型接口的本机转接服务，保留流量控制与流式响应。
 
 `remote-http.mjs` 在 SSH 标准输入中传入 curl 配置，绕过代理和 curlrc、不跟随重定向；Web 登录后仅允许供应商读取与保存操作。直连及远端 curl 可用的回退场景均无需管理端口转发；缺 curl 时兼容原 Web 转发。两种模型访问方式共用供应商标识，先持久化待核实变更，再保存远端配置并回读，确认后清理自有旧模型隧道。version 2 对接记录保存访问方式、地址、可选端口及密钥后缀 HMAC，兼容旧 version 1。直连共享密钥保存于远端供应商；SSH 模式只在本机转接服务使用共享密钥，远端使用独立派生凭据。轮换按当前方式更新；共享不可用时停用转接，不回退到 localhost。密钥不进入公开状态或日志。
 
@@ -107,11 +107,11 @@ sequenceDiagram
 ```mermaid
 flowchart RL
   Agent[远端 Agent] --> Remote[远端 Magpie 供应商]
-  Remote -->|同网段且带密钥请求通过| Local[本机 Magpie 局域网网关]
+  Remote -->|实际带密钥请求通过| Local[本机 Magpie 局域网网关]
   Remote -->|检测未通过| Listener[远端回环端口]
   Listener -->|SSH s2c / -R| Relay[本机模型转接服务]
   Relay -->|局域网地址与共享密钥| Local
-  Link[ProviderLink 自动检测] --> Network[网卡掩码与远端路由及 HTTP 检测]
+  Link[ProviderLink 自动检测] --> Network[网卡归属与 HTTP 验证，路由辅助排序]
   Link -->|SSH 中的受限 Web 管理请求| Remote
   Link -->|回退时创建或恢复| Listener
 ```

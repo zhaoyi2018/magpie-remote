@@ -113,7 +113,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       },
     },
     remote_provider_sync: {
-      description: "Detect the local Magpie and verify LAN subnet, route and authenticated reachability from the remote. Use a direct LAN provider when verified, otherwise a loopback SSH reverse forward. Reconcile owned provider changes and preserve unrelated or manually changed providers. Returns mode and public status without credentials.",
+      description: "Detect the local Magpie and verify authenticated gateway reachability from the remote, including routed LANs across subnets. Subnet and route evidence only prioritize probes. Use a direct LAN provider when verified, otherwise a loopback SSH reverse forward. Reconcile owned provider changes and preserve unrelated or manually changed providers. Returns mode and public status without credentials.",
       args: args({ connectionId: idSchema }),
       execute({ connectionId }, ctx = {}) {
         return serial(connectionId, () => {

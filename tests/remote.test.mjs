@@ -1223,6 +1223,9 @@ test("a failed remote update emits one error into runtime logs without leaking s
   h.sessions.onAction = async () => response(`raw-secret-${secret}\nMIGPIE_RESULT_V1\t${(await h.remote.operation(h.profile.id)).id}\tupdating\t1\tnetwork\ttrue\n`, 1);
   await start(h, "update");
   const operation = await completed(h);
+  // The renamed terminal-state file can become visible before the task appends
+  // its final log. Drain the task before asserting the complete log history.
+  await h.remote.close();
   assert.equal(h.sessions.logs.filter((entry) => entry.level === "error").length, 1);
   assert.ok(h.sessions.logs.find((entry) => entry.level === "error").message.includes(operation.result.backupDirectory));
   assert.ok(h.sessions.logs.some((entry) => entry.message.includes("执行官方更新失败")));
