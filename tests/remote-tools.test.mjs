@@ -34,6 +34,17 @@ test("remote_recover forwards task identity, explicit confirmation, and cancella
   assert.deepEqual(calls, [["server", operationId, { confirmed: true, signal: controller.signal }]]);
 });
 
+test("provider overwrite requires a boolean and stays local to the explicitly requested invocation", async () => {
+  const calls = [], providerLink = { sync(...args) { calls.push(args); return { state: "ready" }; } };
+  const tools = createTools({}, {}, {}, providerLink), controller = new AbortController();
+  await tools.remote_provider_sync.execute({ connectionId: "server" });
+  await tools.remote_provider_sync.execute({ connectionId: "server", overwrite: true }, { abort: controller.signal });
+  await tools.remote_provider_sync.execute({ connectionId: "server" });
+  assert.deepEqual(calls, [["server", { signal: undefined, overwrite: false }], ["server", { signal: controller.signal, overwrite: true }], ["server", { signal: undefined, overwrite: false }]]);
+  for (const overwrite of ["true", 1, null, {}]) assert.throws(() => tools.remote_provider_sync.execute({ connectionId: "server", overwrite }), /布尔值/);
+  assert.deepEqual(tools.remote_provider_sync.args.required, ["connectionId"]);
+});
+
 test("configuration restore waits for an accepted remote submission and refuses to disconnect its session", async () => {
   const entered = deferred(), release = deferred();
   let busy = false, disconnected = 0, restored = 0;

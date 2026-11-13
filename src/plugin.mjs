@@ -113,12 +113,13 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       },
     },
     remote_provider_sync: {
-      description: "Detect the local Magpie and verify authenticated gateway reachability from the remote, including routed LANs across subnets. Subnet and route evidence only prioritize probes. Use a direct LAN provider when verified, otherwise a loopback SSH reverse forward. Reconcile owned provider changes and preserve unrelated or manually changed providers. Returns mode and public status without credentials.",
-      args: args({ connectionId: idSchema }),
-      execute({ connectionId }, ctx = {}) {
+      description: "Detect the local Magpie and verify authenticated gateway reachability from the remote, including routed LANs across subnets. Use a direct LAN provider when verified, otherwise a loopback SSH reverse forward. Preserve manually changed providers by default. Only set overwrite=true on an explicit user request to replace the endpoints and key of this connection's recorded plugin provider; keep other settings and disabled/cleared-key providers. Overwrite is never persisted. Returns mode and public status without credentials.",
+      args: args({ connectionId: idSchema, overwrite: { type: "boolean", default: false, description: "Explicit one-time replacement of the recorded automatic provider's endpoints and key after user confirmation" } }, ["connectionId"]),
+      execute({ connectionId, overwrite = false }, ctx = {}) {
+        if (typeof overwrite !== "boolean") throw new Error("overwrite 必须是布尔值");
         return serial(connectionId, () => {
           if (!providerLink) throw new OperationError("PROVIDER_LINK_UNAVAILABLE", "本机 Magpie 自动对接尚未启用");
-          return providerLink.sync(connectionId, { signal: ctx.abort });
+          return providerLink.sync(connectionId, { signal: ctx.abort, overwrite });
         });
       },
     },

@@ -270,7 +270,7 @@ test("a provider appearing after the list read is protected by Add semantics", a
   assert.equal(rejected.state, "error"); assert.match(rejected.message, /保存远端供应商.*HTTP 400/);
   assert.deepEqual(h.providers, [manual]); assert.equal(h.writes.length, 0);
   const retry = await h.link.sync(id);
-  assert.equal(retry.state, "error"); assert.match(retry.message, /手动修改/);
+  assert.equal(retry.state, "error"); assert.match(retry.message, /不一致/);
   assert.deepEqual(h.providers, [manual]); assert.equal(h.writes.length, 0);
   assert.deepEqual(h.sessions.status(id).forwards, []);
 });
@@ -318,6 +318,71 @@ test("manual endpoint/key edits and a disabled LAN provider are preserved during
   assert.equal((await h.link.sync(id)).state, "error"); assert.equal(h.writes.length, 1);
   h.providers[0] = { ...saved, off: true };
   assert.equal((await h.link.sync(id)).state, "disabled"); assert.equal(h.writes.length, 1);
+  assert.deepEqual(h.sessions.status(id).forwards, []);
+});
+
+for (const direct of [true, false]) {
+test(`explicit overwrite restores edited provider endpoints and keys in ${direct ? "direct" : "SSH"} mode for one request only`, async (t) => {
+  const h = await fixture(t, { detection: true, reachable: direct }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const first = await h.link.sync(id);
+  const unrelated = { id: "manual-provider", preset: "remote-magpie", chat: "http://manual.example/v1", key: { set: true, masked: "…manual" } };
+  h.providers.push(structuredClone(unrelated));
+  const forward = await h.sessions.addForward(id, { id: "kept", direction: "c2s", bindPort: 0, targetPort: h.gatewayPort });
+  Object.assign(h.providers[0], { name: "Custom name", chosen: ["local/model-a"], maxConcurrency: 3, proxy: "", queueLimit: 0,
+    chat: "http://127.0.0.1:3429/v1", responses: "http://127.0.0.1:3429/v1", anthropic: "http://127.0.0.1:3429", key: { set: true, masked: "…edited" } });
+  const conflict = await h.link.sync(id);
+  assert.equal(conflict.state, "error"); assert.match(conflict.message, /覆盖地址与密钥/); assert.equal(h.writes.length, 1);
+  const restored = await h.link.sync(id, { overwrite: true });
+  assert.equal(restored.state, "ready", JSON.stringify(restored)); assert.equal(restored.mode, direct ? "direct" : "ssh");
+  assert.equal(restored.providerId, first.providerId); assert.equal(restored.endpoint, first.endpoint);
+  assert.equal(h.writes.length, 2); assert.equal(h.writes[1].new, false); assert.equal(h.writes[1].from, first.providerId);
+  assert.equal(h.writes[1].key, direct ? h.control.gatewayKey : h.writes[0].key);
+  assert.equal(h.providers[0].name, "Custom name"); assert.deepEqual(h.providers[0].chosen, ["local/model-a"]);
+  assert.equal(h.providers[0].maxConcurrency, 3); assert.equal(h.providers[0].queueLimit, 0); assert.equal(h.providers[0].proxy, "");
+  assert.deepEqual(h.providers[1], unrelated); assert.ok(h.sessions.status(id).forwards.some((item) => item.id === forward.id));
+  assert.ok(h.sessions.status(id).logs.some((entry) => entry.message.includes("按用户请求覆盖")));
+  assert.equal((await h.link.sync(id)).state, "ready"); assert.equal(h.writes.length, 2);
+  h.providers[0].responses = "http://edited-again.example/v1";
+  assert.equal((await h.link.sync(id)).state, "error"); assert.equal(h.writes.length, 2);
+  const publicData = JSON.stringify([restored, h.sessions.status(id).logs, JSON.parse(await readFile(h.link.file, "utf8"))]);
+  for (const secret of [h.control.gatewayKey, h.writes[1].key, webKey]) assert.ok(!publicData.includes(secret));
+  assert.ok(!publicData.includes('"overwrite"'));
+});
+}
+
+test("overwrite keeps disabled and cleared-key providers, unrelated presets and unrecorded IDs protected", async (t) => {
+  const h = await fixture(t, { detection: true, reachable: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  await h.link.sync(id);
+  const original = structuredClone(h.providers[0]);
+  for (const fields of [{ off: true }, { key: { set: false } }]) {
+    h.providers[0] = { ...original, ...fields, responses: "http://edited.example/v1" };
+    assert.equal((await h.link.sync(id, { overwrite: true })).state, "disabled"); assert.equal(h.writes.length, 1);
+    assert.deepEqual(h.providers[0], { ...original, ...fields, responses: "http://edited.example/v1" });
+  }
+  h.providers[0] = { ...original, preset: "custom" };
+  assert.equal((await h.link.sync(id, { overwrite: true })).state, "error"); assert.equal(h.writes.length, 1);
+  h.providers[0] = { ...original, responses: "http://unrecorded.example/v1" };
+  await h.link.close();
+  const data = JSON.parse(await readFile(h.link.file, "utf8")); data.records = [];
+  await writeFile(h.link.file, JSON.stringify(data));
+  const restarted = new ProviderLink(h.options); t.after(() => restarted.close());
+  assert.equal((await restarted.sync(id, { overwrite: true })).state, "error"); assert.equal(h.writes.length, 1);
+  assert.equal(h.providers[0].responses, "http://unrecorded.example/v1");
+});
+
+test("a lost explicit overwrite reply reconciles normally and cleans up the old tunnel after readback", async (t) => {
+  const h = await fixture(t, { detection: true }), id = h.profile.id;
+  await h.sessions.disconnect(id); await h.sessions.connect(h.profile);
+  const first = await h.link.sync(id);
+  h.providers[0].responses = "http://edited.example/v1";
+  h.control.reachable = true; h.control.loseSaveReply = true;
+  assert.equal((await h.link.sync(id, { overwrite: true })).state, "error"); assert.equal(h.writes.length, 2);
+  assert.ok(h.sessions.status(id).forwards.some((item) => item.id === "magpie-local-provider"));
+  const recovered = await h.link.sync(id);
+  assert.equal(recovered.state, "ready", JSON.stringify(recovered)); assert.equal(recovered.mode, "direct");
+  assert.equal(recovered.providerId, first.providerId); assert.equal(h.writes.length, 2); assert.equal(h.providers.length, 1);
   assert.deepEqual(h.sessions.status(id).forwards, []);
 });
 

@@ -29,7 +29,7 @@
 | `remote_operation` | `connectionId`；可选 `operationId` 或 `history` | 默认返回最新任务；按 ID 查当前或历史；`history: true` 返回当前与最多 20 条旧终态摘要，不包含原始命令输出或凭据 |
 | `remote_backups` | `connectionId` | 列出远端备份格式、大小、版本与校验值，不读取配置内容；恢复和删除须另行预览 |
 | `remote_web` | `connectionId`；可选 `port` | 显式读取官方管理链接并建立临时回环 SSH 转发；返回的链接含管理密钥 |
-| `remote_provider_sync` | `connectionId` | 验证本机局域网网关与远端网络，优先直连，否则使用 SSH；返回不含凭据的状态、`mode: "direct" / "ssh"` 和地址 |
+| `remote_provider_sync` | `connectionId`；可选 `overwrite` | 验证本机局域网网关与远端网络，优先直连，否则使用 SSH；用户明确确认后可传 `overwrite: true`，仅本次覆盖有归属记录的自动供应商地址与密钥，保留其他设置；返回不含凭据的状态、`mode: "direct" / "ssh"` 和地址 |
 
 远程生命周期的操作范围、配置归档、断线核实和卸载边界见[远程 Magpie 管理](remote.md)。
 

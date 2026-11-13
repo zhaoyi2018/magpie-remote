@@ -22,7 +22,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
   let history = [], historySignature = "";
-  let providerSyncing = false;
+  let providerSyncing = false, providerConfirming = false;
   let programDisclosureInitialized = false;
 
   function drawHistory() {
@@ -245,6 +245,8 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     text("remote-local-provider-address", linked?.endpoint ? linked.mode === "direct" ? "局域网地址 " + linked.endpoint + " · 远端供应商 " + linked.providerId : (linked.gatewayAddress ? "局域网网关 " + linked.gatewayAddress + " → " : "") + "远端供应商 " + linked.providerId + " · " + linked.endpoint : "");
     $("remote-local-provider-address").hidden = !linked?.endpoint;
     $("remote-local-provider-sync").disabled = !sshReady() || !linked || row?.connection.autoLinkLocalMagpie === false || providerSyncing || running() || uncertain() || submitting;
+    $("remote-local-provider-overwrite").disabled = $("remote-local-provider-sync").disabled || providerConfirming;
+    $("remote-local-provider-overwrite").title = "重新检测网络，并覆盖本插件自动对接供应商的地址与密钥";
     drawBackups(); drawTaskSummary(); drawHistory(); syncPreview();
     showError("history-error", readError);
   }
@@ -565,12 +567,20 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     }
   }
 
-  async function syncLocalProvider() {
-    if ($("remote-local-provider-sync").disabled) return;
+  async function syncLocalProvider(overwrite = false) {
+    if ($("remote-local-provider-" + (overwrite ? "overwrite" : "sync")).disabled) return;
     const id = row.connection.id, epoch = generation;
+    if (overwrite) {
+      providerConfirming = true; draw();
+      let accepted;
+      try {
+        accepted = await confirmAction("覆盖地址与密钥", "将重新检测「" + row.connection.name + "」的网络，优先使用验证通过的局域网直连，否则使用 SSH 隧道，并覆盖本插件自动对接供应商的接口地址与密钥。保留供应商名称、模型选择、代理等设置；已停用或清除密钥的供应商保持原状。", "确认覆盖");
+      } finally { providerConfirming = false; draw(); }
+      if (!accepted || !current(id, epoch) || $("remote-local-provider-sync").disabled) return;
+    }
     providerSyncing = true; dataRevision++; draw();
     try {
-      const result = await call("remote_provider_sync", { connectionId: id });
+      const result = await call("remote_provider_sync", { connectionId: id, ...(overwrite && { overwrite: true }) });
       if (current(id, epoch)) status = { ...status, localProvider: result };
     } catch (error) {
       if (current(id, epoch)) status = { ...status, localProvider: { state: "error", message: errorMessage(error) } };
@@ -609,6 +619,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   $("history-filter").addEventListener("change", drawHistory);
   $("remote-open-web").addEventListener("click", () => { void openWeb(); });
   $("remote-local-provider-sync").addEventListener("click", () => { void syncLocalProvider(); });
+  $("remote-local-provider-overwrite").addEventListener("click", () => { void syncLocalProvider(true); });
   $("remote-web-port").addEventListener("input", () => { clearWeb(); draw(); });
   $("remote-web-url").addEventListener("click", (event) => event.currentTarget.select());
   $("remote-web-address").addEventListener("click", async (event) => {

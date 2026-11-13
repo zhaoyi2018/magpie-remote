@@ -45,6 +45,8 @@ SSH 返回转发成功后，插件通过服务器的 `/proc/net/tcp`、`/proc/ne
 
 新建直连供应商名为「局域网 Magpie」，SSH 回退名为「局域网 Magpie（SSH）」。两种方式共用稳定标识，网络改变时更新同一供应商，保留名称、优先级等其他设置。切换前先保存待核实目标，写入后回读确认，再停止插件拥有的旧模型反向隧道；保存响应丢失时下一轮先读取列表核实。手动创建的同地址直连供应商或确实指向该局域网网关的反向转发可复用；其他手动转发不会被关闭。自动供应商地址或密钥被手动修改时停止自动覆盖；停用或清除密钥时保留设置。
 
+如需恢复被修改的自动供应商，可点击「局域网网关对接 → 覆盖地址与密钥」，核对确认框中的服务器后点击「确认覆盖」。插件重新检测当前网络，优先使用通过鉴权验证的局域网直连，否则配置 SSH 回退；只在本次操作中覆盖当前连接有本机记录的自动供应商地址和密钥，保留原 ID、名称、模型选择、代理等设置，不创建配置备份。后续定时检测和「重新检测对接」仍保留手动修改。已停用、已清除密钥、供应商类型已改变或缺少本机归属记录时不会强行接管；其他手动供应商和手动转发保持原状。取消确认不提交请求；切换服务器、SSH 断开或远端任务限制发生变化时需重新操作。覆盖保存后仍先回读确认，再清理插件拥有的旧模型隧道；响应丢失时按原有待确认记录核对，后续检测不重复强制写入。
+
 已有供应商使用原 ID 和 `from` 更新，新建使用 `new: true`，发生 ID 冲突时保留现有记录。供应商读取接口包含模型展示对象、令牌状态与其他只读字段；保存请求按官方 Web 编辑器的输入结构构造，仅保留可编辑设置，将模型选择转成 ID 字符串列表，不回传 `balanceToken`、`testsAs`、`keyList` 等展示对象。HTTP 400 不表示已有供应商必须删除；旧的整对象回传会在更新时触发字段类型校验失败。
 
 直连供应商使用本机的局域网共享网关密钥，**该密钥会保存在远端 Magpie 的供应商配置中**；共享密钥轮换后自动更新远端供应商。SSH 模式使用独立通道凭据，本机转接服务将其换为共享密钥，只转发模型调用、模型列表及配额和用量读取；本机管理、密钥管理、插件和 MCP 管理接口不通过此通道开放，流式响应保持流式转发。SSH 模式共享密钥轮换只更新本机转接目标。两种方式的密钥均不返回本插件页面、不进入运行日志或本地对接状态文件。共享关闭或密钥不可用时停止转接，不使用 localhost。
@@ -144,7 +146,7 @@ systemctl --user is-active magpie.service
 | `remote_operation` | `connectionId`、可选 `operationId` 或 `history: true` | 最新任务或 `null`；按 ID 查当前/历史；历史模式返回 `{connectionId, limit: 20, operations}`，当前加旧终态最多 21 条 |
 | `remote_recover` | `connectionId`、当前 `operationId`、`confirmed: true` | 用户核实任务及子进程结束后解除待核实状态；优先核实完成记录，否则清理残留锁并保留失败任务，不重放部署 |
 | `remote_web` | `connectionId`、可选 `port` | 临时本地访问地址和带管理 key 的登录链接 |
-| `remote_provider_sync` | `connectionId` | 检测本机网关和远端网络，优先验证局域网直连，否则使用 SSH；返回 `mode: "direct" / "ssh"`、供应商地址及不含凭据的状态 |
+| `remote_provider_sync` | `connectionId`；可选 `overwrite` | 检测本机网关和远端网络，优先验证局域网直连，否则使用 SSH；用户明确确认后可传 `overwrite: true` 单次覆盖有归属记录的自动供应商地址与密钥；返回 `mode: "direct" / "ssh"`、供应商地址及不含凭据的状态 |
 | `remote_backups` | `connectionId` | 此连接的远端备份元数据列表 |
 
 `action` 为 `install`、`update`、`start`、`stop`、`restart`、`enable_web`、`backup`、`restore`、`delete_backup`、`uninstall`。`remote_status` 同时返回各 `actions` 的 `enabled`、禁用原因与代码，以及 `update.state`（`available` / `current` / `unknown`）、版本与检查时间；涉及备份的 `remote_preview` 返回 `backupMode: "archive"`。恢复的 `backupId` 绑定在预览中，提交无需再次传入。远程操作不接收备份口令或独立凭据字段。

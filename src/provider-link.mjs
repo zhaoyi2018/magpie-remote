@@ -152,7 +152,8 @@ export class ProviderLink {
     return task;
   }
 
-  async sync(id, { signal } = {}) {
+  async sync(id, { signal, overwrite = false } = {}) {
+    if (typeof overwrite !== "boolean") throw new Error("overwrite 必须是布尔值");
     if (this.#closed) return this.status(id);
     const abort = signal ? AbortSignal.any([signal, this.#shutdown.signal]) : this.#shutdown.signal;
     let directVerified = false;
@@ -219,8 +220,11 @@ export class ProviderLink {
         const legacy = url?.hostname === "127.0.0.1" && url.pathname === "/" + providerId ? { mode: "ssh", endpoint: url.origin + url.pathname, keyProof: this.#proof(token) } : undefined;
         const known = saved ? [saved.pending, saved.mode && saved].filter(Boolean)
           : [legacy, ...gateways.map((gateway) => ({ mode: "direct", endpoint: gateway.url, keyProof: this.#proof(gateway.key) }))].filter(Boolean);
-        if (!known.some((spec) => this.#matches(existing, spec))) throw new OperationError("PROVIDER_LINK_CONFLICT", "自动对接供应商的地址或密钥已被手动修改，保留现有配置；请检查后重试");
-        if (!port && legacy) port = Number(url.port);
+        const matchesKnown = known.some((spec) => this.#matches(existing, spec));
+        if (!matchesKnown && !(overwrite && saved && existing.preset === "remote-magpie")) throw new OperationError("PROVIDER_LINK_CONFLICT", overwrite
+          ? "无法确认此供应商属于当前连接的自动对接记录，已保留现有配置；请核对本机对接记录和远端供应商类型"
+          : "自动对接供应商的地址或密钥与记录不一致，已保留现有配置；如需恢复自动对接，请点击「覆盖地址与密钥」");
+        if (!port && legacy && matchesKnown) port = Number(url.port);
       }
       let forward, endpoint = local.url, key = local.key;
       const mode = detection.gateway ? "direct" : "ssh";
@@ -238,7 +242,7 @@ export class ProviderLink {
       const desired = { mode, endpoint, keyProof: this.#proof(key) };
       const record = { connectionId: id, binding, ...(port && { port }) };
       const pendingConfirmed = saved?.pending && JSON.stringify(saved.pending) === JSON.stringify(desired) && this.#matches(existing, desired);
-      if (!this.#matches(existing, desired) || (!pendingConfirmed && saved?.endpoint === endpoint && JSON.stringify(saved.keyProof) !== JSON.stringify(desired.keyProof))) {
+      if (overwrite || !this.#matches(existing, desired) || (!pendingConfirmed && saved?.endpoint === endpoint && JSON.stringify(saved.keyProof) !== JSON.stringify(desired.keyProof))) {
         const currentProfile = await this.store.get(id);
         if (this.sessions.status(id).state !== "connected" || digest([currentProfile.id, currentProfile.host, currentProfile.port, currentProfile.username]) !== binding) throw new OperationError("PROVIDER_LINK_CONFLICT", "连接配置已变化，本次未写入远端供应商，请重新检测");
         await this.remote.assertIdle(id);
@@ -247,6 +251,7 @@ export class ProviderLink {
         await api("/api/provider/save", body);
         const verified = (await api("/api/providers"))?.providers;
         if (!Array.isArray(verified) || !verified.some((item) => item.id === providerId && this.#matches(item, desired))) throw new OperationError("PROVIDER_LINK_API", "尚未确认远端已保存本机 Magpie 供应商，将在下次检测时核实");
+        if (overwrite) this.sessions.recordLog?.(id, "info", "已按用户请求覆盖本机 Magpie 自动对接供应商的地址与密钥");
       }
       await this.#persist(id, { ...record, ...desired });
       if (mode === "direct") await this.#stopManagedForward(id);

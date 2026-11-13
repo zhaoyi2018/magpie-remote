@@ -157,7 +157,7 @@ try {
   const providerLink = {
     mode: "ssh",
     status(id) { return this.error ? { state: "error", message: this.error } : fixture.state.webEnabled ? { state: "ready", mode: this.mode, message: "本机 Magpie 已对接 · " + id, providerId: "local-magpie-fixture-" + id, endpoint: this.mode === "direct" ? "http://192.168.10.2:4567" : "http://127.0.0.1:23425/" + id, gatewayAddress: "http://192.168.10.2:4567" } : { state: "waiting", message: "等待远端启用 Web 后自动对接本机 Magpie" }; },
-    async sync(id) { return this.status(id); },
+    async sync(id, { overwrite = false } = {}) { if (overwrite) this.error = undefined; return this.status(id); },
   };
   const tools = createTools(store, sessions, remote, providerLink);
   for (const [id, name] of [["remote-alpha", "生产服务器"], ["remote-beta", "测试服务器"]]) {
@@ -238,6 +238,7 @@ try {
   await field("remote-apply").evaluate((node) => { node.click(); node.click(); });
   await ui.locator("#remote-preview[open]").waitFor({ state: "hidden" });
   await waitOperation("执行中");
+  assert.equal(await field("remote-local-provider-overwrite").isDisabled(), true);
   assert.equal(count("remote_apply"), applyBefore + 1);
   assert.equal(await field("remote-detect").isDisabled(), true, "Forced detection must not issue REMOTE_BUSY during execution");
   await installGate.progress("downloading", 1048576, 4194304);
@@ -431,12 +432,39 @@ try {
   await field("disconnect").click(); await field("detail-state").filter({ hasText: "未连接" }).waitFor();
   await field("remote-local-provider-state").filter({ hasText: "局域网配置保留，直连状态待检测" }).waitFor();
   assert.equal(await field("remote-local-provider-sync").isDisabled(), true);
+  assert.equal(await field("remote-local-provider-overwrite").isDisabled(), true);
   await field("connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor();
   await detect();
   providerLink.mode = "ssh";
   await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
   await field("remote-local-provider-mode").filter({ hasText: "访问方式：SSH 隧道" }).waitFor();
   console.log("Remote UI: direct/SSH mode labels, direct LAN endpoint and disconnected direct configuration state passed.");
+  providerLink.error = "自动对接供应商的地址或密钥与记录不一致，已保留现有配置；如需恢复自动对接，请点击「覆盖地址与密钥」";
+  await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
+  await field("remote-local-provider-state").filter({ hasText: providerLink.error }).waitFor();
+  const beforeOverwrite = count("remote_provider_sync");
+  await field("remote-local-provider-overwrite").click();
+  await field("confirm-title").filter({ hasText: "覆盖地址与密钥" }).waitFor();
+  assert.match(await field("confirm-description").textContent(), /生产服务器/);
+  assert.match(await field("confirm-description").textContent(), /保留供应商名称、模型选择、代理/);
+  await field("confirm-cancel").click();
+  assert.equal(count("remote_provider_sync"), beforeOverwrite);
+  await waitEnabled("remote-local-provider-overwrite"); await field("remote-local-provider-overwrite").click();
+  await selectedRow("测试服务器").evaluate((node) => node.click()); await field("confirm-accept").click();
+  assert.equal(count("remote_provider_sync"), beforeOverwrite, "A confirmation for another connection must not submit an overwrite");
+  await openRemote(); await selectedRow("生产服务器").click(); await openRemote();
+  await waitEnabled("remote-local-provider-overwrite"); await field("remote-local-provider-overwrite").click();
+  const heldOverwrite = gateTool("remote_provider_sync");
+  await field("confirm-accept").evaluate((node) => { node.click(); node.click(); }); await heldOverwrite.entered;
+  assert.equal(await field("remote-local-provider-sync").isDisabled(), true);
+  assert.equal(await field("remote-local-provider-overwrite").isDisabled(), true);
+  const overwriteCalls = requests.filter((item) => item.method === "remote_provider_sync" && item.args.overwrite === true);
+  assert.equal(overwriteCalls.length, 1); assert.equal(overwriteCalls[0].args.connectionId, "remote-alpha");
+  heldOverwrite.release(); await waitEnabled("remote-local-provider-overwrite");
+  await field("remote-local-provider-state").filter({ hasText: "本机 Magpie 已对接 · remote-alpha" }).waitFor();
+  await field("remote-local-provider-sync").click(); await waitEnabled("remote-local-provider-sync");
+  assert.equal(requests.filter((item) => item.method === "remote_provider_sync").at(-1).args.overwrite, undefined);
+  console.log("Remote UI: overwrite requires confirmation, cancel and changed connections submit nothing, double-click submits once and later retries stay automatic.");
   providerLink.error = "本机局域网网关直连验证已通过；登录远端 Web 管理服务（http://127.0.0.1:3430/）：HTTP 401，认证或访问权限被拒绝，请核对该服务的密钥和登录会话";
   await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
   await field("remote-local-provider-state").filter({ hasText: providerLink.error }).waitFor();
