@@ -14,6 +14,14 @@ npm test
 
 `npm run test:ui` 启动临时管理服务和 `allow-scripts` iframe，实际操作密码保存与编辑、取消清空、Enter 单次提交、并发配置冲突和转发保存 / 启动期间的关闭保护，并验证转发数据往返及桌面 / 窄屏布局。首次可运行 `npx playwright install chromium`；Windows 未安装 Playwright Chromium 时会使用已有 Edge，也可通过 `MIGPIE_UI_BROWSER` 指定 Chromium 可执行文件。截图默认保存到不入库的 `.local/ui-regression/`，可用 `MIGPIE_UI_ARTIFACTS` 指定目录。浏览器检查独立于 `npm test`；发布前运行 `npm run check:release`，一次完成静态、Node 和页面回归，不需要日常 Magpie 或生产凭据。
 
+页面测试的父框架还模拟 Magpie 的 10 秒 `hello` 启动期限。回归分别阻塞通信桥和启动样式表，并使通信桥加载失败，要求页面仍能及时响应宿主并在资源恢复后进入管理页。启动页与管理页均在样式表前执行 `theme.js`，启动页的宿主通信桥异步加载。
+
+上述 HTTP 浏览器测试不等同于 Windows 原生 WebView2 验收。Magpie 0.1.3078 / WebView2 157.0.4341.46 的隔离桌面验证发现：入口 HTML 可读取，但沙箱发起的脚本、样式、图标及后续宿主文件导航绕过原生资源处理，实际访问 `wails.localhost` 并失败。直接在入口 HTML 使用 meta refresh 跳转到已认证的本机管理服务已通过同版本原生桌面验证，无需依赖启动脚本或第二个宿主 HTML。
+
+`npm run prepare:desktop` 在 `.local/desktop-plugin` 生成本机安装入口，保持源码和发布包不含运行地址。包名使用 `migpie-remote-desktop`，使 Magpie 为兼容入口分配独立页面标识，避免替换安装后复用原插件的失败页面缓存。它导入当前 `src/plugin.mjs`，通过内部第三参数 `launcherFile` 指定生成页面；不增加用户可传入的插件选项。管理服务启动后，`publishDesktopLauncher` 校验回环认证 URL、原子发布 HTML；退出时仅清理自己发布的内容，恢复占位文件以供 Magpie 在下次启动后台之前发现页面。安装及替换步骤见[操作指南](usage.md)。
+
+`npm run test:ui:desktop` 拒绝所有宿主子资源请求，验证直接入口仍能完成沙箱握手、显示在线状态、加载完整样式与图标并打开新建连接弹窗。`tests/desktop-launcher.test.mjs` 覆盖非法地址拒绝、旧宿主清理保护、真实插件关闭和重启后的地址更新；`tests/publish-file.test.mjs` 覆盖 Windows 临时文件锁重试，以及持续失败时旧入口和临时凭据的处理。该浏览器测试需结合原生桌面验收，不能单独证明某个 WebView 版本可用。
+
 `check` 同时检查插件卡片和页面使用同一个 SVG、图标解码后的内容不超过 1 MB、`package.json` 不超过 GitHub 插件发现读取的 1 MB 上限。更新 `page/icon.png` 或 `page/icon-dark.png` 后运行 `npm run icons`；生成器会更新 `page/icon.svg` 和 `package.json` 中的 `magpie.icon`，无需手工粘贴图标数据。
 
 测试专用的固定 Ed25519 密钥保存在 `tests/fixtures.mjs`，包含未加密和加密样本，不能用于实际服务器。固定样本避免 ssh2 随机生成某些前导零公钥时出现的偶发解析失败；测试同时核对私钥解析结果与声明的公钥。这些样本与其他测试文件均不随 npm 包发布。

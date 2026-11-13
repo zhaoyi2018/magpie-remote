@@ -10,6 +10,7 @@ import { RemoteManager } from "./remote.mjs";
 import { remoteActions } from "./remote-scripts.mjs";
 import { ProviderLink } from "./provider-link.mjs";
 import { privateForward } from "./remote-listeners.mjs";
+import { publishDesktopLauncher } from "./desktop-launcher.mjs";
 
 const runtimes = new WeakMap();
 export async function closePlugin(hooks) {
@@ -384,7 +385,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
   };
 }
 
-export async function createPlugin(input = {}, options) {
+export async function createPlugin(input = {}, options, { launcherFile } = {}) {
   const config = pluginOptions(input, options);
   const store = new ProfileStore(join(config.dataDirectory, "connections.json"));
   const sessions = new SessionManager(config);
@@ -403,6 +404,11 @@ export async function createPlugin(input = {}, options) {
       const unpublish = await publishEndpoint(file, web.url, recovery);
       const close = web.close;
       web.close = async () => { unpublish(); await close(); };
+      if (launcherFile) {
+        const unpublishLauncher = await publishDesktopLauncher(launcherFile, web.url);
+        const closePublished = web.close;
+        web.close = async () => { unpublishLauncher(); await closePublished(); };
+      }
     } catch (error) {
       await providerLink.close();
       await sessions.close();

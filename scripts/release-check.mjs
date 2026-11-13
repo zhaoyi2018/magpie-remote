@@ -17,7 +17,7 @@ const options = {
 for (let index = 2; index < process.argv.length; index++) {
   const flag = process.argv[index];
   if (flag === "--help") {
-    console.log("Usage: node scripts/release-check.mjs [--strict] [--skip-ui] [--bun /path/to/bun] [--host /path/to/host.js] [--linux-result result.json] [--output result.json]\nBun must be exactly 1.4.3. Missing external acceptance is not_run; --strict requires every check, including Linux update. --skip-ui records both browser checks as not_run.");
+    console.log("Usage: node scripts/release-check.mjs [--strict] [--skip-ui] [--bun /path/to/bun] [--host /path/to/host.js] [--linux-result result.json] [--output result.json]\nBun must be exactly 1.4.3. Missing external acceptance is not_run; --strict requires every check, including Linux update. --skip-ui records all browser checks as not_run.");
     process.exit(0);
   }
   if (flag === "--strict" || flag === "--skip-ui") { options[flag.slice(2)] = true; continue; }
@@ -105,9 +105,9 @@ function rejectCheck(check, reason) { check.status = "failed"; check.reason = re
 try {
   for (const [id, args] of [
     ["check", ["run", "check"]], ["node-tests", ["test"]], ["remote-script-fixtures", ["run", "test:remote"]],
-    ["ui", ["run", "test:ui"]], ["remote-ui-fixtures", ["run", "test:ui:remote"]],
+    ["ui", ["run", "test:ui"]], ["desktop-ui-fixtures", ["run", "test:ui:desktop"]], ["remote-ui-fixtures", ["run", "test:ui:remote"]],
   ]) {
-    if (options["skip-ui"] && ["ui", "remote-ui-fixtures"].includes(id)) notRun(id, "local", "Explicit --skip-ui; requires a browser job");
+    if (options["skip-ui"] && ["ui", "desktop-ui-fixtures", "remote-ui-fixtures"].includes(id)) notRun(id, "local", "Explicit --skip-ui; requires a browser job");
     else await run(id, id.includes("fixtures") ? "fixture" : "local", [...npm, ...args]);
   }
   // Keep a named Node SSH result even when testing compatibility under Bun.

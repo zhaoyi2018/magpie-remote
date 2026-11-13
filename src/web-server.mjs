@@ -1,10 +1,11 @@
 import { createServer } from "node:http";
 import { createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, timingSafeEqual } from "node:crypto";
-import { link, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { errorDetails } from "./errors.mjs";
 import { openWebBrowser } from "./browser.mjs";
+import { publishFile } from "./publish-file.mjs";
 
 const assets = new Map([
   ["", ["manage.html", "text/html; charset=utf-8"]],
@@ -211,13 +212,8 @@ export async function publishEndpoint(file, url, recovery) {
   const discoveryFile = join(dirname(file), "discovery.css");
   const discovery = `/* ${owner} */\n:root { --migpie-management-port: ${new URL(url).port}; }\n`;
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  async function publish(path, data) {
-    const temporary = `${path}.${randomBytes(8).toString("hex")}.tmp`;
-    try { await writeFile(temporary, data, { flag: "wx", mode: 0o600 }); await rename(temporary, path); }
-    finally { await rm(temporary, { force: true }).catch(() => {}); }
-  }
-  await publish(discoveryFile, discovery);
-  try { await publish(file, contents); }
+  await publishFile(discoveryFile, discovery);
+  try { await publishFile(file, contents); }
   catch (error) {
     try { if (readFileSync(discoveryFile, "utf8") === discovery) unlinkSync(discoveryFile); } catch { /* Already removed or replaced. */ }
     throw error;

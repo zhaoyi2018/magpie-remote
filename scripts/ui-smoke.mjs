@@ -43,6 +43,31 @@ try {
   const page = await browserContext.newPage();
   const scriptErrors = [];
   page.on("pageerror", (error) => scriptErrors.push(error.message));
+  for (const blocked of ["bridge", "stylesheet", "missing-bridge", "management-stylesheet"]) {
+    const launchContext = await browser.newContext({ permissions: ["local-network-access"] });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    try {
+      const asset = blocked === "management-stylesheet" ? "app.css" : blocked === "stylesheet" ? "launch.css" : "_magpie/bridge.js";
+      if (blocked === "management-stylesheet") {
+        await launchContext.route("**/_magpie/plugin/ui-test/index.html", (route) => route.fulfill({ status: 302, headers: { Location: web.url } }));
+      }
+      await launchContext.route("**/" + asset, async (route) => {
+        if (blocked === "missing-bridge") return route.abort("failed");
+        await held;
+        await route.continue();
+      });
+      const launchPage = await launchContext.newPage();
+      launchPage.on("pageerror", (error) => scriptErrors.push(error.message));
+      await launchPage.goto(harness.url, { waitUntil: "domcontentloaded" });
+      await launchPage.waitForFunction(() => document.documentElement.dataset.pluginState === "ready", null, { timeout: 3000 });
+      if (blocked.endsWith("stylesheet")) release();
+      await launchPage.frameLocator('iframe[title="SSH 连接"]').locator("#service-state").filter({ hasText: "管理服务在线" }).waitFor();
+      assert.equal(await launchPage.locator("html").getAttribute("data-plugin-state"), "ready");
+      assert.equal(await launchPage.getByRole("alert").count(), 0);
+    } finally { release(); await launchContext.close(); }
+  }
+  console.log("UI: launcher and management say hello before stalled styles; a stalled or missing bridge still opens management.");
   const counts = new Map();
   const api = new URL("api/call", web.url).href;
   page.on("request", (request) => {
