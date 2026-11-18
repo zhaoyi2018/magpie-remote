@@ -27,7 +27,7 @@ import { createRemoteManager } from "./remote.js";
   let credentialConnection = null;
   let menuTrigger = null;
   let toastTimer;
-  let listSignature, forwardSignature, settingsSignature, logSignature;
+  let listSignature, forwardSignature, settingsSignature, settingsConnectionId, logSignature;
   let importPreview = null, previewPath = "", previewSequence = 0, importing = false;
   let serviceFailure = null;
   let remoteStorage = null, retryingStorage = false;
@@ -359,10 +359,16 @@ import { createRemoteManager } from "./remote.js";
     $("connect-label").textContent = busy?.name === "connect" ? (session.state === "connected" ? "正在重连…" : "正在连接…") : status === "connected" ? "重新连接" : status === "reconnecting" ? "立即重试" : "连接服务器";
     $("connect").classList.toggle("primary", status !== "connected");
     $("connect").disabled = !state.online || status === "connecting" || Boolean(busy);
+    $("remote-connect").disabled = $("connect").disabled;
     $("disconnect").disabled = !state.online || !active({ state: status }) || (Boolean(busy) && busy.name !== "connect");
     $("disconnect-label").textContent = status === "reconnecting" || (status === "connecting" && session.reconnect?.attempts > 0) ? "停止重连" : status === "connecting" || busy?.name === "connect" ? "取消连接" : "断开连接";
     $("credentials-connect").disabled = !state.online || active({ state: status }) || Boolean(busy);
-    $("edit-connection").disabled = $("delete-connection").disabled = !state.online || active(session) || Boolean(busy);
+    $("delete-connection").disabled = !state.online || active(session) || Boolean(busy);
+    $("edit-connection").disabled = !state.online || Boolean(busy) || status === "connecting";
+    $("edit-connection-label").textContent = active(session) ? "断开后编辑" : "编辑设置";
+    const editHelp = state.online && active(session);
+    $("settings-edit-help").hidden = !editHelp;
+    if (!editHelp && $("settings-edit-note").matches(":popover-open")) $("settings-edit-note").hidePopover();
     $("new-forward").disabled = $("empty-forward").disabled = !state.online || Boolean(busy) || recovering(session);
     const retry = session.reconnect;
     $("reconnect-status").hidden = !["waiting", "paused"].includes(retry?.state) && !(retry?.state === "connecting" && retry.attempts > 0);
@@ -471,17 +477,41 @@ import { createRemoteManager } from "./remote.js";
     }
   }
   function renderSettings({ connection, session }) {
+    if (settingsConnectionId !== connection.id) {
+      settingsConnectionId = connection.id;
+      $("panel-connection").querySelectorAll("details[open]").forEach((details) => { details.open = false; });
+    }
     const signature = JSON.stringify([connection, session.hostFingerprint]);
     if (settingsSignature === signature) return;
     settingsSignature = signature;
-    const values = [["连接标识", connection.id], ["服务器地址", endpoint(connection.host, connection.port)], ["用户名", connection.username], ["认证方式", auth(connection)], ["自动启动预设", connection.autoStartForwards === false ? "已关闭" : "已开启"], ["预设失败处理", connection.forwardFailurePolicy === "continue" ? "保留连接，继续其他预设" : "回滚本次连接"], ["启动时连接", connection.autoConnect ? "已开启" : "已关闭"], ["私钥路径", connection.identityFile], ["Agent 地址", connection.agent], ["密码环境变量", connection.passwordEnv], ["私钥口令变量", connection.passphraseEnv], ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"], ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"]];
-    $("settings-list").replaceChildren();
-    values.splice(7, 0, ["断网自动重连", connection.autoReconnect ? "已开启，仅网络故障重试" : "已关闭"]);
-    values.push(["局域网 Magpie 自动对接", connection.autoLinkLocalMagpie === false ? "已关闭" : "已开启，优先验证局域网直连，否则使用 SSH 隧道"]);
-    for (const [label, value] of values) {
-      if (!value) continue;
-      const row = element("div", "settings-row");
-      row.append(element("dt", "", label), element("dd", "", value)); $("settings-list").append(row);
+    $("settings-address").textContent = endpoint(connection.host, connection.port);
+    $("settings-user").textContent = connection.username;
+    $("settings-auth").textContent = auth(connection);
+    const groups = {
+      "settings-behavior": [
+        ["连接后启动转发", connection.autoStartForwards === false ? "已关闭" : "已开启"],
+        ["转发启动失败时", connection.forwardFailurePolicy === "continue" ? "保持连接，继续启动其他转发" : "断开本次连接"],
+        ["打开应用时连接", connection.autoConnect ? "已开启" : "已关闭"],
+        ["断网后重连", connection.autoReconnect ? "已开启" : "已关闭"],
+        ["自动连接本机模型", connection.autoLinkLocalMagpie === false ? "已关闭" : "已开启"],
+      ],
+      "settings-security": [
+        ["主机指纹", connection.hostFingerprint ?? session.hostFingerprint ?? "使用 known_hosts 校验"],
+        ["known_hosts", connection.knownHostsFile ?? "~/.ssh/known_hosts"],
+        ["私钥路径", connection.identityFile],
+        ["Agent 地址", connection.agent],
+        ["密码环境变量", connection.passwordEnv],
+        ["私钥口令变量", connection.passphraseEnv],
+        ["连接标识", connection.id],
+      ],
+    };
+    for (const [id, values] of Object.entries(groups)) {
+      const rows = values.filter(([, value]) => value).map(([label, value]) => {
+        const row = element("div", "settings-row");
+        row.append(element("dt", "", label), element("dd", "", value));
+        return row;
+      });
+      $(id).replaceChildren(...rows);
     }
   }
   async function refreshLogs() {
@@ -535,7 +565,10 @@ import { createRemoteManager } from "./remote.js";
     $("connection-time").textContent = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((n) => String(n).padStart(2, "0")).join(":");
   }
   function setTab(tab, focus = false) {
-    if (state.tab !== tab) { logSequence++; logReading = null; }
+    if (state.tab !== tab) {
+      $("panel-" + state.tab).querySelectorAll(".panel-tip:popover-open").forEach((tip) => tip.hidePopover());
+      logSequence++; logReading = null;
+    }
     state.tab = tab;
     for (const name of tabs) {
       $("tab-" + name).setAttribute("aria-selected", String(tab === name));
@@ -583,11 +616,26 @@ import { createRemoteManager } from "./remote.js";
     getRows: () => state.rows, isOnline: () => state.online, call,
     async onSaved(connection, isNew) {
       $("search").value = ""; state.filter = "all"; state.selected = connection.id;
-      toast("连接配置已保存"); await refresh(true); setTab("forwards");
+      toast("连接设置已保存"); await refresh(true);
+      if (isNew || state.tab !== "connection") setTab("forwards");
       if (isNew) beginConnect(state.rows.find((row) => row.connection.id === connection.id) ?? { connection, session: { state: "disconnected" } });
     },
   });
   function openConnection(connection) { connectionEditor.open(connection); }
+  async function editSelectedConnection() {
+    const row = selected();
+    if (!row || $("edit-connection").disabled) return;
+    const { id, name } = row.connection;
+    if (active(row.session)) {
+      const accepted = await confirmAction("断开后编辑连接", "将断开「" + name + "」，并停止正在运行的端口转发。断开后会打开连接设置。", "断开并编辑");
+      if (!accepted || state.selected !== id || $("edit-connection").disabled) return;
+      state.cancelled.add(id);
+      const failure = await run(id, "disconnect", () => call("disconnect", { connectionId: id }), "");
+      if (failure) return;
+    }
+    const currentRow = selected();
+    if (state.online && currentRow?.connection.id === id && !active(currentRow.session) && !state.busy.has(id)) openConnection(currentRow.connection);
+  }
   function beginConnect(row = selected(), withCredentials = false) {
     if (!row || !state.online || state.busy.has(row.connection.id) || row.session.state === "connecting") return;
     if (withCredentials) { showCredentials(row); return; }
@@ -795,7 +843,7 @@ import { createRemoteManager } from "./remote.js";
   document.querySelectorAll(".close-dialog").forEach((node) => node.addEventListener("click", () => node.closest("dialog").close()));
   for (const id of ["new-connection", "empty-add"]) $(id).addEventListener("click", () => openConnection());
   for (const id of ["new-forward", "empty-forward"]) $(id).addEventListener("click", () => openForward());
-  $("edit-connection").addEventListener("click", () => { if (selected()) openConnection(selected().connection); });
+  $("edit-connection").addEventListener("click", () => { void editSelectedConnection(); });
   function bindForm(id, submit) {
     const form = $(id);
     const action = form.querySelector('button[type="submit"]');
@@ -850,6 +898,7 @@ import { createRemoteManager } from "./remote.js";
   });
   matchMedia("(max-width: 760px)").addEventListener("change", () => { listCollapsed = isNarrow(); applyLayout(); });
   $("connect").addEventListener("click", () => beginConnect());
+  $("remote-connect").addEventListener("click", () => beginConnect());
   $("credentials-connect").addEventListener("click", () => beginConnect(selected(), true));
   bindForm("credential-form", (event) => {
     event.preventDefault();

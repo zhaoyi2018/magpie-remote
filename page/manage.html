@@ -74,72 +74,191 @@
             <div class="info-note"><span data-icon="info"></span><p>连接认证成功后启动预设转发；SSH 断开时会自动释放监听端口。</p></div>
           </section>
           <section id="panel-remote" class="tab-panel remote-workbench" role="tabpanel" aria-labelledby="tab-remote" tabindex="0" hidden>
-            <div class="section-heading remote-heading"><div><h3>远程 Magpie</h3><p>管理当前 SSH 用户的程序、服务与配置备份。</p></div><button id="remote-detect" class="button" type="button"><span data-icon="refresh"></span><span id="remote-detect-label">检测环境</span></button></div>
-            <div class="remote-status-line"><strong id="remote-install-state">尚未检测远端环境</strong><span id="remote-ssh-state" class="badge">SSH 通道：未连接</span><span id="remote-observed">检测后显示程序与服务信息</span></div>
-            <p id="remote-notice" class="remote-notice" role="status">先检测环境，确认安装位置、版本与用户服务状态。</p>
-            <p id="remote-error" class="field-error" role="alert" hidden></p>
-            <div class="remote-task-link"><p id="remote-task-summary" class="remote-secondary" role="status"><span id="remote-task-state">远程操作的进度与结果会记录在运行日志中。</span></p><button id="remote-recover" class="text-button" type="button" hidden>解除待核实</button><button id="remote-view-logs" class="text-button" type="button">查看运行日志</button></div>
-            <div class="remote-layout">
-              <div class="remote-controls">
-                <section class="remote-command-section" aria-labelledby="remote-local-provider-title">
-                  <div class="remote-command-copy"><h4 id="remote-local-provider-title">局域网网关对接</h4><p>自动检测两端网络，局域网直连验证通过时直接访问本机 IP，其他情况使用 SSH 隧道。本机需开启局域网共享，远端需启用 Web 管理服务。</p></div>
+            <section class="panel-group panel-group-main remote-console" aria-labelledby="remote-console-title">
+              <div class="panel-group-heading">
+                <div>
+                  <div class="panel-title">
+                    <h3 id="remote-console-title">远程访问</h3>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-detect-tip" aria-label="环境检测说明"><span data-icon="info"></span></button>
+                    <div id="remote-detect-tip" class="panel-tip" popover tabindex="-1" autofocus>检查服务器上是否安装了 Magpie、网页管理是否可用，以及有没有新版本。</div>
+                  </div>
+                  <p id="remote-install-state" class="remote-install-state">尚未检查 Magpie</p>
+                </div>
+                <div class="panel-header-actions">
+                  <button id="remote-connect" class="button primary" type="button" hidden>连接服务器</button>
+                  <button id="remote-detect" class="button" type="button"><span data-icon="refresh"></span><span id="remote-detect-label">检查 Magpie</span></button>
+                  <button id="remote-action-install" class="button primary" type="button" aria-haspopup="dialog" disabled hidden>安装 Magpie</button>
+                </div>
+              </div>
+              <p id="remote-notice" class="remote-notice" role="status" hidden></p>
+              <p id="remote-error" class="field-error" role="alert" hidden></p>
+              <div id="remote-task-link" class="remote-task-link" hidden><p id="remote-task-summary" class="remote-secondary" role="status"><span id="remote-task-state"></span></p><button id="remote-recover" class="text-button" type="button" hidden>解除待核实</button><button id="remote-view-logs" class="text-button" type="button">查看运行日志</button></div>
+              <section id="remote-web-section" class="remote-web-section" aria-labelledby="remote-web-title" hidden>
+                <div class="remote-web-heading">
+                  <div class="panel-title">
+                    <h4 id="remote-web-title">网页管理</h4>
+                    <span id="remote-service-summary" class="badge">尚未检测</span>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-web-tip" aria-label="网页管理说明"><span data-icon="info"></span></button>
+                    <div id="remote-web-tip" class="panel-tip" popover tabindex="-1" autofocus>在浏览器管理远程 Magpie 的供应商和 Agent。页面通过当前 SSH 连接打开。只需查看或复制访问地址时，展开「端口与链接」。</div>
+                  </div>
+                  <div class="remote-web-actions">
+                    <button id="remote-launch-web" class="button primary" type="button" aria-describedby="remote-web-hint" disabled>在浏览器打开</button>
+                    <button id="remote-web-service" class="button primary" type="button" aria-haspopup="dialog" aria-controls="remote-preview" hidden>启用网页管理</button>
+                  </div>
+                </div>
+                <p id="remote-web-hint" class="remote-secondary" role="status" hidden></p>
+                <p id="remote-web-error" class="field-error" role="alert" hidden></p>
+                <details id="remote-web-port-details" class="remote-web-port-details">
+                  <summary><span data-icon="chevron" aria-hidden="true"></span>端口与链接</summary>
+                  <div class="remote-web-options">
+                    <div class="remote-web-port-row">
+                      <label for="remote-web-port">服务器端口
+                        <input id="remote-web-port" type="number" min="1" max="65535" step="1" value="3430" required inputmode="numeric">
+                      </label>
+                      <button id="remote-open-web" class="button" type="button" aria-describedby="remote-web-hint" disabled>显示访问链接</button>
+                    </div>
+                    <p id="remote-web-state" class="remote-secondary" hidden></p>
+                    <div id="remote-web-result" class="remote-web-result" hidden>
+                      <label for="remote-web-url">本次访问地址
+                        <input id="remote-web-url" type="text" readonly autocomplete="off" spellcheck="false" aria-describedby="remote-web-secret-note">
+                      </label>
+                      <div class="remote-web-result-foot">
+                        <div class="panel-title">
+                          <p id="remote-web-secret-note">链接包含管理密钥，请妥善保管。</p>
+                          <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-web-result-tip" aria-label="访问地址清除说明"><span data-icon="info"></span></button>
+                          <div id="remote-web-result-tip" class="panel-tip" popover tabindex="-1" autofocus>服务停止、SSH 断开、切换服务器或离开此页后会清空访问地址。</div>
+                        </div>
+                        <div class="remote-web-result-actions">
+                          <a id="remote-web-address" rel="noreferrer noopener" referrerpolicy="no-referrer">打开链接</a>
+                          <button id="remote-hide-web" class="text-button" type="button">清空地址</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </details>
+                <details class="remote-service-disclosure" id="remote-service-details">
+                  <summary><span data-icon="chevron" aria-hidden="true"></span>管理服务</summary>
+                  <div class="remote-command-copy">
+                    <p id="remote-service-hint" hidden></p>
+                    <div class="remote-actions">
+                      <button id="remote-action-start" class="button" type="button" disabled>启动服务</button>
+                      <button id="remote-action-stop" class="button" type="button" disabled>停止服务</button>
+                      <button id="remote-action-restart" class="button" type="button" disabled>重启服务</button>
+                      <button id="remote-action-enable_web" class="button" type="button" disabled>启用网页管理</button>
+                    </div>
+                  </div>
+                </details>
+              </section>
+              <details class="panel-disclosure" id="remote-provider-details">
+                <summary><span>使用本机模型</span><span id="remote-provider-summary" class="disclosure-caption">等待连接</span><span data-icon="chevron" aria-hidden="true"></span></summary>
+                <div class="disclosure-body remote-command-copy">
                   <p id="remote-local-provider-state" class="remote-secondary" role="status">SSH 连接后自动检测并对接</p>
                   <p id="remote-local-provider-mode" class="remote-secondary" role="status" hidden></p>
                   <p id="remote-local-provider-address" class="remote-secondary remote-path" hidden></p>
-                  <div class="remote-actions"><button id="remote-local-provider-sync" class="button" type="button" disabled>重新检测对接</button><button id="remote-local-provider-overwrite" class="button" type="button" disabled>覆盖地址与密钥</button></div>
-                </section>
-                <section class="remote-web-section" aria-labelledby="remote-web-title">
-                  <div class="remote-command-copy"><h4 id="remote-web-title">访问官方 Web</h4><p>供应商与 Agent 可在 Magpie 官方 Web 中管理。</p></div>
-                  <div class="remote-web-controls"><label for="remote-web-port">远端 Web 端口<input id="remote-web-port" type="number" min="1" max="65535" step="1" value="3430" required inputmode="numeric" aria-describedby="remote-web-hint"></label><button id="remote-open-web" class="button" type="button" disabled>获取 Web 地址</button></div>
-                  <p id="remote-web-hint" class="remote-secondary">远端 Web 默认使用 3430 端口，仅通过本机回环 SSH 通道访问。</p>
-                  <p id="remote-web-error" class="field-error" role="alert" hidden></p>
-                  <div id="remote-web-result" class="remote-web-result" hidden><label for="remote-web-url">本次访问地址<input id="remote-web-url" type="text" readonly autocomplete="off" spellcheck="false" aria-describedby="remote-web-secret-note"></label><p id="remote-web-secret-note">地址包含管理密钥，可点击下方链接在本机浏览器打开，也可复制访问，请妥善保管。服务停止、切换服务器、SSH 断开或离开此页后会清空。</p><div class="remote-web-result-foot"><a id="remote-web-address" rel="noreferrer noopener" referrerpolicy="no-referrer"></a><button id="remote-hide-web" class="text-button" type="button">清空地址</button></div></div>
-                </section>
-                <section class="remote-command-section" aria-labelledby="remote-service-title">
-                  <div class="remote-command-copy"><div class="remote-service-heading"><h4 id="remote-service-title">用户服务</h4><span id="remote-service-summary" class="badge">尚未检测</span></div><p id="remote-service-hint">服务启停不会断开 SSH 连接。</p></div>
-                  <div class="remote-actions"><button id="remote-action-start" class="button" type="button" disabled>启动服务</button><button id="remote-action-stop" class="button" type="button" disabled>停止服务</button><button id="remote-action-restart" class="button" type="button" disabled>重启服务</button><button id="remote-action-enable_web" class="button" type="button" disabled>启用 Web</button></div>
-                </section>
-                <details class="remote-program-section remote-disclosure" id="remote-program-details">
-                  <summary><span>程序与版本</span><span id="remote-program-summary" class="disclosure-caption">安装与更新</span><span data-icon="chevron" aria-hidden="true"></span></summary>
-                  <div class="remote-disclosure-body">
-                    <div class="remote-command-copy"><p id="remote-action-hint">检测后可安装或更新，每次变更前先预览。</p></div>
-                    <div class="remote-update-check"><div class="remote-update-copy"><strong id="remote-update-state">尚未确认最新版本</strong><p id="remote-update-detail">检测环境时会一并检查可用更新。</p></div><button id="remote-check-update" class="text-button" type="button" disabled>检测新版本</button></div>
-                    <div class="remote-actions"><button id="remote-action-install" class="button primary" type="button" disabled>安装 Magpie</button><button id="remote-action-update" class="button primary" type="button" disabled hidden>更新 Magpie</button></div>
+                  <div class="remote-actions">
+                    <button id="remote-local-provider-sync" class="button" type="button" disabled>重新连接本机模型</button><button id="remote-local-provider-overwrite" class="button" type="button" disabled>覆盖地址与密钥</button>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-provider-tip" aria-label="本机模型连接说明"><span data-icon="info"></span></button>
+                    <div id="remote-provider-tip" class="panel-tip" popover tabindex="-1" autofocus>让远程 Magpie 使用本机 Magpie 提供的模型。本机需开启局域网共享，远程需启用网页管理。无法直连时会通过 SSH 连接。</div>
                   </div>
-                </details>
-              </div>
-              <details class="remote-environment-rail remote-disclosure" id="remote-environment-details">
-                <summary><span>环境信息</span><span class="disclosure-caption">系统与安装路径</span><span data-icon="chevron" aria-hidden="true"></span></summary>
-                <div class="remote-disclosure-body">
-                <dl id="remote-environment" class="remote-environment" hidden>
-                  <div><dt>操作系统 / 架构</dt><dd id="remote-platform"></dd></div>
-                  <div><dt>远端用户 / 主目录</dt><dd id="remote-user" class="remote-path"></dd></div>
-                  <div><dt>Magpie 程序</dt><dd><span id="remote-binary" class="remote-path"></span><span id="remote-version" class="remote-secondary"></span></dd></div>
-                  <div><dt>配置目录</dt><dd id="remote-config" class="remote-path"></dd></div>
-                  <div><dt>用户服务</dt><dd><span id="remote-service" class="badge"></span></dd></div>
-                  <div><dt>官方 Web</dt><dd id="remote-web-state"></dd></div>
-                </dl>
-                <p class="remote-secondary remote-environment-note">程序与服务状态通过当前 SSH 会话读取。</p>
                 </div>
               </details>
-            </div>
-            <details id="remote-backups" class="remote-backups remote-disclosure">
-              <summary><span>配置备份</span><span class="disclosure-caption">创建、恢复与清理</span><span data-icon="chevron" aria-hidden="true"></span></summary>
-              <div class="remote-disclosure-body">
-              <div class="remote-backups-heading"><div class="remote-command-copy"><h4 id="remote-backups-title">配置备份</h4><p>配置归档不加密，保存在此服务器，可能包含密钥，请妥善保管。恢复时先保存当前配置与程序，再还原配置目录并保留当前程序。</p></div><div class="remote-actions"><button id="remote-refresh-backups" class="button" type="button" disabled><span data-icon="refresh"></span><span id="remote-refresh-backups-label">刷新列表</span></button><button id="remote-action-backup" class="button" type="button" disabled>创建备份</button></div></div>
-              <p id="remote-backups-state" class="remote-secondary" role="status">点击「刷新列表」读取这台服务器的备份。</p>
-              <p id="remote-backups-error" class="field-error" role="alert" hidden></p>
-              <div id="remote-backup-list" class="remote-backup-list" aria-label="远端配置备份列表"></div>
-              </div>
-            </details>
-            <details class="remote-disclosure remote-uninstall" id="remote-maintenance-details"><summary><span>卸载与清理</span><span class="disclosure-caption">保留配置和备份</span><span data-icon="chevron" aria-hidden="true"></span></summary><div class="remote-disclosure-body remote-command-section"><div class="remote-command-copy"><p>仅移除默认位置的程序与用户服务，保留配置和备份。请先处理 Agent 接入；具体影响会在预览中说明。</p></div><div class="remote-actions"><button id="remote-action-uninstall" class="button danger" type="button" disabled>卸载 Magpie</button></div></div></details>
+            </section>
+            <section class="panel-group remote-maintenance" aria-labelledby="remote-maintenance-title">
+              <div class="panel-group-heading"><h3 id="remote-maintenance-title">维护</h3></div>
+              <details class="panel-disclosure" id="remote-program-details">
+                <summary><span>版本与安装信息</span><span id="remote-program-summary" class="disclosure-caption"></span><span data-icon="chevron" aria-hidden="true"></span></summary>
+                <div class="disclosure-body">
+                  <p id="remote-action-hint" class="remote-secondary" hidden></p>
+                  <div class="remote-update-check" id="remote-update-check">
+                    <div class="remote-update-copy"><strong id="remote-update-state">版本待检查</strong><p id="remote-update-detail"></p></div>
+                    <button id="remote-check-update" class="text-button" type="button" disabled>检测新版本</button>
+                  </div>
+                  <div class="remote-actions">
+                    <button id="remote-action-update" class="button primary" type="button" disabled hidden>更新 Magpie</button>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-program-tip" aria-label="安装与更新说明"><span data-icon="info"></span></button>
+                    <div id="remote-program-tip" class="panel-tip" popover tabindex="-1" autofocus>Magpie 安装在当前 SSH 用户的默认位置。更新前会备份配置，更新时会保留现有配置。</div>
+                  </div>
+                  <dl id="remote-environment" class="remote-environment" hidden>
+                    <div><dt>操作系统 / 架构</dt><dd id="remote-platform"></dd></div>
+                    <div><dt>远端用户 / 主目录</dt><dd id="remote-user" class="remote-path"></dd></div>
+                    <div><dt>程序路径</dt><dd id="remote-binary" class="remote-path"></dd></div>
+                    <div><dt>配置目录</dt><dd id="remote-config" class="remote-path"></dd></div>
+                  </dl>
+                  <p id="remote-observed" class="remote-secondary" hidden></p>
+                </div>
+              </details>
+              <details id="remote-backups" class="panel-disclosure">
+                <summary><span>配置备份</span><span data-icon="chevron" aria-hidden="true"></span></summary>
+                <div class="disclosure-body">
+                  <div class="remote-actions remote-backups-heading">
+                    <button id="remote-refresh-backups" class="button" type="button" disabled><span data-icon="refresh"></span><span id="remote-refresh-backups-label">刷新列表</span></button><button id="remote-action-backup" class="button" type="button" disabled>创建备份</button>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-backup-tip" aria-label="配置备份说明"><span data-icon="info"></span></button>
+                    <div id="remote-backup-tip" class="panel-tip" popover tabindex="-1" autofocus>备份保存在远端服务器，未经加密，可能包含密钥。恢复前会另存当前配置和程序，恢复时保留当前程序。</div>
+                  </div>
+                  <p id="remote-backups-state" class="remote-secondary" role="status" hidden></p>
+                  <p id="remote-backups-error" class="field-error" role="alert" hidden></p>
+                  <div id="remote-backup-list" class="remote-backup-list" aria-label="远端配置备份列表"></div>
+                </div>
+              </details>
+              <details class="panel-disclosure" id="remote-maintenance-details">
+                <summary><span>卸载与清理</span><span data-icon="chevron" aria-hidden="true"></span></summary>
+                <div class="disclosure-body">
+                  <div class="remote-actions">
+                    <button id="remote-action-uninstall" class="button danger" type="button" disabled>卸载 Magpie</button>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-uninstall-tip" aria-label="卸载说明"><span data-icon="info"></span></button>
+                    <div id="remote-uninstall-tip" class="panel-tip" popover tabindex="-1" autofocus>卸载会移除默认位置的程序与用户服务，保留配置和备份。请先处理 Agent 接入，再预览变更。</div>
+                  </div>
+                </div>
+              </details>
+            </section>
           </section>
           <section id="panel-connection" class="tab-panel" role="tabpanel" aria-labelledby="tab-connection" tabindex="0" hidden>
-            <div class="section-heading"><div><h3>连接设置</h3><p>修改服务器配置前请先断开连接。</p></div><button id="edit-connection" class="button" type="button"><span data-icon="edit"></span>编辑配置</button></div>
-            <dl id="settings-list" class="settings-list"></dl>
-            <div class="credentials-setting"><div><h4>本次登录凭据</h4><p>需要密码或私钥口令时，在连接前填写。凭据不会保存。</p></div><button id="credentials-connect" class="button" type="button">填写凭据并连接</button></div>
-            <details class="connection-help"><summary>首次连接与认证排错</summary><ol><li>确认主机、SSH 端口和用户名可用。</li><li>从服务器控制台或管理员取得并独立核对 SHA256 主机指纹，在「编辑配置 → 主机校验与其他设置」填写；也可使用已核验的 known_hosts。</li><li>选择认证来源。SSH agent 可用 ssh-add -l 检查身份；Windows 使用运行 Magpie 的同一账户下的 OpenSSH agent。私钥填写本机路径，加密私钥需要口令；临时密码或口令可点「填写凭据并连接」。</li><li>环境变量需由 Magpie 宿主进程继承；修改后重新加载宿主。认证或主机信任失败时，处理原因后手动连接。</li></ol></details>
-            <div class="danger-zone"><div><h4>删除此连接</h4><p>删除保存的服务器与全部转发预设。</p></div><button id="delete-connection" class="button danger" type="button">删除连接</button></div>
+            <section class="panel-group panel-group-main" aria-labelledby="settings-server-title">
+              <div class="panel-group-heading">
+                <h3 id="settings-server-title">服务器配置</h3>
+                <div class="panel-title">
+                  <button id="settings-edit-help" class="icon-button panel-tip-trigger" type="button" popovertarget="settings-edit-note" aria-label="编辑配置说明" hidden><span data-icon="info"></span></button>
+                  <div id="settings-edit-note" class="panel-tip" popover tabindex="-1" autofocus>修改设置前需要断开 SSH。断开后，正在运行的端口转发也会停止。</div>
+                  <button id="edit-connection" class="button" type="button" aria-haspopup="dialog"><span data-icon="edit"></span><span id="edit-connection-label">编辑设置</span></button>
+                </div>
+              </div>
+              <dl id="settings-list" class="settings-basics">
+                <div><dt>服务器地址</dt><dd id="settings-address" class="mono"></dd></div>
+                <div><dt>用户名</dt><dd id="settings-user"></dd></div>
+              </dl>
+            </section>
+            <div class="panel-group-grid">
+              <section class="panel-group" aria-labelledby="settings-login-title">
+                <div class="panel-group-heading">
+                  <div class="panel-title">
+                    <h3 id="settings-login-title">登录与安全</h3>
+                    <button id="settings-login-help" class="icon-button panel-tip-trigger" type="button" popovertarget="settings-login-tip" aria-label="登录与认证说明"><span data-icon="info"></span></button>
+                    <div id="settings-login-tip" class="panel-tip connection-help" popover tabindex="-1" autofocus>
+                      <p>密码或私钥口令只用于本次登录，应用不会保存。</p>
+                      <strong>首次连接与认证排错</strong>
+                      <ol><li>核对服务器地址、SSH 端口和用户名。</li><li>向管理员或通过服务器控制台独立核对主机指纹。在编辑窗口的「主机校验与其他设置」填写指纹，也可以使用已经核验的 known_hosts 文件。</li><li>如果使用私钥，请检查本机的文件路径。如果使用 SSH agent，试着运行 <code>ssh-add -l</code> 查看可用密钥。Windows 上请用运行 Magpie 的同一个账户检查。</li><li>修改环境变量后，请重新加载 Magpie。</li></ol>
+                    </div>
+                  </div>
+                  <button id="credentials-connect" class="button" type="button">输入密码或口令</button>
+                </div>
+                <details class="panel-disclosure">
+                  <summary><span>认证与主机校验</span><span id="settings-auth" class="disclosure-caption"></span><span data-icon="chevron" aria-hidden="true"></span></summary>
+                  <div class="disclosure-body"><dl id="settings-security" class="settings-list"></dl></div>
+                </details>
+              </section>
+              <section class="panel-group" aria-labelledby="settings-manage-title">
+                <div class="panel-group-heading"><h3 id="settings-manage-title">连接管理</h3></div>
+                <details class="panel-disclosure"><summary><span>自动连接与转发</span><span data-icon="chevron" aria-hidden="true"></span></summary><div class="disclosure-body"><dl id="settings-behavior" class="settings-list"></dl></div></details>
+                <details class="panel-disclosure">
+                  <summary><span>删除此连接</span><span data-icon="chevron" aria-hidden="true"></span></summary>
+                  <div class="disclosure-body settings-action">
+                    <button id="delete-connection" class="button danger" type="button">删除连接</button>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="settings-delete-tip" aria-label="删除连接说明"><span data-icon="info"></span></button>
+                    <div id="settings-delete-tip" class="panel-tip" popover tabindex="-1" autofocus>删除会移除保存的服务器配置与全部转发预设。断开 SSH 后可执行删除。</div>
+                  </div>
+                </details>
+              </section>
+            </div>
           </section>
           <section id="panel-logs" class="tab-panel" role="tabpanel" aria-labelledby="tab-logs" tabindex="0" hidden>
             <div class="section-heading"><div><h3>运行日志</h3><p>记录 SSH、转发与远程 Magpie 操作，保留最近 200 条，宿主重启后清空。</p></div><label class="log-filter"><span class="sr-only">日志级别</span><select id="log-filter"><option value="all">全部日志</option><option value="error">仅错误</option></select></label></div>

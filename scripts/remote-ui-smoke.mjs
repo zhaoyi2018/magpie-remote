@@ -28,7 +28,7 @@ async function remoteFixture(context) {
   const state = {
     platform: "Linux", architecture: "x86_64", container: false,
     installed: false, systemd: true, serviceInstalled: false,
-    serviceActive: "inactive", webEnabled: false, webTLS: false,
+    serviceActive: "inactive", webEnabled: false, webTLS: false, webPort: 3430,
     serviceScope: "loopback", serviceRebuildSafe: true,
     version: "0.1.1327", locked: false, recoveryBusy: false, reconcile: "", nextUnknown: false, nextFailure: null, backups: [],
     capabilities: "update backup restore healthcheck daemon_install daemon_uninstall daemon_start daemon_stop daemon_restart daemon_web daemon_install_web",
@@ -41,7 +41,7 @@ async function remoteFixture(context) {
       binary: state.installed ? "/home/tester/.local/bin/magpie" : "",
       managedBinary: "/home/tester/.local/bin/magpie", binaryHash: state.installed ? "a".repeat(64) : "",
       configDirectory: "/home/tester/.config/magpie", unit: "/home/tester/.config/systemd/user/magpie.service",
-      unitHash: state.serviceInstalled ? "b".repeat(64) : "", webPort: "3430", linger: "yes",
+      unitHash: state.serviceInstalled ? "b".repeat(64) : "", linger: "yes",
       tools: "curl sha256sum base64 mktemp install readlink tar",
     };
     return "MIGPIE_REMOTE_V1\n" + Object.entries(values).map(([key, value]) => key + "\t" + Buffer.from(String(value)).toString("base64")).join("\n") + "\n";
@@ -192,10 +192,14 @@ try {
     if (!(await field(id).evaluate((node) => node.open))) await field(id).locator(":scope > summary").click();
   };
   const preview = async (action) => {
-    if (["install", "update"].includes(action)) await expand("remote-program-details");
+    if (action === "update") await expand("remote-program-details");
+    const shortcut = field("remote-web-service");
+    const useShortcut = await shortcut.isVisible() && await shortcut.getAttribute("data-action") === action;
+    if (!useShortcut && ["start", "stop", "restart", "enable_web"].includes(action)) await expand("remote-service-details");
     if (action === "uninstall") await expand("remote-maintenance-details");
     if (action === "backup") await expand("remote-backups");
-    await waitEnabled("remote-action-" + action); await field("remote-action-" + action).click();
+    const actionId = useShortcut ? "remote-web-service" : "remote-action-" + action;
+    await waitEnabled(actionId); await field(actionId).click();
     await until(async () => (await ui.locator("#remote-preview-changes li").count()) > 0, "Missing action preview");
   };
   const closePreview = () => ui.locator("#remote-preview .dialog-actions .remote-close-preview").click();
@@ -205,13 +209,22 @@ try {
     return { entered: entered.promise, release() { tools[name].execute = execute; release.resolve(); } };
   };
   const openRemote = async () => { await field("tab-remote").click(); await field("panel-remote").waitFor(); };
-  const showWeb = async () => { await waitEnabled("remote-open-web"); await field("remote-open-web").click(); await field("remote-web-result").waitFor(); };
+  const showWeb = async () => { await expand("remote-web-port-details"); await waitEnabled("remote-open-web"); await field("remote-open-web").click(); await field("remote-web-result").waitFor(); };
 
   await page.goto(harness.url); await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
   assert.equal(await page.locator("iframe").getAttribute("sandbox"), "allow-scripts");
   assert.equal(count("remote_status"), 0);
   await openRemote(); assert.equal(await field("remote-action-install").isDisabled(), true);
+  assert.equal(await field("remote-notice").isVisible(), false, "Routine detection instructions stay off the main view");
+  await field("panel-remote").getByRole("button", { name: "环境检测说明" }).click();
+  await field("remote-detect-tip").waitFor();
+  await field("tab-remote").click();
+  await field("remote-detect-tip").waitFor({ state: "hidden" });
   await detect(); await waitEnabled("remote-action-install");
+  for (const id of ["remote-service-details", "remote-provider-details", "remote-backups", "remote-maintenance-details"]) assert.equal(await field(id).evaluate((node) => node.open), false);
+  assert.equal(await field("remote-program-details").locator("#remote-environment").isVisible(), false);
+  assert.equal(await field("remote-web-section").isVisible(), false, "Web controls are hidden until Magpie is installed");
+  await expand("remote-provider-details");
   await field("remote-local-provider-state").filter({ hasText: "等待远端启用 Web" }).waitFor();
   await waitEnabled("remote-local-provider-sync");
   const providerChecks = count("remote_provider_sync");
@@ -219,8 +232,7 @@ try {
   await until(() => count("remote_provider_sync") === providerChecks + 1);
   await waitEnabled("remote-local-provider-sync");
   assert.equal(await field("connection-overview").evaluate((node) => node.open), false);
-  assert.equal(await field("remote-program-details").evaluate((node) => node.open), true, "Missing installations must expose the next step");
-  for (const id of ["remote-environment-details", "remote-backups", "remote-maintenance-details"]) assert.equal(await field(id).evaluate((node) => node.open), false);
+  assert.equal(await field("remote-action-install").isVisible(), true, "Install is immediately available after checking the server");
   assert.equal(await field("remote-task-summary").isVisible(), false, "Idle task explanation should not compete with actions");
   assert.equal(await field("remote-action-update").isDisabled(), true);
   const release = remote.release;
@@ -248,7 +260,7 @@ try {
   assert.match(await field("remote-task-state").textContent(), /下载程序.*[\d.,]+ [KM]?B\/s/);
   assert.ok(!(await field("remote-task-state").textContent()).includes("· 0 B/s"), "A measured download must display nonzero speed");
   assert.ok((await remote.operation("remote-alpha")).progress.bytesPerSecond > 0);
-  assert.equal(await field("remote-task-summary").evaluate((node) => Boolean(node.compareDocumentPosition(document.getElementById("remote-action-install")) & Node.DOCUMENT_POSITION_FOLLOWING)), true, "Task summary must precede program actions");
+  assert.equal(await field("remote-task-summary").isVisible(), true, "Installation progress stays visible without opening maintenance");
   const heldProgressStatus = gateTool("remote_status"); await heldProgressStatus.entered;
   await selectedRow("测试服务器").click(); await openRemote(); heldProgressStatus.release();
   await page.waitForTimeout(150);
@@ -396,9 +408,13 @@ try {
   fixture.state.webTLS = false; fixture.state.platform = "Darwin"; await detect(); assert.equal(await field("remote-action-update").isDisabled(), true);
   fixture.state.platform = "Linux"; await detect();
   assert.equal(await field("remote-action-start").isDisabled(), true);
-  assert.match(await field("remote-service-hint").textContent(), /请先点击「启用 Web」/);
+  assert.match(await field("remote-service-hint").textContent(), /会启动 Magpie 服务/);
   assert.equal(await field("remote-action-enable_web").isEnabled(), true);
-  await preview("enable_web"); await field("remote-apply").click();
+  await expand("remote-service-details");
+  assert.equal(await field("remote-action-enable_web").isVisible(), false, "The main Web action should not be duplicated in service controls");
+  await field("remote-web-service").filter({ hasText: "启用网页管理" }).click();
+  await field("remote-preview-title").filter({ hasText: "预览启用网页管理" }).waitFor();
+  await field("remote-apply").click();
   await waitOperation("已完成"); await waitEnabled("remote-open-web");
   console.log("Remote UI: legacy 0.1.1327 can enable its first service; platform, container, systemd, service and TLS checks passed.");
   fixture.state.serviceScope = "unknown"; await detect();
@@ -413,20 +429,25 @@ try {
   await waitOperation("已完成"); await waitEnabled("remote-action-restart");
   assert.equal(await field("remote-action-enable_web").isDisabled(), true);
   console.log("Remote UI: existing Web services can rebuild loopback settings while unsafe systemd overrides stay blocked.");
+  await expand("remote-provider-details");
   await field("remote-local-provider-state").filter({ hasText: "本机 Magpie 已对接 · remote-alpha" }).waitFor();
   assert.match(await field("remote-local-provider-address").textContent(), /局域网网关 http:\/\/192\.168\.10\.2:4567/);
   const heldProvider = gateTool("remote_provider_sync");
   await field("remote-local-provider-sync").click(); await heldProvider.entered;
   await selectedRow("测试服务器").click(); await openRemote(); heldProvider.release();
+  assert.equal(await field("remote-provider-details").evaluate((node) => node.open), false, "Switching servers collapses the previous provider details");
+  await expand("remote-provider-details");
   await field("remote-local-provider-address").filter({ hasText: "remote-beta" }).waitFor();
   assert.ok(!(await field("remote-local-provider-address").textContent()).includes("remote-alpha"), "Late provider integration responses must stay with their connection");
   await selectedRow("生产服务器").click(); await openRemote();
+  await expand("remote-provider-details");
   await field("remote-local-provider-address").filter({ hasText: "remote-alpha" }).waitFor();
   console.log("Remote UI: automatic local-provider status, explicit retry and late connection response isolation passed.");
   await field("remote-local-provider-mode").filter({ hasText: "访问方式：SSH 隧道" }).waitFor();
   providerLink.mode = "direct";
   await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
   await field("remote-local-provider-mode").filter({ hasText: "局域网直连，无需 SSH 隧道" }).waitFor();
+  assert.equal(await field("remote-provider-summary").textContent(), "局域网直连");
   assert.match(await field("remote-local-provider-address").textContent(), /^局域网地址 http:\/\/192\.168\.10\.2:4567/);
   assert.ok(!(await field("remote-local-provider-address").textContent()).includes("127.0.0.1"));
   await field("disconnect").click(); await field("detail-state").filter({ hasText: "未连接" }).waitFor();
@@ -453,6 +474,7 @@ try {
   await selectedRow("测试服务器").evaluate((node) => node.click()); await field("confirm-accept").click();
   assert.equal(count("remote_provider_sync"), beforeOverwrite, "A confirmation for another connection must not submit an overwrite");
   await openRemote(); await selectedRow("生产服务器").click(); await openRemote();
+  await expand("remote-provider-details");
   await waitEnabled("remote-local-provider-overwrite"); await field("remote-local-provider-overwrite").click();
   const heldOverwrite = gateTool("remote_provider_sync");
   await field("confirm-accept").evaluate((node) => { node.click(); node.click(); }); await heldOverwrite.entered;
@@ -469,6 +491,7 @@ try {
   await waitEnabled("remote-local-provider-sync"); await field("remote-local-provider-sync").click();
   await field("remote-local-provider-state").filter({ hasText: providerLink.error }).waitFor();
   assert.equal(await field("remote-local-provider-state").evaluate((node) => node.classList.contains("is-warning")), true);
+  assert.equal(await field("remote-provider-summary").textContent(), "连接异常");
   assert.equal(await field("remote-local-provider-mode").isVisible(), false);
   assert.equal(await field("remote-local-provider-address").isVisible(), false);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -559,17 +582,39 @@ try {
   assert.equal(await ui.locator('#remote-backup-list [data-action="delete_backup"][data-backup-id="a85a204d-8765-4719-a02a-5baee553ed87"]').isEnabled(), true);
   console.log("Remote UI: backup stays separate from update, archive restore/deletion and historical encrypted backup handling passed.");
 
+  assert.equal(await field("remote-web-port").isVisible(), false, "The default Web port does not need an open form");
+  fixture.state.webPort = 4330;
+  await detect();
+  assert.equal(await field("remote-web-port").inputValue(), "4330", "Use the detected port when the user has not entered one");
+  fixture.state.webPort = 3430;
+  await detect();
+  await field("remote-launch-web").click();
+  await until(() => openedWebURLs.length === 1, "Opening the browser should not require showing the access link");
+  assert.equal(await field("remote-web-result").isVisible(), false);
+  const launchButton = await field("remote-launch-web").boundingBox();
+  await expand("remote-web-port-details");
+  assert.deepEqual(await field("remote-launch-web").boundingBox(), launchButton, "Expanding link options must leave the primary button in place");
   const webBefore = count("remote_web"); await field("remote-web-port").fill("4444"); await field("remote-web-port").focus();
   await page.waitForTimeout(2200); assert.equal(await field("remote-web-port").inputValue(), "4444");
   assert.equal(await field("remote-web-port").evaluate((node) => node === document.activeElement), true);
   assert.equal(count("remote_web"), webBefore);
-  await field("remote-web-port").fill("3430"); await showWeb();
+  await field("remote-web-port").fill("65536");
+  await field("remote-web-port-details").locator("summary").click();
+  await field("remote-launch-web").click();
+  assert.equal(await field("remote-web-port-details").evaluate((node) => node.open), true, "An invalid port opens its control for correction");
+  assert.equal(count("remote_web"), webBefore);
+  await field("remote-web-port").fill("3430");
+  await field("remote-web-port-details").locator("summary").click();
+  await showWeb();
   assert.match(await field("remote-web-url").inputValue(), /fixture-management-key/);
-  assert.equal(openedWebURLs.length, 0);
+  assert.equal(openedWebURLs.length, 1);
   assert.equal(await field("remote-web-address").getAttribute("href"), await field("remote-web-url").inputValue());
+  await field("remote-web-port-details").locator("summary").click();
+  assert.equal(await field("remote-web-result").isVisible(), false, "Collapsing the link options must hide the generated address");
+  await expand("remote-web-port-details");
   await field("remote-web-address").click();
-  await until(() => openedWebURLs.length === 1, "Web link did not invoke the local browser opener");
-  assert.equal(openedWebURLs[0], await field("remote-web-url").inputValue());
+  await until(() => openedWebURLs.length === 2, "Web link did not invoke the local browser opener");
+  assert.equal(openedWebURLs[1], await field("remote-web-url").inputValue());
   assert.equal(await field("panel-remote").isVisible(), true);
   await waitEnabled("remote-open-web");
   await field("remote-hide-web").click();
@@ -606,7 +651,7 @@ try {
   await until(async () => (await remote.operation("remote-beta")).state !== "running", "Disconnected task did not settle");
   fixture.state.reconcile = "succeeded";
   assert.equal(await field("remote-web-url").inputValue(), ""); assert.equal(await field("remote-action-update").isDisabled(), true);
-  await field("connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor(); await detect(); await showWeb();
+  await field("remote-connect").click(); await field("detail-state").filter({ hasText: "已连接" }).waitFor(); await detect(); await showWeb();
   await field("panel-remote").evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
   assert.equal(await field("remote-web-url").inputValue(), "");
   const beforeRestore = count("remote_status");
@@ -670,17 +715,34 @@ try {
   await page.screenshot({ path: join(screenshots, "desktop.png"), fullPage: true });
   await page.locator("#theme").click();
   await field("panel-remote").evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
-  await page.screenshot({ path: join(screenshots, "desktop-dark.png"), fullPage: true });
+  await page.screenshot({ path: join(screenshots, "desktop-dark.png"), fullPage: true, animations: "disabled" });
   await page.locator("#theme").click();
+  await field("tab-connection").click();
+  await page.screenshot({ path: join(screenshots, "settings-desktop.png"), fullPage: true, animations: "disabled" });
+  await openRemote();
   await page.setViewportSize({ width: 555, height: 900 });
   await field("toggle-list").waitFor();
   await field("toggle-list").evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
   if (await field("toggle-list").getAttribute("aria-expanded") === "true") await field("toggle-list").click();
   await until(() => field("remote-install-state").isVisible(), "Narrow layout did not expose remote management");
-  await field("panel-remote").evaluate((node) => { node.scrollTop = 240; });
+  await field("panel-remote").evaluate((node) => { node.scrollTop = 0; });
   const layout = await field("panel-remote").evaluate(() => ({ viewport: innerWidth, body: document.documentElement.scrollWidth, detail: document.getElementById("connection-detail").clientWidth, scroll: document.getElementById("connection-detail").scrollWidth }));
   assert.equal(layout.viewport, 390); assert.ok(layout.body <= layout.viewport + 1); assert.ok(layout.scroll <= layout.detail + 1);
+  const tabRows = await ui.getByRole("tab").evaluateAll((tabs) => new Set(tabs.map((tab) => tab.getBoundingClientRect().top)).size);
+  assert.equal(tabRows, 1, "All tabs fit on a single row in the 390px frame");
   await page.screenshot({ path: join(screenshots, "narrow-390.png"), fullPage: true });
+  await field("tab-connection").click();
+  assert.equal(await field("panel-connection").evaluate((node) => node.scrollWidth > node.clientWidth + 1), false);
+  await page.screenshot({ path: join(screenshots, "settings-narrow-390.png"), fullPage: true, animations: "disabled" });
+  await field("settings-login-help").click();
+  await field("settings-login-tip").waitFor();
+  assert.equal(await field("settings-login-tip").evaluate((node) => {
+    const bounds = node.getBoundingClientRect();
+    return bounds.left >= 0 && bounds.right <= innerWidth && bounds.top >= 0 && bounds.bottom <= innerHeight;
+  }), true, "Help stays inside the 390px frame");
+  await page.screenshot({ path: join(screenshots, "settings-help-390.png"), fullPage: true });
+  await openRemote();
+  assert.equal(await field("settings-login-tip").evaluate((node) => node.matches(":popover-open")), false);
   await preview("update");
   assert.equal(await field("remote-preview").evaluate((node) => node.scrollWidth > node.clientWidth + 1), false);
   await page.screenshot({ path: join(screenshots, "preview-390.png"), fullPage: true }); await closePreview();

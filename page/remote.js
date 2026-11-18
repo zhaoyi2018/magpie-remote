@@ -1,6 +1,6 @@
 const actionLabels = {
   install: "安装 Magpie", update: "更新 Magpie", start: "启动服务", stop: "停止服务",
-  restart: "重启服务", enable_web: "启用 Web", uninstall: "卸载 Magpie",
+  restart: "重启服务", enable_web: "启用网页管理", uninstall: "卸载 Magpie",
   backup: "创建备份", restore: "恢复配置", delete_backup: "删除备份",
 };
 const panelActions = ["install", "update", "start", "stop", "restart", "enable_web", "uninstall", "backup"];
@@ -23,7 +23,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
   let history = [], historySignature = "";
   let providerSyncing = false, providerConfirming = false;
-  let programDisclosureInitialized = false;
+  let webPortEdited = false;
 
   function drawHistory() {
     const filter = $("history-filter").value;
@@ -82,7 +82,6 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     $("remote-web-url").value = "";
     $("remote-web-address").removeAttribute("href");
     $("remote-web-result").hidden = true;
-    text("remote-web-address", "");
     showError("remote-web-error", "");
   }
   function closePreview() {
@@ -145,9 +144,9 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     if (reason) return reason;
     if (!status.instance.installed) return "请先安装 Magpie。";
     if (status.instance.web?.tls) return "已有 Web 配置了 TLS，请使用服务器原有访问方式。";
-    if (!status.instance.web?.enabled) return "请先启用 Web。";
-    if (!status.instance.capabilities?.includes("daemon_web")) return "当前程序未提供管理链接命令，请先更新 Magpie。";
-    if (status.instance.service?.state !== "running") return "请先启动远端服务。";
+    if (!status.instance.web?.enabled) return "网页管理尚未启用。可在「管理服务」查看可用操作。";
+    if (!status.instance.capabilities?.includes("daemon_web")) return "当前版本无法生成访问链接，请更新 Magpie。";
+    if (status.instance.service?.state !== "running") return "Magpie 服务尚未运行。可在「管理服务」查看可用操作。";
     return "";
   }
 
@@ -155,34 +154,30 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     const update = status?.update, instance = status?.instance;
     const state = update?.state;
     const currentVersion = update?.currentVersion || instance?.version;
-    let label = "尚未确认最新版本", detail = "检测环境时会一并检查可用更新。";
+    let label = "版本待检查", detail = "";
     if (state === "current") {
       label = "已是最新版";
-      detail = currentVersion ? "当前版本 " + currentVersion + "。" : "当前程序与最新发布版本一致。";
+      detail = currentVersion ? "当前版本 " + currentVersion + "。" : "";
     } else if (state === "available") {
       label = update.latestVersion ? "发现新版本 " + update.latestVersion : "发现可用更新";
-      detail = currentVersion ? "当前版本 " + currentVersion + "。更新前会创建配置备份。" : "更新前会创建配置备份。";
+      detail = currentVersion ? "当前版本 " + currentVersion + "。" : "";
     } else if (update?.error) {
       label = "新版本检测失败";
       detail = errorMessage(update.error) + " 可重新检测新版本。";
-    } else if (instance && !instance.installed) {
-      detail = "安装 Magpie 后可检查当前版本是否有更新。";
     } else if (currentVersion) {
-      detail = "当前版本 " + currentVersion + "，尚未确认最新发布版本。";
+      detail = "当前版本 " + currentVersion + "。";
     }
     if (instance?.installed && status.actions?.update?.enabled === false && status.actions.update.reason) detail += " " + status.actions.update.reason;
     if (update?.checkedAt) detail += " 检测于 " + time(update.checkedAt) + "。";
     if (status && !fresh()) detail += " 当前显示缓存，请重新检测。";
     text("remote-update-state", label); text("remote-update-detail", detail);
-    text("remote-program-summary", instance ? !instance.installed ? "尚未安装" : state === "available" ? label : currentVersion || "已安装" : "安装与更新");
+    $("remote-update-detail").hidden = !detail.trim();
+    text("remote-program-summary", instance?.installed ? state === "available" || update?.error ? label : currentVersion || "已安装" : "");
+    $("remote-program-summary").hidden = !instance?.installed;
     $("remote-program-summary").classList.toggle("is-warning", state === "available" || Boolean(update?.error));
-    if (instance && !programDisclosureInitialized) {
-      $("remote-program-details").open = !instance.installed;
-      programDisclosureInitialized = true;
-    }
     $("remote-update-state").className = state === "available" ? "is-available" : update?.error ? "is-warning" : "";
     $("remote-action-update").hidden = state !== "available";
-    $("remote-action-install").hidden = Boolean(instance?.installed || instance?.service?.installed);
+    $("remote-update-check").hidden = !instance?.installed;
     $("remote-check-update").disabled = $("remote-detect").disabled;
     $("remote-check-update").title = $("remote-detect").title;
     text("remote-check-update", detecting ? "正在检测…" : state === "available" || state === "current" ? "重新检测" : "检测新版本");
@@ -192,59 +187,99 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     if (closed) return;
     const instance = status?.instance;
     const stale = Boolean(status && (!sshReady() || status.stale || readError));
-    text("remote-ssh-state", !online ? "SSH 通道：状态待同步" : sshReady() ? "SSH 通道：已连接" : "SSH 通道：未连接");
-    $("remote-ssh-state").className = "badge" + (sshReady() ? " connected" : "");
-    text("remote-install-state", instance ? (instance.installed ? "已安装 Magpie" : "尚未安装 Magpie") : "尚未检测远端环境");
-    text("remote-observed", status?.observedAt ? (stale ? "缓存 · " : "检测于 ") + time(status.observedAt) : "检测后显示程序与服务信息");
+    const needsConnection = online && ["disconnected", "failed"].includes(row?.session.state) && !["waiting", "connecting"].includes(row.session.reconnect?.state);
+    const showInstall = fresh() && !instance.installed && !instance.service?.installed;
+    text("remote-install-state", needsConnection ? "服务器尚未连接" : instance ? (instance.installed ? "已安装 Magpie" : "尚未安装 Magpie") : "尚未检查 Magpie");
+    text("remote-observed", status?.observedAt ? (stale ? "上次检测于 " : "检测于 ") + time(status.observedAt) : "");
+    $("remote-observed").hidden = !status?.observedAt;
     $("remote-observed").classList.toggle("is-stale", stale);
-    let notice = !row ? "选择一台服务器后，检测远端 Magpie 环境。"
-      : !online ? "管理服务不可用，当前显示最后读取的状态。恢复连接后请重新检测。"
-      : !sshReady() ? "SSH 尚未连接，保留的远端状态仅供参考。请先连接服务器。"
-      : stale ? "当前显示缓存，请检测环境后再进行变更。"
-      : !instance ? "先检测环境，确认安装位置、版本与用户服务状态。" : "SSH 通道与 Magpie 用户服务各自独立；服务启停不会断开 SSH 连接。";
+    let notice = !row ? "" : !online ? "管理服务不可用，恢复后请重新检测。"
+      : !sshReady() ? (instance ? "当前显示上次检查的结果。" : "")
+      : stale ? "当前显示上次检查的结果，请重新检查 Magpie。"
+      : "";
     if (uncertain()) notice = "上次操作结果未知。请先连接并检测环境；若任务已中断且没有完成记录，核实远端进程已结束后可点击「解除待核实」。";
     text("remote-notice", notice);
     $("remote-notice").classList.toggle("is-warning", stale || uncertain());
-    $("remote-notice").hidden = Boolean(fresh() && !uncertain());
+    $("remote-notice").hidden = !notice;
     $("remote-environment").hidden = !instance;
     text("remote-platform", instance ? [instance.platform, instance.architecture, instance.container ? "容器环境" : ""].filter(Boolean).join(" / ") : "—");
     text("remote-user", instance ? [instance.username, instance.home].filter(Boolean).join(" / ") : "—");
     text("remote-binary", instance?.binary || "未找到程序");
-    text("remote-version", instance?.version ? "版本 " + instance.version : instance?.installed ? "版本待核实" : "");
     text("remote-config", instance?.configDirectory || "尚未检测到配置目录");
     const service = instance?.service;
-    text("remote-service", !instance?.systemd ? "无 systemd" : !service?.installed ? "尚未安装用户服务" : serviceLabels[service.state] ?? "待核实");
-    $("remote-service").className = "badge" + (service?.state === "running" ? " connected" : service?.state === "unknown" ? " connecting" : "");
-    text("remote-service-summary", instance ? $("remote-service").textContent : "尚未检测");
-    $("remote-service-summary").className = $("remote-service").className;
-    text("remote-web-state", instance?.web?.enabled ? "已启用 · 远端端口 " + instance.web.port : "尚未启用");
+    text("remote-service-summary", !instance ? "尚未检查" : !instance.systemd ? "服务不可管理" : !service?.installed ? "服务未启用" : serviceLabels[service.state] ?? "待核实");
+    $("remote-service-summary").classList.toggle("connected", !stale && service?.state === "running");
+    $("remote-service-summary").classList.toggle("connecting", !stale && service?.state === "unknown");
+    const observedPort = instance?.web?.enabled ? instance.web.port : null;
+    const webPort = $("remote-web-port");
+    if (fresh() && !webPortEdited && Number.isInteger(observedPort) && observedPort >= 1 && observedPort <= 65535 && webPort.value !== String(observedPort)) {
+      clearWeb();
+      webPort.value = String(observedPort);
+    }
+    text("remote-web-state", observedPort ? "检测到的端口：" + observedPort : "");
+    $("remote-web-state").hidden = !observedPort || String(observedPort) === $("remote-web-port").value;
     const detecting = Boolean(reading?.forced || reading?.queued);
+    $("remote-connect").hidden = !needsConnection;
+    $("remote-detect").hidden = needsConnection;
+    $("remote-action-install").hidden = !showInstall;
     $("remote-detect").disabled = !sshReady() || detecting || running() || submitting || recovering || pendingSubmissions.has(row?.connection.id);
+    $("remote-detect").classList.toggle("primary", sshReady() && !fresh());
     $("remote-detect").title = running() ? "远端任务执行中，请在运行日志查看进度；结束后可检测环境。" : "通过 SSH 读取远端环境并检查最新版本";
-    text("remote-detect-label", detecting ? "正在检测…" : "检测环境");
+    text("remote-detect-label", detecting ? "正在检查…" : "检查 Magpie");
     showError("remote-error", actionError || readError);
     for (const action of panelActions) {
       const button = $("remote-action-" + action), reason = actionReason(action);
       button.disabled = Boolean(reason); button.title = reason || "预览变更后确认执行";
     }
-    text("remote-action-enable_web", instance?.web?.enabled && instance.service?.installed && instance.service.scope !== "loopback" ? "重建回环配置" : "启用 Web");
-    text("remote-action-hint", baseReason() || (instance?.installed ? "每次变更前先预览，更新会保留当前配置与备份。" : "安装到当前 SSH 用户的默认位置；安装后可启用 Web 与用户服务。"));
-    text("remote-service-hint", instance && !instance.systemd ? "未检测到 systemd，无法管理用户服务；其他操作是否可用见对应按钮提示。" : instance?.installed && !instance.service?.installed ? (status.actions?.enable_web?.enabled ? "尚未安装用户服务。请先点击「启用 Web」创建并启动服务，再使用启停按钮。" : "尚未安装用户服务。" + (status.actions?.enable_web?.reason || "请先检测环境。")) : "启用 Web 会配置用户服务；服务启停不会断开 SSH 连接。");
+    text("remote-action-enable_web", instance?.web?.enabled && instance.service?.installed && instance.service.scope !== "loopback" ? "重建回环配置" : "启用网页管理");
+    const blocked = baseReason();
+    const programHint = blocked || (!instance?.installed ? actionReason("install") : "");
+    text("remote-action-hint", programHint);
+    $("remote-action-hint").hidden = !programHint;
+    const serviceHint = blocked || (!instance?.systemd ? "无法在这台服务器上管理服务，请在服务器上检查 systemd。" : !instance.installed ? "请先安装 Magpie。" : !service?.installed ? (status.actions?.enable_web?.enabled ? "启用网页管理时会启动 Magpie 服务。" : status.actions?.enable_web?.reason || "Magpie 服务尚未启用，请检查服务器。") : "");
+    text("remote-service-hint", serviceHint);
     drawUpdate(detecting);
     const reason = webReason();
-    $("remote-open-web").disabled = Boolean(reason) || webLoading;
-    $("remote-open-web").title = reason || "通过仅监听本机的 SSH 通道生成访问地址";
-    text("remote-open-web", webLoading ? "正在建立通道…" : "获取 Web 地址");
-    text("remote-web-hint", reason || "远端 Web 默认使用 3430 端口，仅通过本机回环 SSH 通道访问。");
+    const webServiceAction = reason && !blocked && !instance?.web?.tls
+      ? !instance?.web?.enabled ? "enable_web" : service?.state === "stopped" ? "start" : ""
+      : "";
+    const webServiceShortcut = webServiceAction && $("remote-action-" + webServiceAction);
+    const showServiceShortcut = Boolean(webServiceShortcut && !webServiceShortcut.disabled);
+    const primaryServiceAction = showServiceShortcut ? webServiceAction : "";
+    $("remote-action-start").hidden = primaryServiceAction === "start" || Boolean(service?.installed && service.state === "running");
+    $("remote-action-stop").hidden = Boolean(service?.installed && service.state === "stopped");
+    $("remote-action-enable_web").hidden = primaryServiceAction === "enable_web" || Boolean(instance?.web?.enabled && service?.installed && service.scope === "loopback");
+    $("remote-service-hint").hidden = !serviceHint || primaryServiceAction === "enable_web";
+    $("remote-web-service").hidden = !showServiceShortcut;
+    $("remote-web-service").dataset.action = primaryServiceAction;
+    if (showServiceShortcut) text("remote-web-service", webServiceShortcut.textContent);
+    $("remote-web-section").hidden = !instance?.installed;
+    $("remote-launch-web").hidden = showServiceShortcut;
+    $("remote-launch-web").disabled = $("remote-open-web").disabled = Boolean(reason) || webLoading;
+    text("remote-launch-web", webLoading ? "正在连接…" : "在浏览器打开");
+    const webHint = notice || showServiceShortcut ? "" : reason;
+    text("remote-web-hint", webHint);
+    $("remote-web-hint").hidden = !webHint;
     showError("remote-web-error", webError);
     const linked = status?.localProvider;
-    text("remote-local-provider-state", providerSyncing ? "正在检测并对接本机 Magpie…" : row?.connection.autoLinkLocalMagpie === false ? "已关闭自动对接，可在连接设置中开启" : !sshReady() ? linked?.mode === "direct" ? "SSH 未连接，局域网配置保留，直连状态待检测" : "SSH 未连接，本机 Magpie 对接通道已停止" : linked?.message || "SSH 连接后自动检测并对接");
+    const autoLinkDisabled = row?.connection.autoLinkLocalMagpie === false;
+    text("remote-local-provider-state", providerSyncing ? "正在检测并对接本机 Magpie…" : autoLinkDisabled ? "已关闭自动对接，可在连接设置中开启" : !sshReady() ? linked?.mode === "direct" ? "SSH 未连接，局域网配置保留，直连状态待检测" : "SSH 未连接，本机 Magpie 对接通道已停止" : linked?.message || "");
+    $("remote-local-provider-state").hidden = !$("remote-local-provider-state").textContent;
     $("remote-local-provider-state").classList.toggle("is-warning", linked?.state === "error");
+    let providerSummary = "等待对接";
+    if (autoLinkDisabled) providerSummary = "自动连接已关闭";
+    else if (!sshReady()) providerSummary = "等待连接服务器";
+    else if (providerSyncing || linked?.state === "checking") providerSummary = "检测中";
+    else if (linked?.state === "error") providerSummary = "连接异常";
+    else if (linked?.state === "disabled") providerSummary = "已停用";
+    else if (linked?.state === "ready") providerSummary = linked.mode === "direct" ? "局域网直连" : "SSH 隧道";
+    text("remote-provider-summary", providerSummary);
+    $("remote-provider-summary").classList.toggle("is-warning", providerSummary === "连接异常");
     text("remote-local-provider-mode", linked?.mode === "direct" ? "访问方式：局域网直连，无需 SSH 隧道" : linked?.mode === "ssh" ? "访问方式：SSH 隧道" : "");
     $("remote-local-provider-mode").hidden = !["direct", "ssh"].includes(linked?.mode);
     text("remote-local-provider-address", linked?.endpoint ? linked.mode === "direct" ? "局域网地址 " + linked.endpoint + " · 远端供应商 " + linked.providerId : (linked.gatewayAddress ? "局域网网关 " + linked.gatewayAddress + " → " : "") + "远端供应商 " + linked.providerId + " · " + linked.endpoint : "");
     $("remote-local-provider-address").hidden = !linked?.endpoint;
-    $("remote-local-provider-sync").disabled = !sshReady() || !linked || row?.connection.autoLinkLocalMagpie === false || providerSyncing || running() || uncertain() || submitting;
+    $("remote-local-provider-sync").disabled = !sshReady() || !linked || autoLinkDisabled || providerSyncing || running() || uncertain() || submitting;
     $("remote-local-provider-overwrite").disabled = $("remote-local-provider-sync").disabled || providerConfirming;
     $("remote-local-provider-overwrite").title = "重新检测网络，并覆盖本插件自动对接供应商的地址与密钥";
     drawBackups(); drawTaskSummary(); drawHistory(); syncPreview();
@@ -257,7 +292,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     $("remote-refresh-backups").title = reason || "读取这台服务器的配置备份，不会自动轮询列表";
     $("remote-backup-list").setAttribute("aria-busy", String(Boolean(backupsLoading)));
     text("remote-refresh-backups-label", backupsLoading ? "正在读取…" : "刷新列表");
-    let message = reason || "点击「刷新列表」读取这台服务器的备份。";
+    let message = reason;
     if (backupsLoading) message = "正在读取备份列表，已有条目会保留。";
     else if (backups) {
       const stale = !sshReady() || backupsDirty || backupError;
@@ -268,6 +303,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       else if (!backups.backups.length) message += " 安装程序后可创建配置备份。";
     }
     text("remote-backups-state", message);
+    $("remote-backups-state").hidden = !message;
     showError("remote-backups-error", backupError);
     for (const [id, item] of backupRows) {
       for (const [action, button] of [["restore", item.restore], ["delete_backup", item.remove]]) {
@@ -362,7 +398,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   function drawTaskSummary() {
     const state = operation?.state;
     const live = running() && sshReady() && !uncertain() && !readError && !status?.stale;
-    let message = "远程操作的进度与结果会记录在运行日志中。";
+    let message = "";
     if (submitting) message = "远端任务正在提交…";
     else if (submissionUncertain) message = "远端任务提交结果待核实，请检测环境。";
     else if (operation) {
@@ -374,7 +410,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       }
     }
     text("remote-task-state", message);
-    $("remote-task-summary").hidden = !operation && !submitting && !submissionUncertain;
+    $("remote-task-link").hidden = !message;
     $("remote-task-summary").classList.toggle("is-warning", uncertain() || state === "failed");
     $("remote-recover").hidden = state !== "unknown";
     $("remote-recover").disabled = !sshReady() || recovering || Boolean(reading) || submitting;
@@ -401,8 +437,9 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     const wasReady = sshReady(), wasActive = active, wasOnline = online, wasRemoteActive = remoteActive;
     if (changed) {
       generation++; dataRevision++; backupSequence++; reading = null; backupsLoading = null;
-      programDisclosureInitialized = false;
-      for (const id of ["connection-overview", "remote-program-details", "remote-environment-details", "remote-backups", "remote-maintenance-details"]) $(id).open = false;
+      webPortEdited = false;
+      $("connection-overview").open = false;
+      $("panel-remote").querySelectorAll("details[open]").forEach((details) => { details.open = false; });
       status = null; operation = null; history = []; historySignature = ""; readError = actionError = "";
       providerSyncing = false;
       uncertainSubmission = uncertainSubmissions.get(nextRow?.connection.id) ?? null;
@@ -544,20 +581,29 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     }
   }
 
-  async function openWeb() {
+  async function openWeb(inBrowser = false) {
     if (webReason() || webLoading) return;
     const input = $("remote-web-port");
-    if (!input.reportValidity()) return;
+    if (!input.validity.valid) {
+      $("remote-web-port-details").open = true;
+      input.reportValidity();
+      return;
+    }
     const id = row.connection.id, epoch = generation;
-    clearWeb(); const sequence = webSequence;
-    webLoading = true; draw();
+    if (!inBrowser) clearWeb();
+    const sequence = webSequence;
+    webLoading = true; webError = ""; draw();
     try {
+      if (inBrowser) {
+        await call("remote_web_open", { connectionId: id, port: Number(input.value) });
+        if (current(id, epoch) && sequence === webSequence) toast("已在浏览器打开");
+        return;
+      }
       const result = await call("remote_web", { connectionId: id, port: Number(input.value) });
       if (!current(id, epoch) || sequence !== webSequence || !sshReady() || webReason()) return;
       if (!result?.url || !result.address) throw new Error("未获取到 Web 地址，请检查服务状态后重试。");
       $("remote-web-url").value = result.url;
       $("remote-web-address").href = result.url;
-      text("remote-web-address", "在浏览器打开：" + result.address);
       $("remote-web-result").hidden = false;
       $("remote-web-url").focus(); $("remote-web-url").select();
     } catch (error) {
@@ -618,24 +664,20 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   $("remote-recover").addEventListener("click", () => { void recoverOperation(); });
   $("history-filter").addEventListener("change", drawHistory);
   $("remote-open-web").addEventListener("click", () => { void openWeb(); });
+  $("remote-launch-web").addEventListener("click", () => { void openWeb(true); });
+  $("remote-web-service").addEventListener("click", (event) => {
+    const action = event.currentTarget.dataset.action;
+    if (action) void openPreview(action);
+  });
   $("remote-local-provider-sync").addEventListener("click", () => { void syncLocalProvider(); });
   $("remote-local-provider-overwrite").addEventListener("click", () => { void syncLocalProvider(true); });
-  $("remote-web-port").addEventListener("input", () => { clearWeb(); draw(); });
+  $("remote-web-port").addEventListener("input", () => { webPortEdited = true; clearWeb(); draw(); });
   $("remote-web-url").addEventListener("click", (event) => event.currentTarget.select());
-  $("remote-web-address").addEventListener("click", async (event) => {
+  $("remote-web-address").addEventListener("click", (event) => {
     event.preventDefault();
-    if (!$("remote-web-url").value || webReason() || webLoading) return;
-    const id = row.connection.id, epoch = generation, sequence = webSequence;
-    webLoading = true; webError = ""; draw();
-    try {
-      await call("remote_web_open", { connectionId: id, port: Number($("remote-web-port").value) });
-    } catch (error) {
-      if (current(id, epoch) && sequence === webSequence) webError = errorMessage(error);
-    } finally {
-      if (current(id, epoch) && sequence === webSequence) { webLoading = false; draw(); }
-    }
+    if ($("remote-web-url").value) void openWeb(true);
   });
-  $("remote-hide-web").addEventListener("click", () => { clearWeb(); draw(); });
+  $("remote-hide-web").addEventListener("click", () => { clearWeb(); draw(); $("remote-open-web").focus(); });
   dialog.querySelectorAll(".remote-close-preview").forEach((button) => button.addEventListener("click", () => { closePreview(); draw(); }));
   dialog.addEventListener("close", () => { if (!dialog.open) { closePreview(); draw(); } });
   $("remote-preview-form").addEventListener("submit", (event) => { void applyPreview(event); });

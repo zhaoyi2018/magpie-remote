@@ -73,7 +73,7 @@ test("connection guidance explains verified host trust, agent and credential rec
   assert.match(connectionGuidance({ code: "HOST_KEY_UNAVAILABLE" }), /known_hosts.*权限/);
   assert.match(connectionGuidance({ code: "SSH_AUTH_FAILED" }, { authMethod: "agent" }), /ssh-add -l.*Windows.*SSH_AUTH_SOCK/);
   assert.match(connectionGuidance({ code: "KEY_UNAVAILABLE" }), /私钥路径/);
-  assert.match(connectionGuidance({ code: "CREDENTIALS_REQUIRED" }), /填写凭据并连接/);
+  assert.match(connectionGuidance({ code: "CREDENTIALS_REQUIRED" }), /输入密码或口令/);
   assert.match(connectionGuidance({ code: "SSH_TIMEOUT" }), /防火墙/);
   assert.equal(connectionGuidance({ code: "FORWARD_REJECTED", message: "fixture secret" }), "");
 });
