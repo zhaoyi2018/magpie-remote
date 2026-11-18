@@ -11,7 +11,7 @@ const stepLabels = { checking: "复核环境", executing: "执行变更", prepar
 const serviceLabels = { running: "运行中", stopped: "已停止", unavailable: "不可用", unknown: "待核实" };
 const backupFormatLabels = { encrypted: "历史加密备份", archive: "配置归档", absent: "无配置目录快照", incomplete: "备份不完整" };
 
-export function createRemoteManager({ call, confirmAction, toast }) {
+export function createRemoteManager({ call, confirmAction, toast, onOperation }) {
   const $ = (id) => document.getElementById(id);
   const dialog = $("remote-preview");
   let row = null, online = false, active = false, remoteActive = false, closed = false;
@@ -21,14 +21,15 @@ export function createRemoteManager({ call, confirmAction, toast }) {
   let readError = "", actionError = "", webError = "", submissionUncertain = false, uncertainSubmission = null;
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
-  let history = [], historySignature = "";
+  let history = [], historySignature = "", restoredOperation = null;
   let providerSyncing = false, providerConfirming = false;
   let webPortEdited = false;
 
   function drawHistory() {
     const filter = $("history-filter").value;
-    const entries = [operation, ...history].filter((item) => item && (filter === "all" || item.state === filter));
-    const signature = JSON.stringify([row?.connection.id, filter, entries]);
+    const earlier = restoredOperation && restoredOperation.id !== operation?.id ? [restoredOperation] : [];
+    const entries = [operation, ...earlier, ...history.filter((item) => item.id !== earlier[0]?.id)].filter((item) => item && (filter === "all" || item.state === filter));
+    const signature = JSON.stringify([row?.connection.id, filter, restoredOperation?.id, entries]);
     if (signature === historySignature) return;
     historySignature = signature;
     const nodes = entries.map((item) => {
@@ -40,6 +41,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       detail.append(element("strong", "", actionLabels[item.action] ?? "远程任务"), element("p", "", item.message));
       if (item.result?.backupDirectory) detail.append(element("p", "", "远端备份目录：" + item.result.backupDirectory));
       detail.append(element("p", "history-id", "任务 " + item.id));
+      if (item.id === restoredOperation?.id) detail.append(element("p", "", "上次查看的任务"));
       node.append(date, element("span", "log-level", operationLabels[item.state] ?? item.state), detail);
       return node;
     });
@@ -370,9 +372,11 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     }
   }
 
-  function observeOperation(next) {
+  function observeOperation(next, submitted = false) {
     const previous = operation;
     operation = next;
+    onOperation?.(row?.connection.id, next.id, submitted);
+    if (submitted) restoredOperation = null;
     if (["stop", "uninstall"].includes(next.action) && next.state === "succeeded" && (previous?.id !== next.id || previous?.state !== next.state)) clearWeb();
     if (backupActions.has(next.action) && ["succeeded", "failed"].includes(next.state)) {
       const key = [next.id, next.action, next.revision, next.state].join(":");
@@ -440,7 +444,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       webPortEdited = false;
       $("connection-overview").open = false;
       $("panel-remote").querySelectorAll("details[open]").forEach((details) => { details.open = false; });
-      status = null; operation = null; history = []; historySignature = ""; readError = actionError = "";
+      status = null; operation = null; restoredOperation = null; history = []; historySignature = ""; readError = actionError = "";
       providerSyncing = false;
       uncertainSubmission = uncertainSubmissions.get(nextRow?.connection.id) ?? null;
       submissionUncertain = Boolean(uncertainSubmission); submitting = false; recovering = false;
@@ -481,9 +485,10 @@ export function createRemoteManager({ call, confirmAction, toast }) {
             const wasRunning = running();
             status = result; history = result.history ?? []; readError = "";
             if (result.operation) {
-              observeOperation(result.operation);
-              if (!submissionUncertain || (operation.action === uncertainSubmission?.action && operation.revision === uncertainSubmission?.revision
-                && Number.isFinite(Date.parse(operation.createdAt)) && Date.parse(operation.createdAt) >= uncertainSubmission.startedAt)) {
+              const foundSubmission = submissionUncertain && uncertainSubmission && result.operation.action === uncertainSubmission.action
+                && result.operation.revision === uncertainSubmission.revision && Date.parse(result.operation.createdAt) >= uncertainSubmission.startedAt;
+              observeOperation(result.operation, foundSubmission);
+              if (!submissionUncertain || foundSubmission) {
                 submissionUncertain = false; uncertainSubmission = null; uncertainSubmissions.delete(id);
               }
             }
@@ -555,7 +560,7 @@ export function createRemoteManager({ call, confirmAction, toast }) {
       if (!result || (result.connectionId && result.connectionId !== id)) throw new Error("未能核实远端任务，请检测环境确认结果。");
       uncertainSubmissions.delete(id);
       if (!current(id, epoch)) return;
-      observeOperation(result); submissionUncertain = false; uncertainSubmission = null;
+      observeOperation(result, true); submissionUncertain = false; uncertainSubmission = null;
       closePreview(); toast("远端任务已提交，可在运行日志查看进度与结果。");
     } catch (error) {
       const uncertainResult = ["REQUEST_TIMEOUT", "SERVICE_UNREACHABLE", "INVALID_RESPONSE", "MANAGEMENT_EXPIRED"].includes(error?.code) || !error?.code;
@@ -696,5 +701,15 @@ export function createRemoteManager({ call, confirmAction, toast }) {
     closed = true; generation++; backupSequence++; reading = null; backupsLoading = null;
     document.removeEventListener("visibilitychange", visibilityChanged);
   }
-  return { render, refresh, suspend, resume, close, hasUncertain: () => pendingSubmissions.size > 0 || uncertainSubmissions.size > 0 || operation?.state === "unknown" };
+  async function restoreOperation(connectionId, operationId) {
+    const epoch = generation;
+    try {
+      const result = await call("remote_operation", { connectionId, operationId });
+      if (current(connectionId, epoch) && result?.id === operationId) {
+        restoredOperation = result;
+        draw();
+      }
+    } catch { return; }
+  }
+  return { render, refresh, restoreOperation, suspend, resume, close, hasUncertain: () => pendingSubmissions.size > 0 || uncertainSubmissions.size > 0 || operation?.state === "unknown" };
 }

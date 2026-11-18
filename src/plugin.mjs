@@ -2,7 +2,8 @@ import { join } from "node:path";
 import { identifier, pluginOptions, validateForward, validateProfile } from "./config.mjs";
 import { ProfileStore, assertProfileRevision, profileRevision, publicProfile } from "./store.mjs";
 import { SessionManager } from "./sessions.mjs";
-import { startManagementServer, publishEndpoint, loadRecoveryKey } from "./web-server.mjs";
+import { startDesktopRecovery, startManagementServer, publishEndpoint, loadRecoveryKey } from "./web-server.mjs";
+import { managementView } from "./management-view.mjs";
 import { fileURLToPath } from "node:url";
 import { readSSHConfig } from "./ssh-config.mjs";
 import { OperationError } from "./errors.mjs";
@@ -118,10 +119,10 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       args: args({ connectionId: idSchema, overwrite: { type: "boolean", default: false, description: "Explicit one-time replacement of the recorded automatic provider's endpoints and key after user confirmation" } }, ["connectionId"]),
       execute({ connectionId, overwrite = false }, ctx = {}) {
         if (typeof overwrite !== "boolean") throw new Error("overwrite 必须是布尔值");
-        return serial(connectionId, () => {
-          if (!providerLink) throw new OperationError("PROVIDER_LINK_UNAVAILABLE", "本机 Magpie 自动对接尚未启用");
-          return providerLink.sync(connectionId, { signal: ctx.abort, overwrite });
-        });
+        identifier(connectionId);
+        assertMutable();
+        if (!providerLink) throw new OperationError("PROVIDER_LINK_UNAVAILABLE", "本机 Magpie 自动对接尚未启用");
+        return providerLink.sync(connectionId, { signal: ctx.abort, overwrite, commit: (action) => serial(connectionId, action) });
       },
     },
     remote_preview: {
@@ -395,21 +396,30 @@ export async function createPlugin(input = {}, options, { launcherFile } = {}) {
   providerLink.start((connectionId) => tools.remote_provider_sync.execute({ connectionId }));
   sessions.onConnected = (id) => providerLink.schedule(id);
   const hooks = {};
-  let web;
+  let web, desktop, view;
   if (config.webUI) {
     try {
       const recovery = await loadRecoveryKey(join(config.dataDirectory, "management-recovery.key"));
-      web = await startManagementServer({ tools, port: config.uiPort, recovery });
-      const file = fileURLToPath(new URL("../page/.runtime/endpoint.js", import.meta.url));
-      const unpublish = await publishEndpoint(file, web.url, recovery);
+      view = managementView(join(config.dataDirectory, "management-view.json"));
+      web = await startManagementServer({ tools, port: config.uiPort, recovery, view });
       const close = web.close;
-      web.close = async () => { unpublish(); await close(); };
+      web.close = async () => { await close(); await view.close(); await desktop?.close(); };
       if (launcherFile) {
-        const unpublishLauncher = await publishDesktopLauncher(launcherFile, web.url);
+        try {
+          desktop = await startDesktopRecovery({ file: join(config.dataDirectory, "desktop-recovery-port"), endpoint: web.url, recovery });
+        } catch {
+          console.warn("SSH 连接：桌面恢复服务不可用，管理页断开后可从 Magpie 侧栏重新进入。");
+        }
+        const unpublishLauncher = await publishDesktopLauncher(launcherFile, web.url, { desktop: true, origin: desktop?.origin, recovery });
         const closePublished = web.close;
         web.close = async () => { unpublishLauncher(); await closePublished(); };
       }
+      const file = fileURLToPath(new URL("../page/.runtime/endpoint.js", import.meta.url));
+      const unpublish = await publishEndpoint(file, web.url, recovery);
+      const closePublished = web.close;
+      web.close = async () => { unpublish(); await closePublished(); };
     } catch (error) {
+      console.warn("SSH 连接：管理入口启动或发布失败（" + (/^[A-Z][A-Z0-9_]+$/.test(error.code ?? "") ? error.code : "SETUP_FAILED") + "）。");
       await providerLink.close();
       await sessions.close();
       await remote.close();

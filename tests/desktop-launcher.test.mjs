@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHmac, createPublicKey, randomBytes, verify } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { desktopPlaceholder, publishDesktopLauncher } from "../src/desktop-launcher.mjs";
 import { createHostSandbox } from "../scripts/host-sandbox.mjs";
 import { temporary } from "./helpers.mjs";
+import { loadRecoveryKey, startDesktopRecovery } from "../src/web-server.mjs";
 
 const endpoint = "http://127.0.0.1:12345/" + "a".repeat(43) + "/";
 
@@ -35,6 +37,29 @@ test("native entry publication refuses external URLs and HTML injection without 
     await assert.rejects(publishDesktopLauncher(file, value), /无效的桌面管理地址/);
     assert.equal(await readFile(file, "utf8"), "existing entry");
   }
+});
+
+test("desktop discovery preserves its port, requires proof and only signs the current management address", async (t) => {
+  const directory = await temporary(t);
+  const file = join(directory, "recovery-port");
+  const recovery = await loadRecoveryKey(join(directory, "recovery-key"));
+  const first = await startDesktopRecovery({ file, endpoint, recovery });
+  await first.close();
+  const replacement = endpoint.replace(":12345/", ":12346/");
+  const service = await startDesktopRecovery({ file, endpoint: replacement, recovery });
+  t.after(() => service.close());
+  assert.equal(service.origin, first.origin);
+  const challenge = randomBytes(32).toString("base64url");
+  const proof = createHmac("sha256", Buffer.from(recovery.secret, "base64url")).update(service.origin + "\n" + challenge).digest("base64url");
+  const path = service.origin + "/recovery/endpoint/";
+  assert.equal((await fetch(path + "x".repeat(43) + "/" + challenge)).status, 404);
+  assert.equal((await fetch(path + proof + "/" + challenge, { headers: { Origin: "https://unrelated.example" } })).status, 403);
+  const response = await fetch(path + proof + "/" + challenge, { headers: { Origin: "null" } });
+  assert.equal(response.status, 200);
+  const { message, signature } = await response.json();
+  const publicKey = createPublicKey({ key: Buffer.from(recovery.publicKey, "base64url"), type: "spki", format: "der" });
+  assert.ok(verify("sha256", Buffer.from(message), { key: publicKey, dsaEncoding: "ieee-p1363" }, Buffer.from(signature, "base64url")));
+  assert.deepEqual(JSON.parse(message), { version: 1, purpose: "endpoint", origin: service.origin, challenge, url: replacement });
 });
 
 test("a real plugin restart publishes its new authenticated endpoint and removes the stopped host credential", async (t) => {

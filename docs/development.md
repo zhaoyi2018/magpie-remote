@@ -20,7 +20,7 @@ npm test
 
 `npm run prepare:desktop` 在 `.local/desktop-plugin` 生成本机安装入口，保持源码和发布包不含运行地址。包名使用 `migpie-remote-desktop`，使 Magpie 为兼容入口分配独立页面标识，避免替换安装后复用原插件的失败页面缓存。它导入当前 `src/plugin.mjs`，通过内部第三参数 `launcherFile` 指定生成页面；不增加用户可传入的插件选项。管理服务启动后，`publishDesktopLauncher` 校验回环认证 URL、原子发布 HTML；退出时仅清理自己发布的内容，恢复占位文件以供 Magpie 在下次启动后台之前发现页面。安装及替换步骤见[操作指南](usage.md)。
 
-`npm run test:ui:desktop` 拒绝所有宿主子资源请求，验证直接入口仍能完成沙箱握手、显示在线状态、加载完整样式与图标并打开新建连接弹窗。`tests/desktop-launcher.test.mjs` 覆盖非法地址拒绝、旧宿主清理保护、真实插件关闭和重启后的地址更新；`tests/publish-file.test.mjs` 覆盖 Windows 临时文件锁重试，以及持续失败时旧入口和临时凭据的处理。该浏览器测试需结合原生桌面验收，不能单独证明某个 WebView 版本可用。
+`npm run test:ui:desktop` 在 Windows CI 的 Edge 中拒绝所有宿主子资源请求，验证直接入口、启动握手、跨端口恢复以及按任务 ID 恢复视图。原生验收应另记 Magpie 和 WebView2 版本，覆盖冷启动、切换侧栏后重开、插件宿主重载与旧地址失效。诊断命令 `npm run open:ui -- --check` 只检查回环后台，不打开浏览器。运行日志与诊断均不输出回环认证地址。
 
 `check` 同时检查插件卡片和页面使用同一个 SVG、图标解码后的内容不超过 1 MB、`package.json` 不超过 GitHub 插件发现读取的 1 MB 上限。更新 `page/icon.png` 或 `page/icon-dark.png` 后运行 `npm run icons`；生成器会更新 `page/icon.svg` 和 `package.json` 中的 `magpie.icon`，无需手工粘贴图标数据。
 

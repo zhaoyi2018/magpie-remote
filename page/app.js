@@ -11,8 +11,11 @@ import { createRemoteManager } from "./remote.js";
   let token = base.pathname.split("/")[1];
   const launcher = launcherURL(location.hash) ?? launcherURL(location.search);
   const fragment = new URLSearchParams(location.hash.slice(1));
+  const desktop = fragment.has("desktop");
+  const desktopOrigin = recoveryOrigin(fragment.get("desktop"));
   const recovery = { secret: fragment.get("recovery"), publicKey: fragment.get("key") };
-  const canDiscover = launcher && /^[A-Za-z0-9_-]{43}$/.test(recovery.secret ?? "") && /^[A-Za-z0-9_-]+$/.test(recovery.publicKey ?? "");
+  const canDiscover = (launcher || desktopOrigin) && /^[A-Za-z0-9_-]{43}$/.test(recovery.secret ?? "") && /^[A-Za-z0-9_-]+$/.test(recovery.publicKey ?? "");
+  let viewEnabled = false, viewLoaded = false, viewedOperation, savedView = "", viewWrite;
   let recoveryFrame, frameAuthentication, discoveryRequest, discoveryResolve;
   let refreshing, discovering;
   let pendingCalls = 0, transportFailures = 0;
@@ -125,8 +128,19 @@ import { createRemoteManager } from "./remote.js";
       return (await request("api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method, args, ...(credentials && { credentials }) }) })).result;
     } finally { pendingCalls--; }
   }
+  function saveView() {
+    if (!viewEnabled || !state.online || !state.selected || viewWrite) return viewWrite;
+    const operationId = viewedOperation?.connectionId === state.selected ? viewedOperation.operationId : undefined;
+    const body = JSON.stringify({ connectionId: state.selected, tab: state.tab, ...(operationId && { operationId }) });
+    if (body === savedView) return;
+    viewWrite = request("api/view", { method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true }, 3000)
+      .then(() => { savedView = body; })
+      .catch(() => {})
+      .finally(() => { viewWrite = null; if (savedView === body) void saveView(); });
+    return viewWrite;
+  }
   function startDiscoveryFrame() {
-    if (!canDiscover || recoveryFrame) return;
+    if (!canDiscover || desktopOrigin || recoveryFrame) return;
     const source = new URL("/recovery-frame/index.html", base);
     const frame = document.createElement("iframe");
     recoveryFrame = frame;
@@ -194,11 +208,11 @@ import { createRemoteManager } from "./remote.js";
   async function discoverEndpoint() {
     if (discovering) return discovering;
     startDiscoveryFrame();
-    if (!recoveryFrame) return null;
+    if (!canDiscover || (!desktopOrigin && !recoveryFrame)) return null;
     const attempt = (async () => {
       const authentication = frameAuthentication;
-      const validFrame = await authentication;
-      const candidate = await new Promise((resolve) => {
+      const validFrame = !desktopOrigin && await authentication;
+      const candidate = desktopOrigin ?? await new Promise((resolve) => {
         if (!validFrame || authentication !== frameAuthentication) return resolve(null);
         discoveryRequest = randomRecoveryValue(24);
         const timer = setTimeout(() => finish(null), 4000);
@@ -213,7 +227,7 @@ import { createRemoteManager } from "./remote.js";
       const endpointChallenge = randomRecoveryValue();
       const proof = await recoveryProof(recovery.secret, candidate, endpointChallenge);
       const result = await recoveryFetch(candidate, `/recovery/endpoint/${proof}/${endpointChallenge}`);
-      return await signedRecovery(recovery, candidate, endpointChallenge, result, "endpoint");
+      return await signedRecovery(recovery, candidate, endpointChallenge, result, "endpoint", { desktop: Boolean(desktopOrigin) });
     })();
     discovering = attempt;
     try { return await attempt; } catch { return null; } finally { if (discovering === attempt) discovering = null; }
@@ -239,11 +253,24 @@ import { createRemoteManager } from "./remote.js";
         $("storage-warning").textContent = snapshot.storageWarning?.message ?? "";
         $("storage-warning").hidden = !snapshot.storageWarning;
         remoteStorage = snapshot.remoteStorage ?? null;
+        if (!viewLoaded) {
+          viewLoaded = true; viewEnabled = Object.hasOwn(snapshot, "view");
+          const view = snapshot.view;
+          if (view && tabs.includes(view.tab) && state.rows.some((row) => row.connection.id === view.connectionId)) {
+            savedView = JSON.stringify(view);
+            viewedOperation = view;
+            state.selected = view.connectionId;
+            setTab(view.tab);
+            if (view.operationId) void remote.restoreOperation(view.connectionId, view.operationId);
+          }
+        }
         reconcileSelection();
         $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
         $("service-error").hidden = true;
         if (pageDetached) {
           if (!pendingCalls && !state.busy.size && !document.querySelector("dialog[open]") && !remote.hasUncertain() && !document.hidden) {
+            while (viewWrite) await viewWrite;
+            await saveView();
             const target = new URL(base.href); target.hash = location.hash;
             navigatingRecovery = true; location.replace(target.href); return;
           }
@@ -260,10 +287,13 @@ import { createRemoteManager } from "./remote.js";
         serviceFailure = reconnecting
           ? { label: "正在重新连接", message: "暂时无法读取状态，正在自动重试。", action: "retry" }
           : managementFailure(error);
-        if (canDiscover && transport && !reconnecting) serviceFailure.message = "暂时无法连接管理服务，当前显示最后读取的状态。正在自动重试；仍不可用时请重新打开页面或重新加载插件。";
+        if (desktop && transport && !reconnecting) {
+          const guidance = canDiscover ? "正在查找新地址，也可点击「重新连接」。仍不可用时，" : "";
+          serviceFailure = { ...serviceFailure, action: "retry", message: "暂时无法连接管理服务。" + guidance + "请从 Magpie 侧栏重新进入「SSH 连接」。" };
+        } else if (canDiscover && transport && !reconnecting) serviceFailure.message = "暂时无法连接管理服务，当前显示最后读取的状态。正在自动重试；仍不可用时请重新打开页面或重新加载插件。";
         $("service-error").hidden = reconnecting;
         $("service-error-message").textContent = serviceFailure.message;
-        $("reopen").textContent = serviceFailure.action === "retry" ? "重试读取" : "重新打开";
+        $("reopen").textContent = desktopOrigin && canDiscover && transport ? "重新连接" : serviceFailure.action === "retry" ? "重试读取" : "重新打开";
         $("last-updated").textContent = "当前显示最后读取的状态";
         $("service-state").textContent = serviceFailure.label;
         $("service-state").className = "service-state is-offline";
@@ -308,6 +338,7 @@ import { createRemoteManager } from "./remote.js";
     return failure;
   }
   function render() {
+    void saveView();
     $("remote-storage-warning").hidden = remoteStorage?.state !== "blocked";
     $("remote-storage-message").textContent = remoteStorage?.message ?? "";
     $("remote-storage-file").textContent = remoteStorage?.file ? "记录文件：" + remoteStorage.file : "";
@@ -577,6 +608,7 @@ import { createRemoteManager } from "./remote.js";
     }
     remote.render(selected() ?? null, { online: state.online, active: tab === "remote" });
     if (tab === "logs") void refreshLogs();
+    void saveView();
     if (focus) $("tab-" + tab).focus();
   }
   function hideMenu(restoreFocus = false) {
@@ -923,7 +955,11 @@ import { createRemoteManager } from "./remote.js";
   $("delete-connection").addEventListener("click", () => void deleteConnection());
   $("import-config").addEventListener("click", () => { $("import-dialog").showModal(); if (!importPreview) void previewImport(); });
   const backups = createBackupManager({ call, refresh, toast, confirmAction });
-  const remote = createRemoteManager({ call, confirmAction, toast });
+  const remote = createRemoteManager({ call, confirmAction, toast, onOperation(connectionId, operationId, submitted) {
+    if (connectionId !== state.selected || (!submitted && viewedOperation?.connectionId === connectionId && viewedOperation.operationId)) return;
+    viewedOperation = { connectionId, operationId };
+    void saveView();
+  } });
   $("open-backups").addEventListener("click", () => backups.open());
   $("preview-import").addEventListener("click", () => void previewImport());
   $("import-path").addEventListener("input", invalidatePreview);
@@ -934,6 +970,7 @@ import { createRemoteManager } from "./remote.js";
   addEventListener("resize", () => hideMenu());
   addEventListener("scroll", () => hideMenu(), true);
   $("reopen").addEventListener("click", () => {
+    if (desktop) { nextDiscovery = 0; void refresh(true); return; }
     if (newEndpoint || pageDetached || serviceFailure?.action === "retry") { void refresh(true); return; }
     if (launcher) {
       if (document.querySelector("dialog[open]") || pendingCalls || remote.hasUncertain()) {

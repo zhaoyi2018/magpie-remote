@@ -25,6 +25,86 @@ const assets = new Map([
   ["icon.svg", ["icon.svg", "image/svg+xml"]],
 ]);
 
+async function listenLoopback(server, port) {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+  server.unref();
+  return {
+    origin: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }),
+  };
+}
+
+function recoveryResponse(recovery, endpoint) {
+  if (!recovery) return () => false;
+  const key = createPrivateKey({ key: Buffer.from(recovery.privateKey, "base64url"), type: "pkcs8", format: "der" });
+  return (request, response, path, origin) => {
+    if (request.method !== "GET") return false;
+    const identity = /^\/recovery\/identity\/([A-Za-z0-9_-]{43})$/.exec(path);
+    const discovery = /^\/recovery\/endpoint\/([A-Za-z0-9_-]{43})\/([A-Za-z0-9_-]{43})$/.exec(path);
+    if (!identity && !discovery) return false;
+    const challenge = identity ? identity[1] : discovery[2];
+    if (discovery) {
+      const expected = createHmac("sha256", Buffer.from(recovery.secret, "base64url")).update(origin + "\n" + challenge).digest("base64url");
+      if (!secureEqual(discovery[1], expected)) {
+        json(response, 404, { error: "文件不存在" });
+        return true;
+      }
+    }
+    const message = JSON.stringify({ version: 1, purpose: identity ? "identity" : "endpoint", origin, challenge, ...(discovery && { url: endpoint(origin) }) });
+    const signature = sign("sha256", Buffer.from(message), { key, dsaEncoding: "ieee-p1363" }).toString("base64url");
+    json(response, 200, { message, signature });
+    return true;
+  };
+}
+
+export async function startDesktopRecovery({ file, endpoint, recovery }) {
+  let port = 0;
+  try {
+    const metadata = await lstat(file);
+    if (metadata.isFile() && metadata.size <= 8) {
+      const saved = (await readFile(file, "utf8")).trim();
+      if (/^[1-9][0-9]{0,4}$/.test(saved) && Number(saved) <= 65535) port = Number(saved);
+    }
+  } catch (error) { if (error.code !== "ENOENT") throw error; }
+  const respond = recoveryResponse(recovery, () => endpoint);
+  const bind = async (requested) => {
+    let origin;
+    const server = createServer((request, response) => {
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Referrer-Policy", "no-referrer");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      const requestOrigin = request.headers.origin;
+      if (request.headers.host !== new URL(origin).host || (requestOrigin && requestOrigin !== "null" && requestOrigin !== origin)) {
+        return json(response, 403, { error: "不接受该页面来源" });
+      }
+      if (requestOrigin) {
+        response.setHeader("Access-Control-Allow-Origin", requestOrigin);
+        response.setHeader("Vary", "Origin");
+      }
+      if (!respond(request, response, request.url, origin)) json(response, 404, { error: "文件不存在" });
+    });
+    server.requestTimeout = 5000;
+    const bound = await listenLoopback(server, requested);
+    origin = bound.origin;
+    return bound;
+  };
+  let bound;
+  try { bound = await bind(port); }
+  catch (error) {
+    if (error.code !== "EADDRINUSE" || !port) throw error;
+    bound = await bind(0);
+    console.warn("SSH 连接：桌面恢复端口已被占用，请从 Magpie 侧栏重新打开之前的页面。");
+  }
+  try {
+    const assigned = new URL(bound.origin).port;
+    if (Number(assigned) !== port) await publishFile(file, assigned + "\n");
+    return bound;
+  } catch (error) { await bound.close(); throw error; }
+}
+
 function secureEqual(left, right) {
   const a = Buffer.from(left ?? "");
   const b = Buffer.from(right);
@@ -84,10 +164,10 @@ export async function loadRecoveryKey(file) {
   return readKey();
 }
 
-export async function startManagementServer({ tools, port = 0, recovery, openBrowser = openWebBrowser }) {
+export async function startManagementServer({ tools, port = 0, recovery, view, openBrowser = openWebBrowser }) {
   const token = randomBytes(32).toString("base64url");
   const prefix = `/${token}/`;
-  const signingKey = recovery && createPrivateKey({ key: Buffer.from(recovery.privateKey, "base64url"), type: "pkcs8", format: "der" });
+  const respondRecovery = recoveryResponse(recovery, (address) => address + prefix);
   const pageDirectory = new URL("../page/", import.meta.url);
   let origin;
   const server = createServer((request, response) => {
@@ -123,18 +203,7 @@ export async function startManagementServer({ tools, port = 0, recovery, openBro
       const policyMeta = policy.replaceAll("'", "&#39;");
       return response.end(`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content='${policyMeta}'><script nonce="${nonce}">${script}</script></head><body></body></html>`);
     }
-    const identity = /^\/recovery\/identity\/([A-Za-z0-9_-]{43})$/.exec(path);
-    const discovery = /^\/recovery\/endpoint\/([A-Za-z0-9_-]{43})\/([A-Za-z0-9_-]{43})$/.exec(path);
-    if ((identity || discovery) && signingKey && request.method === "GET") {
-      const challenge = identity ? identity[1] : discovery[2];
-      if (discovery) {
-        const expected = createHmac("sha256", Buffer.from(recovery.secret, "base64url")).update(origin + "\n" + challenge).digest("base64url");
-        if (!secureEqual(discovery[1], expected)) return json(response, 404, { error: "文件不存在" });
-      }
-      const message = JSON.stringify({ version: 1, purpose: identity ? "identity" : "endpoint", origin, challenge, ...(discovery && { url: `${origin}${prefix}` }) });
-      const signature = sign("sha256", Buffer.from(message), { key: signingKey, dsaEncoding: "ieee-p1363" }).toString("base64url");
-      return json(response, 200, { message, signature });
-    }
+    if (respondRecovery(request, response, path, origin)) return;
     if (request.method === "OPTIONS" && (path.startsWith(prefix + "api/") || /^\/[A-Za-z0-9_-]{43}\/api\//.test(path))) {
       response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       response.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
@@ -147,7 +216,13 @@ export async function startManagementServer({ tools, port = 0, recovery, openBro
     if (relative.startsWith("api/")) {
       if (!secureEqual(request.headers.authorization, `Bearer ${token}`)) return json(response, 401, { error: "管理页面认证已过期，请重新打开页面", code: "MANAGEMENT_EXPIRED" });
       if (request.method === "GET" && relative === "api/snapshot") {
-        return json(response, 200, await tools.connections.execute({ includeStatus: true, includeLogs: false }));
+        const snapshot = await tools.connections.execute({ includeStatus: true, includeLogs: false });
+        return json(response, 200, view ? { ...snapshot, view: await view.read() } : snapshot);
+      }
+      if (view && request.method === "POST" && relative === "api/view") {
+        if (!request.headers["content-type"]?.startsWith("application/json")) return json(response, 415, { error: "需要 JSON 请求" });
+        await view.save(await readJSON(request));
+        return json(response, 200, { saved: true });
       }
       if (request.method !== "POST" || relative !== "api/call") return json(response, 405, { error: "请求方法不支持" });
       if (!request.headers["content-type"]?.startsWith("application/json")) return json(response, 415, { error: "需要 JSON 请求" });
@@ -194,16 +269,9 @@ export async function startManagementServer({ tools, port = 0, recovery, openBro
     response.end(request.method === "HEAD" ? undefined : data);
   }
   server.requestTimeout = 55000;
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", resolve);
-  });
-  origin = `http://127.0.0.1:${server.address().port}`;
-  server.unref();
-  return {
-    url: `${origin}${prefix}`, token,
-    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }),
-  };
+  const bound = await listenLoopback(server, port);
+  origin = bound.origin;
+  return { url: `${origin}${prefix}`, token, close: bound.close };
 }
 
 export async function publishEndpoint(file, url, recovery) {

@@ -36,7 +36,7 @@ export function recoveryOrigin(value) {
   return null;
 }
 
-export async function signedRecovery(recovery, origin, challenge, result, purpose) {
+export async function signedRecovery(recovery, origin, challenge, result, purpose, { desktop = false } = {}) {
   try {
     const publicKey = await crypto.subtle.importKey("spki", decode(recovery.publicKey), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
     if (!result || typeof result.message !== "string" || result.message.length > 512
@@ -45,7 +45,7 @@ export async function signedRecovery(recovery, origin, challenge, result, purpos
     if (data.version !== 1 || data.purpose !== purpose || data.challenge !== challenge || data.origin !== origin) return null;
     if (purpose === "identity") return true;
     const target = managementURL(data.url);
-    return target?.origin === origin ? target : null;
+    return target && (desktop || target.origin === origin) ? target : null;
   } catch { return null; }
 }
 

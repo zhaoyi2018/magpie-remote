@@ -40,9 +40,29 @@ test("provider overwrite requires a boolean and stays local to the explicitly re
   await tools.remote_provider_sync.execute({ connectionId: "server" });
   await tools.remote_provider_sync.execute({ connectionId: "server", overwrite: true }, { abort: controller.signal });
   await tools.remote_provider_sync.execute({ connectionId: "server" });
-  assert.deepEqual(calls, [["server", { signal: undefined, overwrite: false }], ["server", { signal: controller.signal, overwrite: true }], ["server", { signal: undefined, overwrite: false }]]);
+  assert.ok(calls.every(([, { commit }]) => typeof commit === "function"));
+  assert.deepEqual(calls.map(([id, { signal, overwrite }]) => [id, signal, overwrite]),
+    [["server", undefined, false], ["server", controller.signal, true], ["server", undefined, false]]);
   for (const overwrite of ["true", 1, null, {}]) assert.throws(() => tools.remote_provider_sync.execute({ connectionId: "server", overwrite }), /布尔值/);
   assert.deepEqual(tools.remote_provider_sync.args.required, ["connectionId"]);
+});
+
+test("a slow provider probe leaves the connection queue free until its commit", async () => {
+  const entered = deferred(), release = deferred();
+  const events = [];
+  const tools = createTools({}, { addForward() { events.push("manual"); } }, {}, {
+    async sync(_id, { commit }) {
+      entered.resolve();
+      await release.promise;
+      await commit(() => events.push("provider"));
+    },
+  });
+  const syncing = tools.remote_provider_sync.execute({ connectionId: "server" });
+  await entered.promise;
+  const forwarding = tools.forward_add.execute({ connectionId: "server", forward: {} });
+  try { assert.equal(await Promise.race([forwarding.then(() => "done"), new Promise((resolve) => setImmediate(() => resolve("queued")))]), "done"); }
+  finally { release.resolve(); await Promise.all([syncing, forwarding]); }
+  assert.deepEqual(events, ["manual", "provider"]);
 });
 
 test("configuration restore waits for an accepted remote submission and refuses to disconnect its session", async () => {

@@ -95,6 +95,19 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  desktop-ui:
+    name: Windows desktop entry regressions (Edge fixtures)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts --omit=optional
+      - run: npm run test:ui:desktop
+
 # Real Linux lifecycle acceptance deliberately has no hosted-runner shortcut.
 # Run the dedicated-account entry point described in docs/linux-acceptance.md,
 # then supply its JSON to release-check.mjs --strict alongside an actual host.

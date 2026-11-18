@@ -89,7 +89,7 @@ export class SessionManager {
       host: profile.host, port: profile.port, username: profile.username,
       logs: previous?.logs ?? [],
       lastConnectedAt: previous?.connectedAt ?? previous?.lastConnectedAt,
-      intent, established: false,
+      intent, established: false, lifetime: new AbortController(),
     };
     this.#sessions.set(profile.id, session);
     this.#log(session, "info", "正在建立 SSH 连接 " + profile.username + "@" + profile.host + ":" + profile.port);
@@ -197,6 +197,11 @@ export class SessionManager {
     } finally {
       signal?.removeEventListener("abort", cancel);
     }
+  }
+
+  connectionSignal(id) {
+    const session = this.#sessions.get(id);
+    return session?.state === "connected" ? session.lifetime.signal : undefined;
   }
 
   execute(id, command, options) {
@@ -538,6 +543,7 @@ export class SessionManager {
 
   #releaseAll(session) {
     if (session.cleanup) return session.cleanup;
+    session.lifetime.abort();
     const forwards = [...session.forwards.values()];
     session.forwards.clear();
     const error = new Error("SSH 连接已关闭");

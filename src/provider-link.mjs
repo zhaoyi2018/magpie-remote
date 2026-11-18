@@ -8,6 +8,7 @@ import { isLANAddress, localGateway, magpieJSON, magpieSignIn, startProviderRela
 import { detectDirectGateway } from "./lan-detection.mjs";
 import { remoteProviderAPI } from "./remote-http.mjs";
 import { providerSaveRequest } from "./provider-save.mjs";
+import { profileRevision } from "./store.mjs";
 
 const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const forwardId = "magpie-local-provider";
@@ -17,6 +18,7 @@ export class ProviderLink {
   #records = new Map();
   #states = new Map();
   #tasks = new Map();
+  #syncing = new Map();
   #ready;
   #relay;
   #relayReady;
@@ -152,19 +154,34 @@ export class ProviderLink {
     return task;
   }
 
-  async sync(id, { signal, overwrite = false } = {}) {
+  async sync(id, { signal, overwrite = false, commit = (action) => action() } = {}) {
     if (typeof overwrite !== "boolean") throw new Error("overwrite 必须是布尔值");
+    const task = (this.#syncing.get(id) ?? Promise.resolve()).catch(() => {}).then(() => this.#sync(id, { signal, overwrite, commit }));
+    this.#syncing.set(id, task);
+    try { return await task; }
+    finally { if (this.#syncing.get(id) === task) this.#syncing.delete(id); }
+  }
+
+  async #sync(id, { signal, overwrite, commit }) {
     if (this.#closed) return this.status(id);
-    const abort = signal ? AbortSignal.any([signal, this.#shutdown.signal]) : this.#shutdown.signal;
+    let abort = signal ? AbortSignal.any([signal, this.#shutdown.signal]) : this.#shutdown.signal;
     let directVerified = false;
     try {
+      if (abort.aborted) return this.status(id);
       await this.#ready;
       const profile = await this.store.get(id);
+      const revision = profileRevision(profile);
       if (profile.autoLinkLocalMagpie === false) {
-        await this.#stopManagedForward(id);
-        return this.#state(id, "disabled", "已关闭自动对接本机 Magpie");
+        return await commit(async () => {
+          if (abort.aborted || profileRevision(await this.store.get(id)) !== revision) return this.status(id);
+          await this.#stopManagedForward(id);
+          return this.#state(id, "disabled", "已关闭自动对接本机 Magpie");
+        });
       }
-      if (this.sessions.status(id).state !== "connected") return this.status(id);
+      const connection = this.sessions.connectionSignal(id);
+      if (!connection) return this.status(id);
+      abort = AbortSignal.any([abort, connection]);
+      const task = digest(await this.remote.operation?.(id) ?? null);
       await this.remote.assertIdle(id);
       const instance = await this.remote.inspect(id, { signal: abort });
       if (instance.locked) return this.#state(id, "waiting", "等待远端管理操作结束后自动对接本机 Magpie");
@@ -183,94 +200,118 @@ export class ProviderLink {
       if (!gateways.length) throw new OperationError("LOCAL_MAGPIE_UNAVAILABLE", "无法通过局域网地址与共享网关密钥访问本机 Magpie，请检查局域网共享、网关端口及密钥；不会改用 localhost");
       const detection = await this.detect(this.sessions, id, gateways, { signal: abort });
       directVerified = Boolean(detection.gateway);
-      if (abort.aborted || this.sessions.status(id, { includeLogs: false }).state !== "connected") return this.status(id);
-      const local = detection.gateway ?? gateways[0];
-      const api = await this.#api(id, detection, abort);
-      const providers = (await api("/api/providers"))?.providers;
-      if (!Array.isArray(providers)) throw new OperationError("PROVIDER_LINK_API", "远端供应商列表结构不受支持");
-      const providerId = "local-magpie-" + this.#identity;
-      if (detection.gateway && !providers.some((item) => item.id === providerId)) {
-        const manual = providers.find((item) => item.id !== providerId && item.preset === "remote-magpie" && rootOf(item) === local.url);
-        if (manual) {
-          await this.#stopManagedForward(id);
-          const disabled = manual.off || manual.key?.set === false;
-          return this.#state(id, disabled ? "disabled" : "ready", disabled ? "已有局域网供应商已停用或清除密钥，保留当前设置" : "已复用现有局域网供应商，无需 SSH 隧道", { mode: "direct", providerId: manual.id, endpoint: local.url, gatewayAddress: local.url, localAddress: local.url });
+      return await commit(async () => {
+        if (abort.aborted) return this.status(id);
+        if (profileRevision(await this.store.get(id)) !== revision || digest(await this.remote.operation?.(id) ?? null) !== task) {
+          return this.#state(id, "waiting", "连接配置或远端任务已变化，正在等待重新检测");
         }
-      }
-      // Existing explicit reverse forwards identify a manually added local gateway
-      // without inferring identity from a provider's display name or a LAN IP.
-      const forwards = this.sessions.status(id, { includeLogs: false }).forwards;
-      for (const forward of detection.gateway ? [] : forwards) {
-        if (forward.direction !== "s2c" || forward.state !== "listening" || forward.bindHost !== "127.0.0.1" || forward.targetHost !== local.host || forward.targetPort !== local.port) continue;
-        const existing = providers.find((item) => item.preset === "remote-magpie" && rootOf(item) === "http://127.0.0.1:" + forward.bindPort);
-        if (existing) return this.#state(id, existing.off ? "disabled" : "ready", existing.off ? "远端已存在本机 Magpie 供应商，但已停用；保留当前设置" : "远端已配置本机 Magpie 的局域网网关，已复用现有手动反向转发", { mode: "ssh", providerId: existing.id, forwardId: forward.id, endpoint: rootOf(existing), localAddress: local.url, gatewayAddress: local.url });
-      }
-      const token = this.#token();
-      const existing = providers.find((item) => item.id === providerId);
-      if (existing?.off || existing?.key?.set === false) {
-        await this.#stopManagedForward(id);
-        return this.#state(id, "disabled", "远端已存在本机 Magpie 供应商，但已停用或清除密钥；保留当前设置", { providerId });
-      }
-      const binding = digest([profile.id, profile.host, profile.port, profile.username]);
-      const previous = this.#records.get(id), saved = previous?.binding === binding ? previous : undefined;
-      let port = saved?.binding === binding ? saved.port : 0;
-      if (existing) {
-        let url;
-        try { url = new URL(rootOf(existing)); } catch { /* Checked below. */ }
-        const legacy = url?.hostname === "127.0.0.1" && url.pathname === "/" + providerId ? { mode: "ssh", endpoint: url.origin + url.pathname, keyProof: this.#proof(token) } : undefined;
-        const known = saved ? [saved.pending, saved.mode && saved].filter(Boolean)
-          : [legacy, ...gateways.map((gateway) => ({ mode: "direct", endpoint: gateway.url, keyProof: this.#proof(gateway.key) }))].filter(Boolean);
-        const matchesKnown = known.some((spec) => this.#matches(existing, spec));
-        if (!matchesKnown && !(overwrite && saved && existing.preset === "remote-magpie")) throw new OperationError("PROVIDER_LINK_CONFLICT", overwrite
-          ? "无法确认此供应商属于当前连接的自动对接记录，已保留现有配置；请核对本机对接记录和远端供应商类型"
-          : "自动对接供应商的地址或密钥与记录不一致，已保留现有配置；如需恢复自动对接，请点击「覆盖地址与密钥」");
-        if (!port && legacy && matchesKnown) port = Number(url.port);
-      }
-      let forward, endpoint = local.url, key = local.key;
-      const mode = detection.gateway ? "direct" : "ssh";
-      if (mode === "ssh") {
-        this.#relayReady ??= startProviderRelay();
-        this.#relay = await this.#relayReady;
-        this.#relay.set(providerId, token, local);
-        forward = forwards.find((item) => item.id === forwardId);
-        if (forward && (forward.name !== "本机 Magpie 自动对接" || forward.direction !== "s2c" || forward.bindHost !== "127.0.0.1" || forward.targetHost !== "127.0.0.1" || forward.targetPort !== this.#relay.port || (port && forward.bindPort !== port))) throw new OperationError("PROVIDER_LINK_CONFLICT", "自动对接转发标识已被其他规则占用，请检查端口转发列表");
-        if (!forward) forward = await this.sessions.addForward(id, { id: forwardId, name: "本机 Magpie 自动对接", direction: "s2c", bindHost: "127.0.0.1", bindPort: port || 0, targetHost: "127.0.0.1", targetPort: this.#relay.port }, { signal: abort });
-        this.sessions.forgetForward(id, forwardId);
-        port = forward.bindPort;
-        endpoint = `http://127.0.0.1:${port}/${providerId}`; key = token;
-      }
-      const desired = { mode, endpoint, keyProof: this.#proof(key) };
-      const record = { connectionId: id, binding, ...(port && { port }) };
-      const pendingConfirmed = saved?.pending && JSON.stringify(saved.pending) === JSON.stringify(desired) && this.#matches(existing, desired);
-      if (overwrite || !this.#matches(existing, desired) || (!pendingConfirmed && saved?.endpoint === endpoint && JSON.stringify(saved.keyProof) !== JSON.stringify(desired.keyProof))) {
-        const currentProfile = await this.store.get(id);
-        if (this.sessions.status(id).state !== "connected" || digest([currentProfile.id, currentProfile.host, currentProfile.port, currentProfile.username]) !== binding) throw new OperationError("PROVIDER_LINK_CONFLICT", "连接配置已变化，本次未写入远端供应商，请重新检测");
         await this.remote.assertIdle(id);
-        const body = providerSaveRequest(existing, { id: providerId, mode, endpoint, key });
-        await this.#persist(id, { ...record, ...(saved?.mode && { mode: saved.mode, endpoint: saved.endpoint, keyProof: saved.keyProof }), pending: desired });
-        await api("/api/provider/save", body);
-        const verified = (await api("/api/providers"))?.providers;
-        if (!Array.isArray(verified) || !verified.some((item) => item.id === providerId && this.#matches(item, desired))) throw new OperationError("PROVIDER_LINK_API", "尚未确认远端已保存本机 Magpie 供应商，将在下次检测时核实");
-        if (overwrite) this.sessions.recordLog?.(id, "info", "已按用户请求覆盖本机 Magpie 自动对接供应商的地址与密钥");
-      }
-      await this.#persist(id, { ...record, ...desired });
-      if (mode === "direct") await this.#stopManagedForward(id);
-      return this.#state(id, "ready", mode === "direct" ? "局域网直连已验证，直接访问本机 Magpie，无需 SSH 隧道" : "已通过 SSH 隧道对接本机 Magpie（" + detection.reason + "）", { mode, providerId, ...(forward && { forwardId }), endpoint, localAddress: local.url, gatewayAddress: local.url, ...(mode === "ssh" && { directReason: detection.reason }) });
+        if (abort.aborted) return this.status(id);
+        return this.#applyProbe(id, { profile, gateways, detection, abort, overwrite });
+      });
     } catch (error) {
-      if (error.code?.startsWith("LOCAL_MAGPIE_")) this.#relay?.remove("local-magpie-" + this.#identity);
-      if (this.#closed) return this.status(id);
-      if (error.code === "REMOTE_BUSY") return this.#state(id, "waiting", "等待远端任务结束后自动对接本机 Magpie");
+      if (this.#closed || abort.aborted) return this.status(id);
+      if (error.code?.startsWith("LOCAL_MAGPIE_")) {
+        try { await commit(() => { if (!abort.aborted) this.#relay?.remove("local-magpie-" + this.#identity); }); }
+        catch { return this.status(id); }
+        if (abort.aborted) return this.status(id);
+      }
+      if (["REMOTE_BUSY", "CONFIG_RESTORE_BUSY"].includes(error.code)) return this.#state(id, "waiting", "等待管理操作结束后自动对接本机 Magpie");
       const message = error instanceof OperationError ? error.message : "自动对接暂未完成，请检查本机网关、远端 Web 服务和 SSH 转发权限；稍后自动重试";
       return this.#state(id, "error", directVerified && ["PROVIDER_LINK_HTTP", "PROVIDER_LINK_AUTH", "PROVIDER_LINK_API"].includes(error.code)
         ? "本机局域网网关直连验证已通过；" + message : message);
     }
   }
 
+  async #applyProbe(id, { profile, gateways, detection, abort, overwrite }) {
+    const checkConnection = () => {
+      if (abort.aborted) throw new OperationError("OPERATION_CANCELLED", "SSH 会话已变化，请重新检测");
+    };
+    const local = detection.gateway ?? gateways[0];
+    const api = await this.#api(id, detection, abort);
+    const providers = (await api("/api/providers"))?.providers;
+    checkConnection();
+    if (!Array.isArray(providers)) throw new OperationError("PROVIDER_LINK_API", "远端供应商列表结构不受支持");
+    const providerId = "local-magpie-" + this.#identity;
+    if (detection.gateway && !providers.some((item) => item.id === providerId)) {
+      const manual = providers.find((item) => item.id !== providerId && item.preset === "remote-magpie" && rootOf(item) === local.url);
+      if (manual) {
+        await this.#stopManagedForward(id);
+        const disabled = manual.off || manual.key?.set === false;
+        return this.#state(id, disabled ? "disabled" : "ready", disabled ? "已有局域网供应商已停用或清除密钥，保留当前设置" : "已复用现有局域网供应商，无需 SSH 隧道", { mode: "direct", providerId: manual.id, endpoint: local.url, gatewayAddress: local.url, localAddress: local.url });
+      }
+    }
+    // Existing explicit reverse forwards identify a manually added local gateway
+    // without inferring identity from a provider's display name or a LAN IP.
+    const forwards = this.sessions.status(id, { includeLogs: false }).forwards;
+    for (const forward of detection.gateway ? [] : forwards) {
+      if (forward.direction !== "s2c" || forward.state !== "listening" || forward.bindHost !== "127.0.0.1" || forward.targetHost !== local.host || forward.targetPort !== local.port) continue;
+      const existing = providers.find((item) => item.preset === "remote-magpie" && rootOf(item) === "http://127.0.0.1:" + forward.bindPort);
+      if (existing) return this.#state(id, existing.off ? "disabled" : "ready", existing.off ? "远端已存在本机 Magpie 供应商，但已停用；保留当前设置" : "远端已配置本机 Magpie 的局域网网关，已复用现有手动反向转发", { mode: "ssh", providerId: existing.id, forwardId: forward.id, endpoint: rootOf(existing), localAddress: local.url, gatewayAddress: local.url });
+    }
+    const token = this.#token();
+    const existing = providers.find((item) => item.id === providerId);
+    if (existing?.off || existing?.key?.set === false) {
+      await this.#stopManagedForward(id);
+      return this.#state(id, "disabled", "远端已存在本机 Magpie 供应商，但已停用或清除密钥；保留当前设置", { providerId });
+    }
+    const binding = digest([profile.id, profile.host, profile.port, profile.username]);
+    const previous = this.#records.get(id), saved = previous?.binding === binding ? previous : undefined;
+    let port = saved?.binding === binding ? saved.port : 0;
+    if (existing) {
+      let url;
+      try { url = new URL(rootOf(existing)); } catch { /* Checked below. */ }
+      const legacy = url?.hostname === "127.0.0.1" && url.pathname === "/" + providerId ? { mode: "ssh", endpoint: url.origin + url.pathname, keyProof: this.#proof(token) } : undefined;
+      const known = saved ? [saved.pending, saved.mode && saved].filter(Boolean)
+        : [legacy, ...gateways.map((gateway) => ({ mode: "direct", endpoint: gateway.url, keyProof: this.#proof(gateway.key) }))].filter(Boolean);
+      const matchesKnown = known.some((spec) => this.#matches(existing, spec));
+      if (!matchesKnown && !(overwrite && saved && existing.preset === "remote-magpie")) throw new OperationError("PROVIDER_LINK_CONFLICT", overwrite
+        ? "无法确认此供应商属于当前连接的自动对接记录，已保留现有配置；请核对本机对接记录和远端供应商类型"
+        : "自动对接供应商的地址或密钥与记录不一致，已保留现有配置；如需恢复自动对接，请点击「覆盖地址与密钥」");
+      if (!port && legacy && matchesKnown) port = Number(url.port);
+    }
+    let forward, endpoint = local.url, key = local.key;
+    const mode = detection.gateway ? "direct" : "ssh";
+    if (mode === "ssh") {
+      this.#relayReady ??= startProviderRelay();
+      this.#relay = await this.#relayReady;
+      checkConnection();
+      this.#relay.set(providerId, token, local);
+      forward = forwards.find((item) => item.id === forwardId);
+      if (forward && (forward.name !== "本机 Magpie 自动对接" || forward.direction !== "s2c" || forward.bindHost !== "127.0.0.1" || forward.targetHost !== "127.0.0.1" || forward.targetPort !== this.#relay.port || (port && forward.bindPort !== port))) throw new OperationError("PROVIDER_LINK_CONFLICT", "自动对接转发标识已被其他规则占用，请检查端口转发列表");
+      if (!forward) forward = await this.sessions.addForward(id, { id: forwardId, name: "本机 Magpie 自动对接", direction: "s2c", bindHost: "127.0.0.1", bindPort: port || 0, targetHost: "127.0.0.1", targetPort: this.#relay.port }, { signal: abort });
+      this.sessions.forgetForward(id, forwardId);
+      port = forward.bindPort;
+      endpoint = `http://127.0.0.1:${port}/${providerId}`; key = token;
+    }
+    const desired = { mode, endpoint, keyProof: this.#proof(key) };
+    const record = { connectionId: id, binding, ...(port && { port }) };
+    const pendingConfirmed = saved?.pending && JSON.stringify(saved.pending) === JSON.stringify(desired) && this.#matches(existing, desired);
+    if (overwrite || !this.#matches(existing, desired) || (!pendingConfirmed && saved?.endpoint === endpoint && JSON.stringify(saved.keyProof) !== JSON.stringify(desired.keyProof))) {
+      const currentProfile = await this.store.get(id);
+      if (this.sessions.status(id).state !== "connected" || digest([currentProfile.id, currentProfile.host, currentProfile.port, currentProfile.username]) !== binding) throw new OperationError("PROVIDER_LINK_CONFLICT", "连接配置已变化，本次未写入远端供应商，请重新检测");
+      await this.remote.assertIdle(id);
+      checkConnection();
+      const body = providerSaveRequest(existing, { id: providerId, mode, endpoint, key });
+      await this.#persist(id, { ...record, ...(saved?.mode && { mode: saved.mode, endpoint: saved.endpoint, keyProof: saved.keyProof }), pending: desired });
+      checkConnection();
+      await api("/api/provider/save", body);
+      const verified = (await api("/api/providers"))?.providers;
+      checkConnection();
+      if (!Array.isArray(verified) || !verified.some((item) => item.id === providerId && this.#matches(item, desired))) throw new OperationError("PROVIDER_LINK_API", "尚未确认远端已保存本机 Magpie 供应商，将在下次检测时核实");
+      if (overwrite) this.sessions.recordLog?.(id, "info", "已按用户请求覆盖本机 Magpie 自动对接供应商的地址与密钥");
+    }
+    await this.#persist(id, { ...record, ...desired });
+    checkConnection();
+    if (mode === "direct") await this.#stopManagedForward(id);
+    return this.#state(id, "ready", mode === "direct" ? "局域网直连已验证，直接访问本机 Magpie，无需 SSH 隧道" : "已通过 SSH 隧道对接本机 Magpie（" + detection.reason + "）", { mode, providerId, ...(forward && { forwardId }), endpoint, localAddress: local.url, gatewayAddress: local.url, ...(mode === "ssh" && { directReason: detection.reason }) });
+  }
+
   async forget(id) { await this.#ready; this.#records.delete(id); this.#states.delete(id); await this.#save(); }
 
   async close() {
     this.#closed = true; this.#shutdown.abort(); clearInterval(this.#timer);
-    await Promise.allSettled([...this.#tasks.values()]);
+    await Promise.allSettled([...this.#tasks.values(), ...this.#syncing.values()]);
     await this.#ready.catch(() => {});
     await this.#writes.catch(() => {});
     await this.#relay?.close();

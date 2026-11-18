@@ -157,6 +157,26 @@ test("gateway discovery uses LAN interfaces and the actual port instead of the h
   await assert.rejects(discover({}, { Tun: [{ address: "198.18.0.1", internal: false, family: "IPv4" }] }), { code: "LOCAL_MAGPIE_LAN_REQUIRED" });
 });
 
+test("a probe from the previous SSH session cannot save or start a forward on its replacement", async (t) => {
+  const fixtureState = await fixture(t, { lan: true, detection: true });
+  const started = Promise.withResolvers(), release = Promise.withResolvers();
+  const link = new ProviderLink({ ...fixtureState.options, async detect() {
+    started.resolve();
+    await release.promise;
+    return { gateway: null, reason: "fixture" };
+  } });
+  t.after(() => link.close());
+  const id = fixtureState.profile.id;
+  const pending = link.sync(id);
+  await Promise.race([started.promise, pending.then(() => assert.fail("probe did not start"))]);
+  try {
+    await fixtureState.sessions.disconnect(id);
+    await fixtureState.sessions.connect(fixtureState.profile);
+  } finally { release.resolve(); await pending; }
+  assert.deepEqual(fixtureState.writes, []);
+  assert.deepEqual(fixtureState.sessions.status(id).forwards, []);
+});
+
 for (const lan of [true, false]) {
 test(`verified ${lan ? "on-link" : "routed cross-subnet"} LAN integration uses the actual gateway IP, shared key and no SSH port forwards`, async (t) => {
   const h = await fixture(t, { lan, detection: true, reachable: true });
