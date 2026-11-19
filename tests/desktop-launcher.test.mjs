@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHmac, createPublicKey, randomBytes, verify } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { desktopPlaceholder, publishDesktopLauncher } from "../src/desktop-launcher.mjs";
 import { createHostSandbox } from "../scripts/host-sandbox.mjs";
 import { temporary } from "./helpers.mjs";
@@ -62,24 +64,52 @@ test("desktop discovery preserves its port, requires proof and only signs the cu
   assert.deepEqual(JSON.parse(message), { version: 1, purpose: "endpoint", origin: service.origin, challenge, url: replacement });
 });
 
-test("a real plugin restart publishes its new authenticated endpoint and removes the stopped host credential", async (t) => {
+test("the prepared desktop plugin publishes and clears its launcher outside Magpie's reload scan", async (t) => {
   const directory = await temporary(t);
   const sandbox = await createHostSandbox(fileURLToPath(new URL("../", import.meta.url)));
   t.after(() => sandbox.cleanup());
-  const { createPlugin, closePlugin } = await import(pathToFileURL(join(sandbox.root, "src", "plugin.mjs")));
-  const launcherFile = join(directory, "native", "page", "index.html");
+  const installation = join(sandbox.root, ".local", "desktop-plugin");
+  const legacy = join(installation, "page", "index.html");
+  await mkdir(join(installation, "page"), { recursive: true });
+  await writeFile(legacy, desktopPlaceholder);
+  await mkdir(join(sandbox.root, "scripts"));
+  const prepare = join(sandbox.root, "scripts", "prepare-desktop.mjs");
+  await copyFile(new URL("../scripts/prepare-desktop.mjs", import.meta.url), prepare);
+  await promisify(execFile)(process.execPath, [prepare]);
+
+  const manifestFile = join(installation, "package.json");
+  const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+  assert.equal(manifest.magpie.page.file, ".runtime/index.html");
+  assert.equal(manifest.magpie.page.icon, ".runtime/icon.svg");
+  const launcherFile = join(installation, manifest.magpie.page.file);
+  assert.equal(await readFile(launcherFile, "utf8"), desktopPlaceholder);
+  assert.deepEqual(await readFile(join(installation, manifest.magpie.page.icon)), await readFile(join(sandbox.root, "page", "icon.svg")));
+
+  const entry = join(installation, manifest.main);
+  const { default: plugin } = await import(pathToFileURL(entry));
+  const { closePlugin } = await import(pathToFileURL(join(sandbox.root, "src", "plugin.mjs")));
+  const watchedFiles = [manifestFile, entry, legacy];
+  const watchStamp = () => Promise.all(watchedFiles.map(async (file) => {
+    const { mtimeNs, size } = await stat(file, { bigint: true });
+    return [mtimeNs, size];
+  }));
+  const initialStamp = await watchStamp();
   const endpoints = [];
   for (let attempt = 0; attempt < 2; attempt++) {
-    const hooks = await createPlugin({ directory }, undefined, { launcherFile });
-    t.after(() => closePlugin(hooks));
-    const url = sandbox.getEndpoint();
-    endpoints.push(url);
-    assert.ok((await readFile(launcherFile, "utf8")).includes(url));
-    const response = await fetch(new URL("api/snapshot", url), { headers: { Authorization: "Bearer " + new URL(url).pathname.split("/")[1] } });
-    assert.equal(response.status, 200);
-    assert.deepEqual((await response.json()).connections, []);
-    await closePlugin(hooks);
+    const hooks = await plugin.server({ directory });
+    try {
+      const url = sandbox.getEndpoint();
+      endpoints.push(url);
+      assert.ok((await readFile(launcherFile, "utf8")).includes(url));
+      assert.deepEqual(await watchStamp(), initialStamp);
+      const response = await fetch(new URL("api/snapshot", url), { headers: { Authorization: "Bearer " + new URL(url).pathname.split("/")[1] } });
+      assert.equal(response.status, 200);
+      assert.deepEqual((await response.json()).connections, []);
+    } finally {
+      await closePlugin(hooks);
+    }
     assert.equal(await readFile(launcherFile, "utf8"), desktopPlaceholder);
+    assert.deepEqual(await watchStamp(), initialStamp);
   }
   assert.notEqual(endpoints[0], endpoints[1]);
 });

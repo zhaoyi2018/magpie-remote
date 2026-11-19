@@ -18,7 +18,7 @@ npm test
 
 上述 HTTP 浏览器测试不等同于 Windows 原生 WebView2 验收。Magpie 0.1.3078 / WebView2 157.0.4341.46 的隔离桌面验证发现：入口 HTML 可读取，但沙箱发起的脚本、样式、图标及后续宿主文件导航绕过原生资源处理，实际访问 `wails.localhost` 并失败。直接在入口 HTML 使用 meta refresh 跳转到已认证的本机管理服务已通过同版本原生桌面验证，无需依赖启动脚本或第二个宿主 HTML。
 
-`npm run prepare:desktop` 在 `.local/desktop-plugin` 生成本机安装入口，保持源码和发布包不含运行地址。包名使用 `migpie-remote-desktop`，使 Magpie 为兼容入口分配独立页面标识，避免替换安装后复用原插件的失败页面缓存。它导入当前 `src/plugin.mjs`，通过内部第三参数 `launcherFile` 指定生成页面；不增加用户可传入的插件选项。管理服务启动后，`publishDesktopLauncher` 校验回环认证 URL、原子发布 HTML；退出时仅清理自己发布的内容，恢复占位文件以供 Magpie 在下次启动后台之前发现页面。安装及替换步骤见[操作指南](usage.md)。
+`npm run prepare:desktop` 在 `.local/desktop-plugin` 生成本机安装入口，保持源码和发布包不含运行地址。包名使用 `migpie-remote-desktop`，使 Magpie 为兼容入口分配独立页面标识，避免替换安装后复用原插件的失败页面缓存。它导入当前 `src/plugin.mjs`，通过内部第三参数 `launcherFile` 指定生成页面；不增加用户可传入的插件选项。页面入口和图标位于安装目录的 `.runtime/` 下。Magpie 的本地插件热重载会跳过隐藏目录，因此后台启动时更新跳转页不会触发再次重载。`publishDesktopLauncher` 校验回环认证 URL、原子发布 HTML；退出时仅清理自己发布的内容，恢复占位文件以供 Magpie 在下次启动后台之前发现页面。安装及替换步骤见[操作指南](usage.md)。
 
 `npm run test:ui:desktop` 在 Windows CI 的 Edge 中拒绝所有宿主子资源请求，验证直接入口、启动握手、跨端口恢复以及按任务 ID 恢复视图。原生验收应另记 Magpie 和 WebView2 版本，覆盖冷启动、切换侧栏后重开、插件宿主重载与旧地址失效。诊断命令 `npm run open:ui -- --check` 只检查回环后台，不打开浏览器。运行日志与诊断均不输出回环认证地址。
 
