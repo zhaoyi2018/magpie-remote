@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 // A development-only parent frame with Magpie's documented allow-scripts
 // sandbox and launch-page policy. The SSH backend still runs in the real host.
-export async function startUIHarness({ getEndpoint, recovery, discoveryStyle, launcherFile } = {}) {
+export async function startUIHarness({ getEndpoint, recovery, discoveryStyle, launcherFile, warmHost } = {}) {
   const prefix = "/_magpie/plugin/ui-test/";
   const root = new URL("../page/", import.meta.url);
   let origin;
@@ -21,24 +21,39 @@ export async function startUIHarness({ getEndpoint, recovery, discoveryStyle, la
     if (path === "/parent.js") {
       response.setHeader("Content-Type", "text/javascript");
       return response.end(`
-const frame = document.querySelector('iframe');
-let dark = false;
-const theme = () => ({ dark, lang: 'zh', tokens: {} });
-document.documentElement.dataset.pluginState = 'starting';
-// Magpie requires hello within 10 seconds, independently of service discovery.
-const timer = setTimeout(() => {
+let frame = document.querySelector('iframe');
+let dark = false, timer;
+const theme = () => ({ dark, lang: 'zh', tokens: {}, visible: true });
+function showError(message) {
+  clearTimeout(timer);
   document.documentElement.dataset.pluginState = 'failed';
   const error = document.createElement('div');
   error.setAttribute('role', 'alert');
-  error.textContent = '此页面已停止工作：SSH 连接 的页面没有响应';
+  error.textContent = message;
+  const retry = document.createElement('button');
+  retry.textContent = '重试';
+  retry.onclick = () => {
+    frame = frame.cloneNode();
+    expectHello();
+    error.replaceWith(frame);
+  };
+  error.append(retry);
   frame.replaceWith(error);
-}, 10000);
+}
+function expectHello() {
+  document.documentElement.dataset.pluginState = 'starting';
+  // Magpie requires hello within 10 seconds, independently of service discovery.
+  timer = setTimeout(() => showError('此页面已停止工作：SSH 连接 的页面没有响应'), 10000);
+}
+expectHello();
 addEventListener('message', (event) => {
   if (event.source !== frame.contentWindow || event.data?.magpie !== 1) return;
   if (event.data.method === 'hello') {
     clearTimeout(timer);
     document.documentElement.dataset.pluginState = 'ready';
     event.source.postMessage({ magpie: 1, id: event.data.id, result: theme() }, '*');
+  } else if (event.data.method === 'error') {
+    showError(event.data.params?.message ?? '此页面已停止工作');
   }
 });
 document.getElementById('theme').onclick = () => {
@@ -50,6 +65,7 @@ document.getElementById('theme').onclick = () => {
     response.setHeader("Content-Security-Policy", `default-src 'none'; script-src ${origin}; style-src ${origin} 'unsafe-inline'; img-src ${origin} data:; connect-src 'none'; frame-src 'none'; form-action 'none'; sandbox allow-scripts`);
     const file = path.slice(prefix.length);
     if (file === "index.html" && launcherFile) {
+      await warmHost?.();
       response.setHeader("Content-Type", "text/html; charset=utf-8");
       return response.end(await readFile(launcherFile));
     }

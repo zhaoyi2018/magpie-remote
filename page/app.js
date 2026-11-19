@@ -21,6 +21,7 @@ import { createRemoteManager } from "./remote.js";
   let pendingCalls = 0, transportFailures = 0;
   let nextDiscovery = 0, discoveryAttempts = 0, newEndpoint = null;
   let pageDetached = false, navigatingRecovery = false;
+  let desktopHost = false, desktopVisible = true, desktopReconnecting = false;
   let listCollapsed = isNarrow();
   let editingForwardConnection = null;
   let editingForwardId = null;
@@ -232,9 +233,22 @@ import { createRemoteManager } from "./remote.js";
     discovering = attempt;
     try { return await attempt; } catch { return null; } finally { if (discovering === attempt) discovering = null; }
   }
-  async function refresh(force = false) {
+  function canLeaveManagementPage() {
+    return !pendingCalls && !state.busy.size && !document.querySelector("dialog[open]") && !remote.hasUncertain();
+  }
+  async function reconnectDesktop() {
+    if (desktopReconnecting) return;
+    desktopReconnecting = true;
+    try {
+      await refresh(true, { reopenDesktop: true });
+      if (transportFailures === 1 && $("service-error").hidden && !newEndpoint && desktopVisible && !document.hidden) {
+        await refresh(true, { reopenDesktop: true });
+      }
+    } finally { desktopReconnecting = false; }
+  }
+  async function refresh(force = false, { reopenDesktop = false } = {}) {
     if (refreshing) {
-      if (force) { await refreshing; return refresh(); }
+      if (force) { await refreshing; return refresh(reopenDesktop, { reopenDesktop }); }
       return refreshing;
     }
     refreshing = (async () => {
@@ -268,7 +282,7 @@ import { createRemoteManager } from "./remote.js";
         $("last-updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
         $("service-error").hidden = true;
         if (pageDetached) {
-          if (!pendingCalls && !state.busy.size && !document.querySelector("dialog[open]") && !remote.hasUncertain() && !document.hidden) {
+          if (canLeaveManagementPage() && desktopVisible && !document.hidden) {
             while (viewWrite) await viewWrite;
             await saveView();
             const target = new URL(base.href); target.hash = location.hash;
@@ -288,21 +302,30 @@ import { createRemoteManager } from "./remote.js";
           ? { label: "正在重新连接", message: "暂时无法读取状态，正在自动重试。", action: "retry" }
           : managementFailure(error);
         if (desktop && transport && !reconnecting) {
-          const guidance = canDiscover ? "正在查找新地址，也可点击「重新连接」。仍不可用时，" : "";
-          serviceFailure = { ...serviceFailure, action: "retry", message: "暂时无法连接管理服务。" + guidance + "请从 Magpie 侧栏重新进入「SSH 连接」。" };
+          const guidance = desktopHost ? "点击「重新连接」，或从 Magpie 侧栏返回后按提示重试。"
+            : "请在 Magpie 中重新打开「SSH 连接」，必要时重新加载插件。";
+          serviceFailure = { ...serviceFailure, action: "retry", message: "暂时无法连接管理服务。" + guidance };
         } else if (canDiscover && transport && !reconnecting) serviceFailure.message = "暂时无法连接管理服务，当前显示最后读取的状态。正在自动重试；仍不可用时请重新打开页面或重新加载插件。";
         $("service-error").hidden = reconnecting;
         $("service-error-message").textContent = serviceFailure.message;
-        $("reopen").textContent = desktopOrigin && canDiscover && transport ? "重新连接" : serviceFailure.action === "retry" ? "重试读取" : "重新打开";
+        $("reopen").textContent = desktop && transport ? "重新连接" : serviceFailure.action === "retry" ? "重试读取" : "重新打开";
         $("last-updated").textContent = "当前显示最后读取的状态";
         $("service-state").textContent = serviceFailure.label;
         $("service-state").className = "service-state is-offline";
         render();
-        if (transport && (error.code === "MANAGEMENT_EXPIRED" || transportFailures >= 2) && Date.now() >= nextDiscovery) {
+        if (transport && !reconnecting && (reopenDesktop || Date.now() >= nextDiscovery)) {
           const endpoint = await discoverEndpoint();
           nextDiscovery = Date.now() + Math.min(2000 * 2 ** discoveryAttempts, 30000);
           discoveryAttempts = Math.min(discoveryAttempts + 1, 4);
           if (endpoint && endpoint.href !== base.href) newEndpoint = endpoint;
+          else if (reopenDesktop && desktopHost && desktopVisible && !document.hidden && !newEndpoint) {
+            if (canLeaveManagementPage()) {
+              // Magpie's retry card remounts the page and requests its entry, which starts the host.
+              parent.postMessage({ magpie: 1, method: "error", params: { message: "连接管理服务已断开。点击「重试」重新加载 SSH 连接。" } }, "*");
+            } else {
+              $("service-error-message").textContent = "管理服务已断开。请先复制或关闭未保存的内容，核实结果未知的操作，再点击「重新连接」。";
+            }
+          }
         }
       }
       if (newEndpoint) {
@@ -970,7 +993,7 @@ import { createRemoteManager } from "./remote.js";
   addEventListener("resize", () => hideMenu());
   addEventListener("scroll", () => hideMenu(), true);
   $("reopen").addEventListener("click", () => {
-    if (desktop) { nextDiscovery = 0; void refresh(true); return; }
+    if (desktop) { void reconnectDesktop(); return; }
     if (newEndpoint || pageDetached || serviceFailure?.action === "retry") { void refresh(true); return; }
     if (launcher) {
       if (document.querySelector("dialog[open]") || pendingCalls || remote.hasUncertain()) {
@@ -991,8 +1014,26 @@ import { createRemoteManager } from "./remote.js";
     if (!polling) polling = setInterval(() => { if (!document.hidden) void refresh(); }, 2000);
     if (!clock) clock = setInterval(updateDuration, 1000);
   }
+  if (desktop && parent !== window) {
+    const hello = "migpie-remote-desktop";
+    addEventListener("message", (event) => {
+      if (event.source !== parent || event.data?.magpie !== 1) return;
+      const message = event.data;
+      if (message.id === hello && typeof message.result?.dark === "boolean") {
+        desktopHost = true;
+        desktopVisible = message.result.visible !== false;
+      } else if (desktopHost && message.event === "visibility" && typeof message.data?.visible === "boolean" && message.data.visible !== desktopVisible) {
+        desktopVisible = message.data.visible;
+        if (desktopVisible && !document.hidden) void reconnectDesktop();
+      }
+    });
+    parent.postMessage({ magpie: 1, id: hello, method: "hello" }, "*");
+  }
   startDiscoveryFrame(); render(); void refresh(); startPolling();
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !desktopVisible) return;
+    if (desktopHost) void reconnectDesktop(); else void refresh();
+  });
   addEventListener("pagehide", (event) => {
     logSequence++; logReading = null;
     clearInterval(polling); clearInterval(clock); polling = clock = null;

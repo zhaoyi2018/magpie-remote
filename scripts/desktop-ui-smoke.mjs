@@ -23,7 +23,7 @@ const tools = {
   remote_operation: { execute: (args) => { taskReads.push(args); return operation; } },
   remote_apply: { execute: (args) => { submissions.push(args); } },
 };
-let browser, harness, web, replacement, discovery, unpublish;
+let browser, harness, web, replacement, discovery, unpublish, warmHost;
 try {
   const recovery = await loadRecoveryKey(join(directory, "recovery-key"));
   const view = managementView(viewFile);
@@ -31,7 +31,7 @@ try {
   discovery = await startDesktopRecovery({ file: portFile, endpoint: web.url, recovery });
   const origin = discovery.origin;
   unpublish = await publishDesktopLauncher(launcherFile, web.url, { origin, recovery });
-  harness = await startUIHarness({ launcherFile });
+  harness = await startUIHarness({ launcherFile, warmHost: () => warmHost?.() });
   browser = await chromium.launch({ ...(process.platform === "win32" && { channel: "msedge" }), headless: true });
   const context = await browser.newContext({ permissions: ["local-network-access"] });
   let hostSubresources = 0;
@@ -81,10 +81,55 @@ try {
   await frame.locator("#tab-remote[aria-selected=true]").waitFor();
   await frame.locator("#remote-task-state").filter({ hasText: "已完成" }).waitFor();
   assert.ok(page.frames().some((child) => child.url().startsWith(replacement.url)));
-  assert.deepEqual(taskReads, [{ connectionId: "second", operationId: operation.id }]);
+  const task = { connectionId: "second", operationId: operation.id };
+  assert.deepEqual(taskReads, [task]);
+
+  const returnToSidebar = () => page.evaluate(() => {
+    const target = document.querySelector('iframe[title="SSH 连接"]').contentWindow;
+    for (const visible of [false, true]) target.postMessage({ magpie: 1, event: "visibility", data: { visible } }, "*");
+  });
+  const reopen = frame.getByRole("button", { name: "重新连接", exact: true });
+  const retry = page.getByRole("button", { name: "重试", exact: true });
+  for (const trigger of ["sidebar", "button"]) {
+    if (trigger === "sidebar") {
+      await frame.locator("#new-connection").click();
+      await frame.getByRole("dialog").waitFor();
+    }
+    const stopped = replacement.url;
+    await replacement.close();
+    await discovery.close();
+    discovery = null;
+    await reopen.waitFor({ timeout: 15000 });
+    assert.equal(await retry.count(), 0, "Background checks must leave the old page in place");
+    warmHost = async () => {
+      warmHost = null;
+      replacement = await startManagementServer({ tools, view: managementView(viewFile), recovery });
+      discovery = await startDesktopRecovery({ file: portFile, endpoint: replacement.url, recovery });
+      unpublish = await publishDesktopLauncher(launcherFile, replacement.url, { origin: discovery.origin, recovery });
+    };
+    if (trigger === "sidebar") {
+      await returnToSidebar();
+      await frame.locator("#service-error-message").filter({ hasText: "请先复制或关闭未保存的内容" }).waitFor();
+      assert.ok(await frame.getByRole("dialog").isVisible(), "Returning to the sidebar must preserve an open editor");
+      await page.keyboard.press("Escape");
+      await frame.getByRole("dialog").waitFor({ state: "hidden" });
+      await returnToSidebar();
+    } else {
+      await reopen.click();
+    }
+    await retry.waitFor({ timeout: 15000 });
+    assert.equal(replacement.url, stopped, "The host starts only when Magpie reopens the entry");
+    await retry.click();
+    await frame.locator("#service-state").filter({ hasText: "管理服务在线" }).waitFor({ timeout: 15000 });
+    await frame.locator("#tab-remote[aria-selected=true]").waitFor();
+    await frame.locator("#remote-task-state").filter({ hasText: "已完成" }).waitFor();
+    assert.notEqual(replacement.url, stopped);
+  }
+  assert.equal(hostSubresources, 0);
+  assert.deepEqual(taskReads, [task, task, task]);
   assert.deepEqual(submissions, []);
   assert.deepEqual(errors, []);
-  console.log("Desktop launcher passed: sandbox hello, online management, cross-port recovery, restored connection, tab and task, zero operation replays.");
+  console.log("Desktop launcher passed: sandbox hello, signed cross-port recovery, sidebar and button retry after shutdown, editor and task recovery, zero operation replays.");
 } finally {
   await browser?.close();
   await harness?.close();
