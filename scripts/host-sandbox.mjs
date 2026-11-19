@@ -6,13 +6,15 @@ import { basename, dirname, join, resolve } from "node:path";
 
 export async function createHostSandbox(sourceRoot) {
   const source = resolve(sourceRoot);
-  const directory = await mkdtemp(join(tmpdir(), "migpie-host-smoke-"));
+  // Bun on Windows can cache the same module separately under different path casing.
+  const tempRoot = await realpath(tmpdir());
+  const directory = await mkdtemp(join(tempRoot, "migpie-host-smoke-"));
   const root = join(directory, "plugin");
   const runtime = join(source, "page", ".runtime");
   const endpoint = join(root, "page", ".runtime", "endpoint.js");
   const cleanup = async () => {
     const absolute = resolve(directory);
-    assert.equal(dirname(absolute), resolve(tmpdir()));
+    assert.equal(dirname(absolute), tempRoot);
     assert.ok(basename(absolute).startsWith("migpie-host-smoke-"));
     // rm removes the node_modules link itself, never its source directory.
     await rm(absolute, { recursive: true, force: true, maxRetries: 3 });

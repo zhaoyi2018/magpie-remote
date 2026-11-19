@@ -79,6 +79,11 @@ printf 'p1234\\ncnode\\nu1000\\nLalice\\nf8\\nn[::1]:3425\\n'`);
   assert.ok(!inspected.stdout.includes("private failure details"));
   await Promise.all(["ss", "ps", "id", "lsof"].map((name) => rm(join(tools, name))));
   console.log("Forward conflicts: POSIX ss/lsof scripts, exact port filtering, process/user lookup, hidden owners, empty results and unavailable tools passed.");
+  // Git Bash builds can omit curl. Expose only the real Windows curl to the fixture's isolated PATH.
+  if (process.platform === "win32" && process.env.SystemRoot) {
+    const systemCurl = join(process.env.SystemRoot, "System32", "curl.exe");
+    if (existsSync(systemCurl)) await fakeTool("curl", `exec ${shellQuote(systemCurl.replaceAll("\\", "/"))} "$@"`);
+  }
   const requests = [], httpKey = "script-fixture-web-key-123456789";
   const httpServer = createServer((request, response) => {
     void (async () => {

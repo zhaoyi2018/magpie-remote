@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 128 128"
+     class="magpie-remote-mark" role="img" aria-labelledby="magpie-remote-title">
+  <title id="magpie-remote-title">Magpie Remote 双向 SSH 转发</title>
+  <style>
+    .magpie-remote-mark {
+      --bird: #242831;
+      --arrow-low: #087b68;
+      --arrow-high: #0e9e83;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .magpie-remote-mark {
+        --bird: #e7f2f1;
+        --arrow-low: #199b82;
+        --arrow-high: #5bdab8;
+      }
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .magpie-remote-pulse {
+        animation: magpie-remote-transfer 3.6s ease-in-out infinite;
+      }
+
+      .magpie-remote-pulse-back {
+        animation-delay: 1.25s;
+      }
+    }
+
+    @keyframes magpie-remote-transfer {
+      0% { stroke-dashoffset: 16; opacity: 0; }
+      8%, 34% { opacity: .86; }
+      43%, 100% { stroke-dashoffset: -104; opacity: 0; }
+    }
+  </style>
+  <defs>
+    <linearGradient id="magpie-remote-teal" gradientUnits="userSpaceOnUse"
+                    x1="13" y1="100" x2="81" y2="65">
+      <stop stop-color="var(--arrow-low, #087b68)"/>
+      <stop offset="1" stop-color="var(--arrow-high, #0e9e83)"/>
+    </linearGradient>
+    <path id="magpie-remote-forward"
+          d="M7.5 103.3 C21 88.1 41.8 71.8 58.3 72.1 L58.3 69.3 L65.8 74.8
+             L58.3 80.5 L58.3 77.5 C50.7 77.9 43.3 80.8 41.2 84.1
+             C40.2 85.8 41 87.2 42.7 88.3 C30.1 91 16.7 96.5 7.5 103.3 Z"/>
+    <path id="magpie-remote-return"
+          d="M58.2 62.9 C65.5 63.9 76.3 63 81.6 66 C87.4 69.4 83.7 74.6 77.1 79.4
+             C69.4 84.8 58.7 87.9 50.2 87.8 L50.2 90.5 L42.8 85 L50.2 80.1 L50.2 82.7
+             C58.2 82.6 67.2 79.2 69 74.9 C70.7 70.8 62.4 68 58.2 62.9 Z"/>
+    <clipPath id="magpie-remote-clip-forward">
+      <use href="#magpie-remote-forward"/>
+    </clipPath>
+    <clipPath id="magpie-remote-clip-return">
+      <use href="#magpie-remote-return"/>
+    </clipPath>
+  </defs>
+
+  <g fill="var(--bird, #242831)">
+    <path d="M41.2 21.9 C51.1 32.5 61 39.6 73.7 46.4 C88.3 54.1 91.8 63.6 100 63.5
+             C97.2 67.5 93.1 70.4 88.4 72 C88 65.5 82.3 61.8 73.4 61.8
+             L65.7 61.5 C55.5 61 49.3 55.8 46.9 45.8 C52 48.8 57.8 50.6 64.3 50.9
+             C48.6 48 40.1 38.4 41.2 21.9 Z"/>
+    <path d="M89.7 56.9 C94.2 52 97.8 46.7 104 46.7 C108.1 46.7 111.4 48.9 113.7 52.5
+             C116.8 53.2 118.7 54.3 120.3 56.2 C115.8 56.4 113 57.6 111.5 60
+             C109.6 63.1 109.4 67.4 107.2 72.3 C100.7 85.6 86.2 89.5 67 85.6
+             C82.5 86.5 94.8 82 100.9 71.4 C104.2 65.7 104.1 61.1 101.4 58.6
+             C99.4 56.6 95.2 56.5 89.7 56.9 Z"/>
+  </g>
+  <g fill="url(#magpie-remote-teal)">
+    <use href="#magpie-remote-forward"/>
+    <use href="#magpie-remote-return"/>
+  </g>
+  <g fill="none" stroke="#d3ffed" stroke-width="5.5" stroke-linecap="round" stroke-dasharray="16 120">
+    <path class="magpie-remote-pulse" clip-path="url(#magpie-remote-clip-forward)"
+          pathLength="100" opacity="0" d="M8 103 C26 89 43 75.7 65.5 74.8"/>
+    <path class="magpie-remote-pulse magpie-remote-pulse-back" clip-path="url(#magpie-remote-clip-return)"
+          pathLength="100" opacity="0" d="M58.7 63.4 C66 68.1 79.5 65.4 78 72.2 C76.6 78.5 60.3 85.4 43.2 85"/>
+  </g>
+</svg>
