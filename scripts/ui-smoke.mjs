@@ -81,6 +81,15 @@ try {
   const field = (id) => ui.locator("#" + id);
   await field("service-state").filter({ hasText: "管理服务在线" }).waitFor();
   assert.equal(await page.locator("iframe").getAttribute("sandbox"), "allow-scripts");
+  await page.setViewportSize({ width: 555, height: 650 });
+  const serverPane = field("server-pane");
+  await serverPane.getByRole("button", { name: "新建连接" }).waitFor({ timeout: 5000 });
+  assert.ok(await serverPane.getByRole("button", { name: "导入 SSH 配置" }).isVisible());
+  await field("top-more").press("Enter");
+  await field("open-backups").click();
+  await field("backup-dialog").getByRole("button", { name: "关闭", exact: true }).last().click();
+  assert.equal(await field("open-backups").isVisible(), false, "Opening the dialog closes the narrow toolbar menu");
+  await page.setViewportSize({ width: 1280, height: 900 });
   const snapshotURL = new URL("api/snapshot", web.url).href;
   let failSnapshot = true;
   await browserContext.route(snapshotURL, async (route) => {
@@ -231,6 +240,18 @@ try {
   assert.equal(counts.get("forward_add"), addCount + 1);
   const live = sessions.status("ui-regression").forwards[0];
   assert.ok((await exchange(live.bindPort)).length);
+  const liveRow = ui.locator("#forward-list tr").filter({ hasText: "Delayed local forward" });
+  const targetResult = liveRow.getByText("目标：最近连接成功");
+  await targetResult.waitFor();
+  assert.equal(await liveRow.locator(".target-time").first().isVisible(), false, "Target timestamps stay collapsed by default");
+  await targetResult.click();
+  assert.ok(await liveRow.locator(".target-time").first().isVisible());
+  const manageForward = liveRow.getByRole("button", { name: "Delayed local forward的更多操作" });
+  await manageForward.press("Enter");
+  assert.ok(await liveRow.getByRole("button", { name: "删除转发 Delayed local forward" }).isVisible());
+  assert.ok(await liveRow.getByRole("button", { name: "编辑", exact: true }).isDisabled(), "Running forwards still require stopping before editing");
+  await page.keyboard.press("Escape");
+  assert.equal(await liveRow.getByRole("button", { name: "删除转发 Delayed local forward" }).isVisible(), false);
 
   await field("tab-connection").click();
   assert.equal(await field("edit-connection-label").textContent(), "断开后编辑");
@@ -370,16 +391,31 @@ try {
   assert.equal(sessions.status("ui-regression").state, "connected");
   console.log("UI: delayed save/start submits once; a real remote bind rejection shows the diagnosed process/PID/user in the dialog, rule and logs while SSH stays connected.");
 
-  await page.setViewportSize({ width: 555, height: 720 });
+  await page.setViewportSize({ width: 555, height: 500 });
+  await field("connection-overview").locator("summary").click();
+  const forwardsPanel = field("panel-forwards");
+  await field("new-forward").scrollIntoViewIfNeeded();
+  assert.ok(await forwardsPanel.evaluate((node) => node.clientHeight > 100), "Expanded connection details must leave forward controls reachable in a short window");
   await createForward("Narrow dialog");
   assert.ok(await field("save-forward").isVisible());
   assert.equal(await field("forward-editor").evaluate((node) => node.scrollWidth > node.clientWidth + 1), false);
   await ui.locator("#forward-editor .dialog-actions .close-dialog").click();
   assert.equal(await field("connection-detail").evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+  await field("toggle-list").click();
+  await field("search").fill("no-such-host");
+  await serverPane.getByRole("button", { name: "清除搜索和筛选" }).click();
+  assert.equal(await field("search").inputValue(), "");
+  await serverPane.getByRole("button", { name: /Draft survives service restart/ }).first().click();
   const screenshotDirectory = resolve(process.env.MIGPIE_UI_ARTIFACTS ?? ".local/ui-regression");
   await mkdir(screenshotDirectory, { recursive: true });
   await page.screenshot({ path: join(screenshotDirectory, "narrow.png"), fullPage: true });
   await page.setViewportSize({ width: 1280, height: 900 });
+  await store.save({ id: "keyboard-target", name: "Keyboard target", host: "keyboard.example", username: "tester" });
+  await field("refresh").click();
+  const keyboardTarget = serverPane.locator(".connection-card").filter({ hasText: "Keyboard target" });
+  await keyboardTarget.press("Enter");
+  assert.ok(await keyboardTarget.evaluate((node) => node === document.activeElement), "Selecting a server must keep keyboard focus on that server");
+  await serverPane.locator(".connection-card").filter({ hasText: "Draft survives service restart" }).click();
   await page.screenshot({ path: join(screenshotDirectory, "desktop.png"), fullPage: true });
   assert.ok((await stat(join(screenshotDirectory, "desktop.png"))).size > 1000);
 

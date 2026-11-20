@@ -60,6 +60,15 @@ import { createRemoteManager } from "./remote.js";
   function active(session) { return ["connected", "connecting", "reconnecting"].includes(session.state) || recovering(session); }
   function endpoint(host, port) { return (host.includes(":") && !host.startsWith("[") ? "[" + host + "]" : host) + ":" + port; }
   function address(connection) { return connection.username + "@" + endpoint(connection.host, connection.port); }
+  function ruleEndpoint(label, host, port) {
+    const value = endpoint(host, port);
+    const portAt = value.lastIndexOf(":");
+    const text = element("span", "endpoint");
+    text.append(value.slice(0, portAt), element("span", "endpoint-port", value.slice(portAt)));
+    const node = element("div", "rule-endpoint");
+    node.append(element("span", "endpoint-label", label), text);
+    return node;
+  }
   function auth(connection) {
     if (connection.authMethod === "password") return "密码";
     if (connection.authMethod === "agent") return "SSH agent";
@@ -83,6 +92,7 @@ import { createRemoteManager } from "./remote.js";
     });
   }
   function resetTabScroll() {
+    $("connection-detail").scrollTop = 0;
     for (const tab of tabs) $("panel-" + tab).scrollTop = 0;
   }
   function reconcileSelection() {
@@ -103,12 +113,28 @@ import { createRemoteManager } from "./remote.js";
   }
   function isNarrow() { return matchMedia("(max-width: 760px)").matches; }
   function applyLayout() {
-    const collapsed = isNarrow() && listCollapsed && Boolean(selected());
+    const narrow = isNarrow();
+    const hasSelection = Boolean(selected());
+    const collapsed = narrow && listCollapsed && hasSelection;
+    const narrowBar = $("narrow-bar"), empty = $("empty-state");
+    const barParent = $(collapsed ? "detail-heading" : "workspace");
+    if (narrowBar.parentElement !== barParent) barParent.prepend(narrowBar);
+    if (narrow && empty.parentElement !== $("server-pane")) $("connection-list").after(empty);
+    if (!narrow && empty.parentElement !== $("workspace")) $("connection-detail").before(empty);
     $("app-layout").classList.toggle("list-collapsed", collapsed);
-    $("narrow-bar").hidden = !(isNarrow() && selected());
+    narrowBar.hidden = !(narrow && hasSelection);
     $("toggle-list").setAttribute("aria-expanded", String(!collapsed));
-    $("toggle-list").textContent = collapsed ? "连接列表" : "收起列表";
-    $("narrow-current").textContent = selected()?.connection.name ?? "";
+    $("toggle-list").textContent = collapsed ? "连接列表" : "返回详情";
+    $("top-more").hidden = !narrow;
+    $("top-secondary").toggleAttribute("popover", narrow);
+  }
+
+  function closeTopActions() {
+    const options = $("top-secondary");
+    if (options.matches(":popover-open")) {
+      options.hidePopover();
+      $("top-more").focus();
+    }
   }
 
   async function request(path, options = {}, timeout = 50000) {
@@ -371,7 +397,7 @@ import { createRemoteManager } from "./remote.js";
     $("remote-storage-retry").textContent = retryingStorage ? "正在保留并读取…" : "保留原件并重新读取";
     if ($("connection-editor").open) connectionEditor.sync();
     if ($("forward-editor").open) syncForwardAction();
-    $("new-connection").disabled = $("empty-add").disabled = $("import-config").disabled = !state.online;
+    for (const id of ["new-connection", "empty-add", "import-config", "empty-import"]) $(id).disabled = !state.online;
     $("open-backups").disabled = serviceFailure?.action === "reopen";
     const connected = state.rows.filter((row) => row.session.state === "connected").length;
     const running = state.rows.reduce((sum, row) => sum + row.session.forwards.filter((rule) => rule.state === "listening").length, 0);
@@ -387,7 +413,7 @@ import { createRemoteManager } from "./remote.js";
     $("empty-state").querySelector("h2").textContent = state.rows.length ? "没有匹配的连接" : "从一条 SSH 连接开始";
     $("empty-state").querySelector("p").textContent = state.rows.length ? "试试其他名称、主机地址，或清除当前筛选。" : "添加服务器，或导入已有 SSH 配置。连接后即可管理本地与远程端口转发。";
     $("empty-reset").hidden = !state.rows.length;
-    $("empty-add").hidden = Boolean(state.rows.length);
+    $("empty-add").hidden = $("empty-import").hidden = Boolean(state.rows.length);
     $("empty-directions").hidden = Boolean(state.rows.length);
     $("last-connected").textContent = "尚未建立连接";
     applyLayout();
@@ -441,12 +467,20 @@ import { createRemoteManager } from "./remote.js";
     const rows = visibleRows();
     const signature = JSON.stringify([rows.map((row) => [row.connection, viewState(row), state.busy.has(row.connection.id)]), state.selected, state.online]);
     if (signature === listSignature) return;
-    listSignature = signature; hideMenu();
-    $("connection-list").replaceChildren();
+    listSignature = signature;
+    const list = $("connection-list");
+    const previousFocus = document.activeElement;
+    const focusedId = previousFocus?.closest(".connection-row")?.dataset.connectionId;
+    const focusedMore = previousFocus?.classList.contains("icon-button");
+    const scrollTop = list.scrollTop;
+    let nextFocus;
+    hideMenu();
+    const items = document.createDocumentFragment();
     for (const row of rows) {
       const { connection } = row;
       const status = viewState(row);
       const wrapper = element("div", "connection-row" + (connection.id === state.selected ? " is-selected" : ""));
+      wrapper.dataset.connectionId = connection.id;
       const card = button("", () => pick(row), "connection-card");
       card.setAttribute("aria-current", String(connection.id === state.selected));
       card.setAttribute("aria-label", connection.name + "，" + address(connection) + "，" + (labels[status] ?? status));
@@ -460,9 +494,13 @@ import { createRemoteManager } from "./remote.js";
       const more = button("", (event) => openMenu(row, event.currentTarget), "icon-button");
       more.append(icon("more")); more.setAttribute("aria-label", connection.name + "的更多操作");
       more.setAttribute("aria-expanded", "false"); more.setAttribute("aria-controls", "connection-menu");
-      wrapper.append(card, more); $("connection-list").append(wrapper);
+      if (focusedId === connection.id) nextFocus = focusedMore ? more : card;
+      wrapper.append(card, more); items.append(wrapper);
     }
-    if (!rows.length) $("connection-list").append(element("p", "no-matches", state.rows.length ? "没有匹配的连接" : "尚未添加连接"));
+    if (!rows.length) items.append(element("p", "no-matches", state.rows.length ? "没有匹配的连接" : "尚未添加连接"));
+    list.replaceChildren(items);
+    list.scrollTop = scrollTop;
+    if (focusedId) (nextFocus ?? $("search")).focus({ preventScroll: true });
   }
   function renderForwards({ connection, revision, session }, busy) {
     const signature = JSON.stringify([connection.id, revision, connection.forwards, session.forwards, session.forwardErrors, session.state, session.reconnect?.state, busy, state.online]);
@@ -474,12 +512,18 @@ import { createRemoteManager } from "./remote.js";
       if (rule) { rule.state = "failed"; rule.lastError = error.message; }
     }
     for (const live of session.forwards) rules.set(live.id, { ...rules.get(live.id), ...live });
-    $("forward-list").replaceChildren();
+    const list = $("forward-list");
+    const openDiagnostics = new Set(list.dataset.connectionId === connection.id
+      ? [...list.querySelectorAll(".target-diagnostics[open]")].map((detail) => detail.closest("tr").dataset.forwardId)
+      : []);
+    list.dataset.connectionId = connection.id;
+    list.replaceChildren();
     $("forward-count").textContent = rules.size;
     $("forward-empty").hidden = rules.size > 0;
-    $("forward-list").closest(".table-wrap").hidden = rules.size === 0;
+    list.closest(".table-wrap").hidden = rules.size === 0;
     for (const rule of rules.values()) {
       const tr = element("tr");
+      tr.dataset.forwardId = rule.id;
       const name = element("td", "rule-name");
       name.append(element("span", "rule-title", rule.name ?? rule.id));
       const local = rule.direction === "c2s";
@@ -489,25 +533,37 @@ import { createRemoteManager } from "./remote.js";
       if (!rule.saved) name.append(element("span", "temporary-tag", "临时规则"));
       const path = element("td", "rule-path");
       const route = element("div", "rule-route");
-      const listener = element("div", "rule-endpoint"), target = element("div", "rule-endpoint");
-      listener.append(element("span", "endpoint-label", local ? "本机监听" : "服务器监听"), element("span", "endpoint", endpoint(rule.bindHost, rule.bindPort)));
-      target.append(element("span", "endpoint-label", local ? "服务器目标" : "本机目标"), element("span", "endpoint", endpoint(rule.targetHost, rule.targetPort)));
+      const listener = ruleEndpoint(local ? "本机监听" : "服务器监听", rule.bindHost, rule.bindPort);
+      const target = ruleEndpoint(local ? "服务器目标" : "本机目标", rule.targetHost, rule.targetPort);
       const arrow = element("span", "rule-route-arrow"); arrow.append(icon("arrow"));
       arrow.append(element("span", "sr-only", "转发至"));
       route.append(listener, arrow, target); path.append(route);
-      const status = element("td");
+      const status = element("td", "rule-status");
       status.append(element("span", "badge " + rule.state, rule.state === "failed" ? "启动失败" : rule.state === "listening" ? "监听中" : labels[rule.state] ?? rule.state));
       if (rule.targetConnection) {
         const target = rule.targetConnection;
-        status.append(element("div", "target-result", { unknown: "目标：尚无连接请求", connecting: "目标：正在建立连接", succeeded: "目标：最近连接成功", failed: "目标：最近连接异常" }[target.state] ?? target.state));
+        const result = { unknown: "目标：尚无连接请求", connecting: "目标：正在建立连接", succeeded: "目标：最近连接成功", failed: "目标：最近连接异常" }[target.state] ?? target.state;
+        const times = [];
         for (const [key, label] of [["lastAttemptAt", "尝试"], ["lastFailureAt", "失败"], ["lastSuccessAt", "成功"]]) {
           if (!target[key]) continue;
           const time = element("time", "target-time", label + " " + new Date(target[key]).toLocaleTimeString("zh-CN", { hour12: false }));
           time.dateTime = target[key]; time.title = new Date(target[key]).toLocaleString("zh-CN", { hour12: false });
-          status.append(time);
+          times.push(time);
+        }
+        if (times.length) {
+          const diagnostics = element("details", "target-diagnostics");
+          diagnostics.open = openDiagnostics.has(rule.id);
+          const summary = element("summary", "target-result", result);
+          summary.append(icon("chevron"));
+          const timestamps = element("div", "target-times");
+          timestamps.append(...times);
+          diagnostics.append(summary, timestamps);
+          path.append(diagnostics);
+        } else {
+          path.append(element("div", "target-result", result));
         }
       }
-      if (rule.lastError) status.append(element("div", "row-error", rule.lastError));
+      if (rule.lastError) path.append(element("div", "row-error", rule.lastError));
       const actions = element("td"), actionsBox = element("div", "rule-actions");
       const running = session.forwards.some((item) => item.id === rule.id);
       const enabled = state.online && !busy && !recovering(session);
@@ -517,17 +573,26 @@ import { createRemoteManager } from "./remote.js";
         if (session.state !== "connected") start.title = "请先建立 SSH 连接";
         actionsBox.append(start);
       }
-      const edit = button("编辑", () => openForward(rule), "text-button", !enabled || running || !rule.saved);
+      const options = element("div", "action-popover"); options.setAttribute("popover", "auto");
+      const more = element("button", "icon-button");
+      more.type = "button"; more.disabled = !enabled;
+      more.popoverTargetElement = options;
+      more.append(icon("more")); more.setAttribute("aria-label", (rule.name ?? rule.id) + "的更多操作");
+      more.title = "更多操作";
+      const closeOptions = () => { options.hidePopover(); more.focus(); };
+      const edit = button("编辑", () => { closeOptions(); openForward(rule); }, "action-option", !enabled || running || !rule.saved);
       edit.title = running ? "先停止这条转发再编辑" : rule.saved ? "编辑转发规则" : "临时转发没有保存的预设";
-      const remove = button("", async () => {
+      const remove = button("删除", async () => {
+        closeOptions();
         if (await confirmAction("删除转发规则", "删除「" + (rule.name ?? rule.id) + "」的预设；正在运行的转发也会停止。")) {
           await run(connection.id, "delete-forward", () => call("forward_delete", { connectionId: connection.id, forwardId: rule.id, expectedRevision: revision }), "转发规则已删除");
         }
-      }, "icon-button", !enabled);
-      remove.append(icon("trash")); remove.title = "删除规则"; remove.setAttribute("aria-label", "删除转发 " + (rule.name ?? rule.id));
-      actionsBox.append(edit, remove); actions.append(actionsBox);
+      }, "action-option danger", !enabled);
+      remove.setAttribute("aria-label", "删除转发 " + (rule.name ?? rule.id));
+      options.append(edit, remove);
+      actionsBox.append(more, options); actions.append(actionsBox);
       tr.append(name, path, status, actions);
-      $("forward-list").append(tr);
+      list.append(tr);
     }
   }
   function renderSettings({ connection, session }) {
@@ -620,7 +685,7 @@ import { createRemoteManager } from "./remote.js";
   }
   function setTab(tab, focus = false) {
     if (state.tab !== tab) {
-      $("panel-" + state.tab).querySelectorAll(".panel-tip:popover-open").forEach((tip) => tip.hidePopover());
+      $("panel-" + state.tab).querySelectorAll(":popover-open").forEach((popover) => popover.hidePopover());
       logSequence++; logReading = null;
     }
     state.tab = tab;
@@ -889,9 +954,9 @@ import { createRemoteManager } from "./remote.js";
     });
   }
 
-  const reset = button("清除筛选", () => { $("search").value = ""; state.filter = "all"; reconcileSelection(); render(); }, "button");
-  reset.id = "empty-reset"; reset.hidden = true;
-  $("empty-add").after(reset);
+  $("empty-reset").addEventListener("click", () => {
+    $("search").value = ""; state.filter = "all"; reconcileSelection(); render(); $("search").focus();
+  });
   for (const form of ["connection-form", "forward-form"]) $(form).noValidate = true;
   $("confirm-cancel").addEventListener("click", () => $("confirm-dialog").close("cancel"));
   $("confirm-accept").addEventListener("click", () => $("confirm-dialog").close("yes"));
@@ -949,7 +1014,7 @@ import { createRemoteManager } from "./remote.js";
   $("log-filter").addEventListener("change", () => { if (selected()) renderLogs(selected()); });
   $("toggle-list").addEventListener("click", () => {
     listCollapsed = !$("app-layout").classList.contains("list-collapsed"); applyLayout();
-    if (!listCollapsed) $("search").focus();
+    $(listCollapsed ? "toggle-list" : "search").focus();
   });
   matchMedia("(max-width: 760px)").addEventListener("change", () => { listCollapsed = isNarrow(); applyLayout(); });
   $("connect").addEventListener("click", () => beginConnect());
@@ -976,14 +1041,16 @@ import { createRemoteManager } from "./remote.js";
     void run(id, "disconnect", () => call("disconnect", { connectionId: id }), "SSH 连接已断开");
   });
   $("delete-connection").addEventListener("click", () => void deleteConnection());
-  $("import-config").addEventListener("click", () => { $("import-dialog").showModal(); if (!importPreview) void previewImport(); });
+  for (const id of ["import-config", "empty-import"]) $(id).addEventListener("click", () => {
+    closeTopActions(); $("import-dialog").showModal(); if (!importPreview) void previewImport();
+  });
   const backups = createBackupManager({ call, refresh, toast, confirmAction });
   const remote = createRemoteManager({ call, confirmAction, toast, onOperation(connectionId, operationId, submitted) {
     if (connectionId !== state.selected || (!submitted && viewedOperation?.connectionId === connectionId && viewedOperation.operationId)) return;
     viewedOperation = { connectionId, operationId };
     void saveView();
   } });
-  $("open-backups").addEventListener("click", () => backups.open());
+  $("open-backups").addEventListener("click", () => { closeTopActions(); backups.open(); });
   $("preview-import").addEventListener("click", () => void previewImport());
   $("import-path").addEventListener("input", invalidatePreview);
   $("import-all").addEventListener("change", () => { $("import-list").querySelectorAll("input:not(:disabled)").forEach((node) => { node.checked = $("import-all").checked; }); updateImportSelection(); });
