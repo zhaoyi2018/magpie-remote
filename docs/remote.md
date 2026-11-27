@@ -138,6 +138,8 @@ systemctl --user is-active magpie.service
 
 以下操作供管理页调用，不注册为 MCP 工具。
 
+资源库同步使用同一组预览、提交、备份和任务接口。[资源库同步 API](remote-library.md)
+
 | 内部操作 | 参数 | 结果 |
 | --- | --- | --- |
 | `remote_status` | `connectionId`、可选 `refresh` | 缓存环境、当前任务与历史；`refresh: true` 连接后探测并核实未知任务 |

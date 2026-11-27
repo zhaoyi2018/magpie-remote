@@ -9,6 +9,7 @@ import { readSSHConfig } from "./ssh-config.mjs";
 import { OperationError } from "./errors.mjs";
 import { RemoteManager } from "./remote.mjs";
 import { remoteActions } from "./remote-scripts.mjs";
+import { libraryAction, libraryCategories, libraryModes } from "./remote-library.mjs";
 import { ProviderLink } from "./provider-link.mjs";
 import { privateForward } from "./remote-listeners.mjs";
 import { publishDesktopLauncher } from "./desktop-launcher.mjs";
@@ -126,14 +127,18 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       },
     },
     remote_preview: {
-      description: "Probe and preview a named remote Magpie lifecycle action. Returns a short-lived revision and exact changes/warnings. Does not modify the remote machine. Linux only.",
-      args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, backupId: { type: "string", pattern: "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$" } }, ["connectionId", "action"]),
-      execute({ connectionId, action, backupId }, ctx = {}) { return serial(connectionId, () => remote.preview(connectionId, action, { signal: ctx.abort, backupId })); },
+      description: "Preview a named Linux Magpie action without changing the remote. library_sync requires a nonempty categories array and accepts mode merge (default) or mirror. Returns a short-lived revision and credential-free changes and warnings.",
+      args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, backupId: { type: "string", pattern: "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$" },
+        categories: { type: "array", items: { type: "string", enum: libraryCategories }, minItems: 1, maxItems: libraryCategories.length, uniqueItems: true },
+        mode: { type: "string", enum: libraryModes },
+      }, ["connectionId", "action"]),
+      execute({ connectionId, action, backupId, categories, mode }, ctx = {}) { return serial(connectionId, () => remote.preview(connectionId, action, { signal: ctx.abort, backupId, categories, mode })); },
     },
     remote_apply: {
       description: "Start a previously previewed remote Magpie action using its revision and return a background operation immediately. Query remote_status for progress; never retry an unknown result. Backups are unencrypted remote config archives with a copy of the current binary; no backup passphrase is needed.",
       args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, revision: { ...revisionSchema, description: "The short-lived revision returned by remote_preview for this action" } }),
-      execute({ connectionId, action, revision }) {
+      execute({ connectionId, action, revision, categories, mode }) {
+        if (action === libraryAction && (categories !== undefined || mode !== undefined)) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "确认同步仅接受预览返回的 revision，修改分类或策略需重新预览");
         return serial(connectionId, async () => {
           const submission = remote.apply(connectionId, action, revision);
           remoteSubmissions.add(submission);
@@ -390,7 +395,7 @@ export async function createPlugin(input = {}, options, { launcherFile } = {}) {
   const config = pluginOptions(input, options);
   const store = new ProfileStore(join(config.dataDirectory, "connections.json"));
   const sessions = new SessionManager(config);
-  const remote = new RemoteManager({ store, sessions });
+  const remote = new RemoteManager({ store, sessions, directory: config.magpieDirectory });
   const providerLink = new ProviderLink({ store, sessions, remote, directory: config.magpieDirectory });
   const tools = createTools(store, sessions, remote, providerLink);
   providerLink.start((connectionId) => tools.remote_provider_sync.execute({ connectionId }));

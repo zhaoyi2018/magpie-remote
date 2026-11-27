@@ -3,7 +3,8 @@ import { createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, ran
 import { link, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { errorDetails } from "./errors.mjs";
+import { OperationError, errorDetails } from "./errors.mjs";
+import { libraryAction } from "./remote-library.mjs";
 import { openWebBrowser } from "./browser.mjs";
 import { publishFile } from "./publish-file.mjs";
 
@@ -237,6 +238,10 @@ export async function startManagementServer({ tools, port = 0, recovery, view, o
       } : Object.hasOwn(tools, body.method) && tools[body.method];
       if (!tool) throw new Error("未知的管理操作");
       if (!body.args || typeof body.args !== "object" || Array.isArray(body.args)) throw new Error("操作参数必须是对象");
+      if (body.args.action === libraryAction && ["remote_preview", "remote_apply"].includes(body.method)
+        && Object.keys(body.args).some((key) => !Object.hasOwn(tool.args?.properties ?? {}, key))) {
+        throw new OperationError("REMOTE_LIBRARY_OPTIONS", "资源库同步请求包含不支持的参数，修改分类或策略需重新预览");
+      }
       const credentials = body.credentials;
       if (credentials !== undefined) {
         const fields = body.method === "connect" ? ["password", "passphrase"] : body.method === "save_connection" ? ["password"] : [];

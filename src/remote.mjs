@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { identifier } from "./config.mjs";
 import { OperationError, errorDetails } from "./errors.mjs";
@@ -9,13 +9,15 @@ import { profileRevision } from "./store.mjs";
 import { actionScript, backupActions, probeScript, recoveryScript, remoteActions, scriptCommand, webLinkCommand } from "./remote-scripts.mjs";
 import { downloadRelease } from "./release-download.mjs";
 import { backupIdPattern, backupInventoryScript, parseBackups } from "./remote-backups.mjs";
-import { operationHistoryLimit, operationSummary, parseRestoreResult, restoreResultMessage, terminalOperation } from "./remote-results.mjs";
+import { libraryResultMessage, operationHistoryLimit, operationSummary, parseLibraryResult, parseRestoreResult, restoreResultMessage, terminalOperation } from "./remote-results.mjs";
+import { libraryAction, libraryLimitError, libraryOptions, libraryPathError, planLibrary, readLocalLibrary } from "./remote-library.mjs";
+import { libraryBundle, librarySnapshotMaxBytes, librarySnapshotScript, parseLibrarySnapshot } from "./remote-library-transfer.mjs";
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const copy = (value) => value === undefined ? undefined : structuredClone(value);
-const labels = { install: "安装 Magpie", update: "更新 Magpie", start: "启动服务", stop: "停止服务", restart: "重启服务", enable_web: "启用管理页面", backup: "创建备份", restore: "恢复配置", delete_backup: "删除备份", uninstall: "卸载 Magpie" };
+const labels = { install: "安装 Magpie", update: "更新 Magpie", start: "启动服务", stop: "停止服务", restart: "重启服务", enable_web: "启用管理页面", backup: "创建备份", restore: "恢复配置", delete_backup: "删除备份", uninstall: "卸载 Magpie", [libraryAction]: "同步资源库" };
 const uncertain = new Set(["REMOTE_TIMEOUT", "REMOTE_DISCONNECTED", "REMOTE_CANCELLED", "REMOTE_RESULT_UNKNOWN", "REMOTE_OUTPUT_LIMIT", "REMOTE_INPUT_FAILED"]);
-const steps = { preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "本机下载程序", uploading: "上传程序到服务器", checking_upload: "检查上传程序", installing: "安装程序", updating: "执行官方更新", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", restoring: "恢复配置", deleting_backup: "删除备份", healthcheck: "检查服务健康状态", completed: "执行完成" };
+const steps = { preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存当前程序副本", downloading: "本机下载程序", uploading: "上传到服务器", checking_upload: "检查上传内容", installing: "安装程序", updating: "执行官方更新", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", restoring: "恢复配置", deleting_backup: "删除备份", healthcheck: "检查服务健康状态", packing_library: "复核并打包资源库", applying_library: "写入远端资源库", syncing_library: "应用资源库到 Agent", completed: "执行完成" };
 const reasons = {
   command_failed: "请在服务器核对该步骤的命令及运行环境。",
   permission: "远端报告权限不足或文件系统只读，请检查程序和配置目录的写入权限。",
@@ -24,6 +26,11 @@ const reasons = {
   interactive: "远端命令要求口令或交互终端，请核对该版本的非交互命令支持。",
   unsupported: "远端报告命令或参数不受支持，请核对当前版本的命令用法。",
   loopback_required: "无法确认网关与 Web 均仅监听服务器回环地址，已拒绝启动；请先启用 Web 重建回环服务，并检查 systemd 覆盖配置和实际监听。",
+  unsafe_library: "资源库路径或文件类型不安全。",
+  library_limit: "资源库超过大小或数量上限。",
+  stale_library: "远端资源库已变化，请重新预览。",
+  library_checksum: "上传大小或 SHA-256 不匹配，未写入资源库。",
+  library_sync_failed: "远端资源库已写入，Magpie 未能完成 Agent 同步。",
   none: "",
 };
 
@@ -38,6 +45,13 @@ function parseActionResult(stdout, operationId, exitCode) {
 
 function actionFailure(action, exitCode, result) {
   if (exitCode === 75 && !result) return new OperationError("REMOTE_BUSY", "远端操作锁被占用，未重复执行");
+  if (action === libraryAction) {
+    if (exitCode === 78 && (!result || result.reason === "unsafe_library")) return libraryPathError();
+    if (result?.reason === "stale_library") return new OperationError("REMOTE_PREVIEW_STALE", "远端资源库已变化，请重新预览");
+    if (result?.reason === "library_limit") return libraryLimitError();
+    if (result?.reason === "library_checksum") return new OperationError("REMOTE_LIBRARY_CHECKSUM", reasons.library_checksum);
+    if (result?.reason === "library_sync_failed") return new OperationError("REMOTE_LIBRARY_SYNC_FAILED", reasons.library_sync_failed);
+  }
   const step = result && steps[result.step];
   let message = (step ? step + "失败" : "远端操作未成功结束") + "（退出码 " + exitCode + "）。";
   message += result ? reasons[result.reason] : "此任务未返回具体失败阶段，请检测实际版本和服务状态。";
@@ -131,8 +145,8 @@ export class RemoteManager {
   #closed = false;
   #shutdown = new AbortController();
 
-  constructor({ store, sessions, file = store.file + ".remote.json", release = latestRelease, download = downloadRelease, renameFile = rename }) {
-    this.store = store; this.sessions = sessions; this.file = file; this.release = release; this.download = download; this.renameFile = renameFile;
+  constructor({ store, sessions, directory, file = store.file + ".remote.json", release = latestRelease, download = downloadRelease, renameFile = rename }) {
+    this.store = store; this.sessions = sessions; this.directory = directory; this.file = file; this.release = release; this.download = download; this.renameFile = renameFile;
     this.#ready = this.#load();
     void this.#ready.catch(() => {});
   }
@@ -162,6 +176,7 @@ export class RemoteManager {
             operation.updatedAt = new Date().toISOString();
           } else {
             operation.state = "unknown";
+            if (operation.library && operation.library.configState !== "applied") operation.library.configState = "unknown";
             operation.message = "插件已重启，请连接后检测远端操作结果";
           }
         }
@@ -297,9 +312,11 @@ export class RemoteManager {
         if (downloadedBytes > 1e12 || totalBytes > 1e12 || (totalBytes > 0 && downloadedBytes > totalBytes)) continue;
         const downloading = ["downloading", "uploading", "updating"].includes(step);
         if (!downloading && (downloadedBytes || totalBytes)) continue;
-        const changed = operation.step !== step, now = Date.now();
-        operation.step = step; operation.updatedAt = new Date(now).toISOString();
-        operation.message = steps[step] + "中";
+      const changed = operation.step !== step, now = Date.now();
+      operation.step = step; operation.updatedAt = new Date(now).toISOString();
+      operation.message = steps[step] + "中";
+      if (operation.library && step === "applying_library") operation.library.configState = "unknown";
+      if (operation.library && step === "syncing_library") Object.assign(operation.library, { configState: "applied", syncState: "unknown" });
         if (downloading) {
           let bytesPerSecond = changed || (sample && downloadedBytes < sample.bytes) ? 0 : operation.progress?.bytesPerSecond ?? 0;
           if (sample && sample.step === step && downloadedBytes >= sample.bytes && now > sample.time) bytesPerSecond = Math.round((downloadedBytes - sample.bytes) * 1000 / (now - sample.time));
@@ -321,8 +338,8 @@ export class RemoteManager {
       : operation.state === "succeeded" ? "已完成" : operation.state === "unknown" ? "结果未知，请检测环境核实，避免重复执行"
         : operation.diagnostic ? actionFailure(operation.action, operation.diagnostic.exitCode, operation.diagnostic).message : operation.message;
     const backup = operation.result?.backupDirectory ? "；远端备份目录：" + operation.result.backupDirectory : "";
-    const restore = restoreResultMessage(operation.restore);
-    this.sessions.recordLog?.(id, level, "远程 Magpie：" + labels[operation.action] + " · " + (reconciled ? "检测确认：" : "") + (["REMOTE_NOT_DISPATCHED", "REMOTE_RECOVERED"].includes(operation.error?.code) ? operation.message : message) + backup + (restore ? "；" + restore : "") + "（任务 " + operation.id + "）");
+    const detail = restoreResultMessage(operation.restore) || (operation.state !== "running" && libraryResultMessage(operation.library));
+    this.sessions.recordLog?.(id, level, "远程 Magpie：" + labels[operation.action] + " · " + (reconciled ? "检测确认：" : "") + (["REMOTE_NOT_DISPATCHED", "REMOTE_RECOVERED"].includes(operation.error?.code) ? operation.message : message) + backup + (detail ? "；" + detail : "") + "（任务 " + operation.id + "）");
   }
 
   async #closeWebForward(id) {
@@ -344,6 +361,16 @@ export class RemoteManager {
     const response = await this.sessions.execute(id, "sh -s", { input: backupInventoryScript, signal, timeoutMs: 30000, maxBytes: 262144 });
     if (response.code !== 0) throw new OperationError("REMOTE_BACKUPS_FAILED", "无法读取远端备份，请检查备份目录权限和 sha256sum 命令");
     return parseBackups(response.stdout, instance.configDirectory);
+  }
+
+  async #readLibrary(id, instance, categories, signal) {
+    this.#connected(id);
+    const response = await this.sessions.execute(id, "sh -s", { input: librarySnapshotScript(instance, categories), signal, timeoutMs: 120000, maxBytes: librarySnapshotMaxBytes });
+    if (response.code === 78) throw libraryPathError();
+    if (response.code === 81) throw libraryLimitError();
+    if (response.code === 82) throw new OperationError("REMOTE_PREVIEW_STALE", "远端 Magpie 数据目录已变化，请重新检测");
+    if (response.code !== 0) throw new OperationError("REMOTE_LIBRARY_READ_FAILED", "无法读取远端资源库，请检查文件权限与所需命令");
+    return parseLibrarySnapshot(response.stdout, categories);
   }
 
   async backups(id, { signal } = {}) {
@@ -379,19 +406,24 @@ export class RemoteManager {
     const lines = response.stdout.split(/\r?\n/).filter((line) => line.length), state = lines[0];
     const result = parseActionResult(response.stdout, operation.id);
     const restore = operation.action === "restore" ? parseRestoreResult(response.stdout, operation.id) : undefined;
-    const consistent = lines.length === 1 || (result && (lines.length === 2 || (lines.length === 3 && restore))
-      && lines[1].startsWith("MIGPIE_RESULT_V1\t") && (lines.length < 3 || lines[2].startsWith("MIGPIE_RESTORE_V1\t"))
-      && (state === "succeeded" ? result.exitCode === 0 && result.step === "completed" && (!restore || (restore.configState === "applied" && restore.rollbackState === "not_needed" && ["running", "unchanged"].includes(restore.serviceState))) : result.exitCode !== 0));
+    const library = operation.action === libraryAction ? parseLibraryResult(response.stdout, operation.id, state === "succeeded") : undefined;
+    const consistent = operation.action === libraryAction
+      ? result && library && operation.library && lines.length === 3 && lines[1].startsWith("MIGPIE_RESULT_V1\t") && lines[2].startsWith("MIGPIE_LIBRARY_RESULT_V1\t") && (state === "succeeded" ? result.exitCode === 0 && result.backupReady : result.exitCode !== 0)
+      : lines.length === 1 || (result && (lines.length === 2 || (lines.length === 3 && restore))
+        && lines[1].startsWith("MIGPIE_RESULT_V1\t") && (lines.length < 3 || lines[2].startsWith("MIGPIE_RESTORE_V1\t"))
+        && (state === "succeeded" ? result.exitCode === 0 && result.step === "completed" && (!restore || (restore.configState === "applied" && restore.rollbackState === "not_needed" && ["running", "unchanged"].includes(restore.serviceState))) : result.exitCode !== 0));
     if (response.code === 0 && ["succeeded", "failed"].includes(state) && consistent && !record.instance.locked) {
       operation.state = state; operation.step = state === "succeeded" ? "completed" : result?.step ?? "failed";
       operation.updatedAt = new Date().toISOString();
       delete operation.error;
       if (result) operation.diagnostic = { step: result.step, exitCode: result.exitCode, reason: result.reason };
       if (restore) operation.restore = restore;
+      if (library) Object.assign(operation.library, library);
       if (backupActions.includes(operation.action) && (state === "succeeded" || result?.backupReady)) operation.result = { backupDirectory: backupDirectory(record.instance, operation.id) };
       if (state === "failed" && result) operation.error = errorDetails(actionFailure(operation.action, result.exitCode, result));
       operation.message = state === "succeeded" ? "已根据远端完成记录核实操作结束，请检查当前环境" : operation.error?.message ?? "远端记录显示操作失败，请检查实际状态后处理";
       if (restore) operation.message += "；" + restoreResultMessage(restore);
+      if (libraryResultMessage(operation.library)) operation.message += "；" + libraryResultMessage(operation.library);
       if (state === "succeeded" && ["stop", "uninstall"].includes(operation.action)) {
         try { await this.#closeWebForward(id); }
         catch { operation.message += "，本机 Web 通道关闭失败，请在端口转发中停止该通道"; }
@@ -406,6 +438,14 @@ export class RemoteManager {
     if (instance.locked) throw new OperationError("REMOTE_BUSY", "远端存在未释放的管理操作锁，请先核实操作状态");
     if (action === "delete_backup") {
       if (!instance.tools.includes("sha256sum")) throw new OperationError("REMOTE_PREREQUISITE", "读取和删除备份需要远端 sha256sum");
+      return;
+    }
+    if (action === libraryAction) {
+      if (!instance.installed) throw new OperationError("REMOTE_NOT_INSTALLED", "请先安装远程 Magpie");
+      if (!this.directory) throw new OperationError("REMOTE_LIBRARY_LOCAL_UNAVAILABLE", "未配置本机 Magpie 数据目录");
+      const path = instance.configDirectory;
+      if (!path?.startsWith("/") || !path.endsWith("/magpie") || posix.normalize(path) !== path) throw libraryPathError();
+      for (const tool of ["sha256sum", "base64", "mktemp", "tar", "readlink"]) if (!instance.tools.includes(tool)) throw new OperationError("REMOTE_PREREQUISITE", "资源库同步需要远端命令：" + tool);
       return;
     }
     if (action === "install") {
@@ -447,7 +487,9 @@ export class RemoteManager {
     if (action === "uninstall" && !instance.tools.includes("readlink")) throw new OperationError("REMOTE_PREREQUISITE", "卸载需要远端 readlink 核实默认安装路径");
   }
 
-  async preview(id, action, { signal, backupId } = {}) {
+  async preview(id, action, { signal, backupId, categories, mode } = {}) {
+    const options = action === libraryAction ? libraryOptions({ categories, mode }) : undefined;
+    if (!options && (categories !== undefined || mode !== undefined)) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "仅资源库同步接受分类和同步策略");
     const profile = await this.#profile(id), record = this.#record(id, profile);
     if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BUSY", "已有远端操作尚未完成核实，请先检测其结果");
     const instance = await this.#probe(id, signal);
@@ -474,6 +516,19 @@ export class RemoteManager {
     if (action === "backup") {
       changes.push("通过 tar 保存当前配置目录的 config.tar.gz 归档；配置目录不存在时记录为空", "保留当前程序副本和版本；服务保持当前运行状态，不执行更新");
     }
+    let library;
+    if (options) {
+      const local = await readLocalLibrary(this.directory, options.categories, { includeFiles: false });
+      const remote = await this.#readLibrary(id, instance, options.categories, signal);
+      const plan = planLibrary(local, remote, options);
+      library = { ...options, localFingerprint: local.fingerprint, remoteFingerprint: remote.fingerprint };
+      const capable = instance.capabilities.includes("library_sync");
+      library.preview = { ...options, counts: plan.counts, details: plan.details, warnings: plan.warnings, activation: !capable ? "unsupported" : remote.gateway ? "gateway_mode" : "supported" };
+      changes.push("通过 SSH 上传并校验所选资源，写入前备份当前 Magpie 配置，保留本机条目的 Agent 选择");
+      if (capable) changes.push("写入资源库后执行 magpie library sync");
+      else warnings.push("此 Magpie 版本未确认支持 magpie library sync，资源可写入远端资源库，Agent 配置暂不生效");
+      if (remote.gateway) warnings.push("远端配置为 Gateway 模式，可能没有本地 Agent 可应用资源库");
+    }
     if (action === "restore") {
       changes.push("恢复备份 " + selectedBackup.id, "先保存恢复前的完整配置归档和当前程序副本", ...(instance.service.state === "running" ? ["停止当前运行的用户服务"] : []), selectedBackup.format === "absent" ? "还原为无配置目录状态，保留当前程序版本" : "用所选配置归档替换当前配置目录，保留当前程序版本", instance.service.state === "running" ? "重新启动原先运行的服务并检查健康状态" : "保持服务未运行状态");
       warnings.push("当前配置目录会被替换，备份之外的设置、Agent 和插件配置不会保留；恢复前快照可在备份列表中查看", "配置格式需与当前程序兼容；外部目录中的数据不会随此归档恢复", "配置应用后若服务启动或健康检查失败，不会自动回退；结果将分别说明配置、服务与恢复依据");
@@ -494,9 +549,10 @@ export class RemoteManager {
     }
     if (!instance.linger && ["start", "enable_web"].includes(action)) warnings.push("未确认启用 linger，退出 SSH 后用户服务可能停止；需要时在服务器配置 loginctl enable-linger");
     const revision = randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "");
-    this.#previews.set(id, { action, revision, baseline: hash(instance), profile: profileRevision(profile), instance, update, release, backupMode, selectedBackup, expires: Date.now() + 300000 });
+    this.#previews.set(id, { action, revision, baseline: hash(instance), profile: profileRevision(profile), instance, update, release, backupMode, selectedBackup,
+      ...(library && { library: { options, localFingerprint: library.localFingerprint, remoteFingerprint: library.remoteFingerprint } }), expires: Date.now() + 300000 });
     record.instance = instance; record.update = update; record.observedAt = new Date().toISOString(); await this.#save();
-    return { connectionId: id, action, revision, summary: labels[action], changes, warnings, ...(backupMode && { backupMode }), ...(selectedBackup && { backupId: selectedBackup.id }) };
+    return { connectionId: id, action, revision, summary: labels[action], changes, warnings, ...(backupMode && { backupMode }), ...(selectedBackup && { backupId: selectedBackup.id }), ...(library && { library: library.preview }) };
   }
 
   async apply(id, action, revision) {
@@ -510,7 +566,8 @@ export class RemoteManager {
     if (record.operation?.state === "unknown") throw new OperationError("REMOTE_BUSY", "上次操作结果待核实，请先连接并检测");
     if (!preview || preview.action !== action || preview.revision !== revision || preview.expires < Date.now() || preview.profile !== profileRevision(profile)) throw new OperationError("REMOTE_PREVIEW_STALE", "操作预览已过期或连接配置已变化，请重新预览");
     this.#connected(id);
-    const operation = { id: randomUUID(), action, revision, state: "running", step: "checking", dispatch: "pending", message: "正在复核环境", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...(preview.selectedBackup && { backupId: preview.selectedBackup.id }) };
+    const operation = { id: randomUUID(), action, revision, state: "running", step: "checking", dispatch: "pending", message: "正在复核环境", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...(preview.selectedBackup && { backupId: preview.selectedBackup.id }),
+      ...(preview.library && { library: { ...preview.library.options, configState: "not_applied", syncState: "not_started" } }) };
     const previous = record.operation, previousHistory = record.history;
     if (terminalOperation(previous)) record.history = [operationSummary(previous), ...record.history].slice(0, operationHistoryLimit);
     record.operation = operation;
@@ -525,7 +582,7 @@ export class RemoteManager {
 
   async #run(id, record, preview) {
     const operation = record.operation;
-    let dispatched = false, artifact;
+    let dispatched = false, artifact, library;
     try {
       const instance = await this.#probe(id);
       if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭，未执行变更");
@@ -538,8 +595,19 @@ export class RemoteManager {
         if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭，未执行变更");
         if (hash(await this.#probe(id)) !== preview.baseline) throw new OperationError("REMOTE_PREVIEW_STALE", "下载期间远端程序、服务或环境已变化，请重新预览");
       }
-      const script = actionScript(operation.action, instance, operation.id, preview.release, preview.selectedBackup);
-      const command = artifact ? scriptCommand(script) : "sh -s";
+      if (preview.library) {
+        report("packing_library", 0, 0);
+        const { options, localFingerprint, remoteFingerprint } = preview.library;
+        const local = await readLocalLibrary(this.directory, options.categories);
+        if (local.fingerprint !== localFingerprint) throw new OperationError("REMOTE_PREVIEW_STALE", "本机资源库已变化，请重新预览");
+        const remote = await this.#readLibrary(id, instance, options.categories, this.#shutdown.signal);
+        if (remote.fingerprint !== remoteFingerprint) throw new OperationError("REMOTE_PREVIEW_STALE", "远端资源库已变化，请重新预览");
+        library = { ...libraryBundle(planLibrary(local, remote, options)), remote: { fingerprint: remote.fingerprint }, options };
+        if (this.#closed) throw new OperationError("REMOTE_CLOSED", "远程管理已关闭，未执行变更");
+      }
+      const script = actionScript(operation.action, instance, operation.id, preview.release, preview.selectedBackup, library);
+      const upload = library ?? artifact;
+      const command = upload ? scriptCommand(script) : "sh -s";
       delete operation.progress;
       operation.step = "executing"; operation.dispatch = "possible"; operation.message = labels[operation.action] + "中，刷新页面后可继续查看";
       await this.#save();
@@ -547,13 +615,14 @@ export class RemoteManager {
       dispatched = true;
       let uploaded = 0;
       const response = await this.sessions.execute(id, command, {
-        input: artifact ? createReadStream(artifact.path) : script, timeoutMs: 600000, maxBytes: 262144,
-        onStdout: (chunk) => { progress(chunk); if (artifact && operation.step === "uploading") report("uploading", uploaded, artifact.size); },
-        onInput: (bytes) => { uploaded = bytes; if (operation.step === "uploading") report("uploading", bytes, artifact.size); },
+        input: library ? library.stream() : artifact ? createReadStream(artifact.path) : script, timeoutMs: 600000, maxBytes: 262144,
+        onStdout: (chunk) => { progress(chunk); if (upload && operation.step === "uploading") report("uploading", uploaded, upload.size); },
+        onInput: (bytes) => { uploaded = bytes; if (upload && operation.step === "uploading") report("uploading", bytes, upload.size); },
       });
       delete operation.progress;
       const result = parseActionResult(response.stdout, operation.id, response.code);
       const restore = operation.action === "restore" ? parseRestoreResult(response.stdout, operation.id) : undefined;
+      const libraryResult = library ? parseLibraryResult(response.stdout, operation.id, response.code === 0) : undefined;
       if (restore) operation.restore = restore;
       if (result) {
         operation.diagnostic = { step: result.step, exitCode: result.exitCode, reason: result.reason };
@@ -561,6 +630,11 @@ export class RemoteManager {
       }
       if (response.stdout.includes("MIGPIE_RESTORE_V1") && (!restore || !result
         || (response.code === 0 && (restore.configState !== "applied" || restore.rollbackState !== "not_needed" || !["running", "unchanged"].includes(restore.serviceState))))) throw new OperationError("REMOTE_RESULT_UNKNOWN", "恢复结果记录无效，请检测配置与服务实际状态");
+      if (library) {
+        if (!result && response.code !== 0 && [75, 78].includes(response.code) && !response.stdout.includes("MIGPIE_RESULT_V1")) throw actionFailure(operation.action, response.code);
+        if (!libraryResult || !result || (response.code === 0 && !result.backupReady)) throw new OperationError("REMOTE_RESULT_UNKNOWN", "资源库同步结果记录无效，请检测远端实际状态");
+        Object.assign(operation.library, libraryResult);
+      }
       if (response.code !== 0) throw actionFailure(operation.action, response.code, result);
       if (!response.stdout.split(/\r?\n/).includes("MIGPIE_DONE") || (!result && response.stdout.includes("MIGPIE_RESULT_V1"))) throw new OperationError("REMOTE_RESULT_UNKNOWN", "远端完成标记缺失或结果记录无效，请检测实际状态");
       operation.message = labels[operation.action] + "已完成";
@@ -577,7 +651,9 @@ export class RemoteManager {
       } catch { operation.message += "，当前环境尚未刷新，请重新检测"; }
       operation.state = "succeeded"; operation.step = "completed";
     } catch (error) {
+      if (operation.action === libraryAction && !(error instanceof OperationError)) error = new OperationError("REMOTE_LIBRARY_FAILED", "资源库同步未能完成，请检查本机文件和远端任务状态");
       operation.state = dispatched && uncertain.has(error.code) ? "unknown" : "failed";
+      if (operation.library && operation.state === "unknown" && operation.library.configState !== "applied") operation.library.configState = "unknown";
       operation.step = operation.state === "failed" ? operation.diagnostic?.step ?? "failed" : operation.state;
       operation.error = errorDetails(error); operation.message = error.message;
     } finally {
@@ -587,6 +663,8 @@ export class RemoteManager {
       }
       delete operation.progress;
       if (operation.restore) operation.message += "；" + restoreResultMessage(operation.restore);
+      const libraryDetail = libraryResultMessage(operation.library);
+      if (libraryDetail) operation.message += "；" + libraryDetail;
       operation.updatedAt = new Date().toISOString();
       try { await this.#save(); }
       catch (cause) {

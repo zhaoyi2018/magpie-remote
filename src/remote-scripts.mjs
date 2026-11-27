@@ -1,8 +1,10 @@
 import { backupIdPattern, backupInspection } from "./remote-backups.mjs";
+import { libraryAction } from "./remote-library.mjs";
+import { libraryCommitScript, libraryReceiveScript, libraryScriptCleanup, libraryScriptResult, libraryScriptVariables } from "./remote-library-transfer.mjs";
 import { servicePolicyFunctions } from "./remote-service.mjs";
 
-export const remoteActions = ["install", "update", "start", "stop", "restart", "enable_web", "backup", "restore", "delete_backup", "uninstall"];
-export const backupActions = ["update", "backup", "restore"];
+export const remoteActions = ["install", "update", "start", "stop", "restart", "enable_web", "backup", "restore", "delete_backup", "uninstall", libraryAction];
+export const backupActions = ["update", "backup", "restore", libraryAction];
 
 export function shellQuote(value) {
   if (typeof value !== "string" || /[\x00-\x1f\x7f]/.test(value)) throw new Error("远端参数无效");
@@ -51,6 +53,8 @@ if [ -n "$bin" ] && [ -x "$bin" ]; then
   done
   install_help=$(printf '%s\\n' "$daemon" | grep -E '^install([[:space:]]|$)' | tr '[]=' '   ' || true)
   if printf '%s\\n' "$install_help" | grep -Eq -- '(^|[[:space:]])--web([[:space:]]|$)' && printf '%s\\n' "$install_help" | grep -Eq -- '(^|[[:space:]])--addr([[:space:]]|$)'; then capabilities="$capabilities daemon_install_web"; fi
+  library_help=$("$bin" library help 2>/dev/null) || library_help=''
+  if printf '%s\\n' "$library_help" | grep -Eq '^[[:space:]]*magpie[[:space:]]+library[[:space:]]+sync([[:space:]]|$)'; then capabilities="$capabilities library_sync"; fi
   emit capabilities "$capabilities"
 else emit installed false; fi
 systemd=false
@@ -134,8 +138,10 @@ printf 'MIGPIE_RECOVERED_V1\\t%s\\n' '${operationId}'
 `;
 }
 
-export function actionScript(action, instance, operationId, release, selectedBackup) {
+export function actionScript(action, instance, operationId, release, selectedBackup, library) {
   if (["restore", "delete_backup"].includes(action) && (!backupIdPattern.test(selectedBackup?.id ?? "") || !/^[a-f0-9]{64}$/.test(selectedBackup?.fingerprint ?? ""))) throw new Error("备份标识或校验值无效");
+  const syncingLibrary = action === libraryAction;
+  if (syncingLibrary && !backupIdPattern.test(operationId ?? "")) throw new Error("操作标识无效");
   const bin = shellQuote(instance.binary || instance.managedBinary);
   const restoreCleanup = action === "restore" ? `  if [ -n "$restore_stage" ]; then
     if [ "$restore_applied" = false ] && [ -d "$restore_stage/previous" ]; then
@@ -157,7 +163,10 @@ export function actionScript(action, instance, operationId, release, selectedBac
   result=$(printf '%s\\n%s' "$result" "$restore_result")
 ` : "";
   const startsService = ["enable_web", "start", "restart"].includes(action) || ["update", "restore"].includes(action) && instance.service.state === "running";
-  const prefix = common + `bin=${bin}
+  const prefix = (syncingLibrary ? `exec 2>/dev/null
+unset TAR_OPTIONS
+[ ! -L "\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote" ] || exit 78
+` : "") + common + `bin=${bin}
 ${startsService ? "unit=" + shellQuote(instance.unit) + "\n" : ""}job="$base/operations/${operationId}"
 step=preparing
 reason=command_failed
@@ -167,21 +176,21 @@ replacement=''
 restore_stage=''
 restore_applied=false
 service_pending=false
-${action === "restore" ? "restore_config_state=not_applied\nrestore_service_state=unchanged\nrestore_rollback_state=not_needed\n" : ""}finish() {
+${syncingLibrary ? libraryScriptVariables : ""}${action === "restore" ? "restore_config_state=not_applied\nrestore_service_state=unchanged\nrestore_rollback_state=not_needed\n" : ""}finish() {
   code=$?
   trap - EXIT
   trap '' HUP INT TERM PIPE
   set +e
   if [ "$service_pending" = true ]; then systemctl --user stop magpie.service >/dev/null 2>&1; fi
-  rm -f "$job/output"
+${syncingLibrary ? "" : '  rm -f "$job/output"\n'}\
   if [ -n "$stage" ]; then rm -f "$stage/magpie"; rmdir "$stage"; fi
   if [ -n "$replacement" ]; then rm -f -- "$replacement"; fi
-${restoreCleanup}  if [ -f "$job/step" ]; then step=$(cat "$job/step"); fi
-  if [ -f "$job/reason" ]; then reason=$(cat "$job/reason"); fi
+${restoreCleanup}${syncingLibrary ? libraryScriptCleanup : ""}  if ${syncingLibrary ? '[ "$job_created" = true ] && ' : ""}[ -f "$job/step" ]; then step=$(cat "$job/step"); fi
+  if ${syncingLibrary ? '[ "$job_created" = true ] && ' : ""}[ -f "$job/reason" ]; then reason=$(cat "$job/reason"); fi
   state=failed
   if [ "$code" -eq 0 ]; then state=succeeded; step=completed; reason=none; fi
   result=$(printf 'MIGPIE_RESULT_V1\\t%s\\t%s\\t%s\\t%s\\t%s' '${operationId}' "$step" "$code" "$reason" "$backup_ready")
-${restoreResult}  if [ -d "$job" ]; then
+${restoreResult}${syncingLibrary ? libraryScriptResult(operationId) : ""}  if [ -d "$job" ]${syncingLibrary ? ' && [ "$job_created" = true ]' : ""}; then
     printf '%s\\n' "$result" > "$job/result.tmp" && mv "$job/result.tmp" "$job/result"
     printf '%s' "$state" > "$job/state"
   fi
@@ -196,7 +205,7 @@ trap 'exit 143' TERM
 trap 'exit 141' PIPE
 printf '%s:%s' '${operationId}' "$$" > "$lock/owner"
 [ ! -e "$base/recovery.lock" ] || exit 75
-mkdir -p "$job"
+${syncingLibrary ? '[ ! -L "$base/operations" ] || { reason=unsafe_library; exit 78; }\nmkdir -p "$base/operations"\nmkdir "$job"\njob_created=true' : 'mkdir -p "$job"'}
 printf running > "$job/state"
 emit_progress() { printf 'MIGPIE_PROGRESS_V1\\t%s\\t%s\\t%s\\t%s\\n' '${operationId}' "$1" "$2" "$3"; }
 set_step() { step=$1; printf '%s' "$step" > "$job/step"; emit_progress "$step" 0 0; }
@@ -304,7 +313,7 @@ elif [ -L "$config" ]; then run_step restoring rm -- "$config"; fi
 restore_applied=true
 restore_config_state=applied
 ` : "";
-    return prefix + uploadedRelease + selected + `command -v sha256sum >/dev/null
+    const backupScript = `command -v sha256sum >/dev/null
 command -v tar >/dev/null
 config=${shellQuote(instance.configDirectory)}
 set_step preparing_backup
@@ -321,7 +330,9 @@ elif [ -e "$config" ] || [ -L "$config" ]; then exit 77
 else printf 'Configuration directory did not exist before this operation.\\n' > "$backup/config.absent"; fi
 run_step saving_binary cp -p "$bin" "$backup/magpie"
 backup_ready=true
-${mutation}${action !== "backup" && instance.service.state === "running" ? `${action === "restore" ? "restore_service_state=unknown\n" : ""}start_private_service ${action === "restore" ? 'starting "$bin" daemon start' : 'restarting "$bin" daemon restart'} </dev/null\n` : ""}${action === "update" ? 'run_step checking_version "$bin" --version </dev/null\n' : ""}${action !== "backup" && instance.service.state === "running" ? `run_step healthcheck "$bin" healthcheck </dev/null\n${action === "restore" ? "restore_service_state=running\n" : ""}` : ""}printf 'MIGPIE_DONE\\n'
+`;
+    if (syncingLibrary) return prefix + libraryReceiveScript(instance, library) + backupScript + libraryCommitScript(instance);
+    return prefix + uploadedRelease + selected + backupScript + `${mutation}${action !== "backup" && instance.service.state === "running" ? `${action === "restore" ? "restore_service_state=unknown\n" : ""}start_private_service ${action === "restore" ? 'starting "$bin" daemon start' : 'restarting "$bin" daemon restart'} </dev/null\n` : ""}${action === "update" ? 'run_step checking_version "$bin" --version </dev/null\n' : ""}${action !== "backup" && instance.service.state === "running" ? `run_step healthcheck "$bin" healthcheck </dev/null\n${action === "restore" ? "restore_service_state=running\n" : ""}` : ""}printf 'MIGPIE_DONE\\n'
 `;
   }
   if (action === "enable_web") return prefix + `service_pending=true

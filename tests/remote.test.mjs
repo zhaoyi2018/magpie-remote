@@ -6,6 +6,7 @@ import { OperationError } from "../src/errors.mjs";
 import { RemoteManager, parseProbe } from "../src/remote.mjs";
 import { probeScript } from "../src/remote-scripts.mjs";
 import { backupInventoryScript } from "../src/remote-backups.mjs";
+import { libraryHash } from "../src/remote-library.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { temporary, until } from "./helpers.mjs";
 
@@ -53,6 +54,7 @@ class FakeSessions {
   onProbe;
   onAction;
   onReconcile;
+  onLibrary;
   webResponse = response(`http://127.0.0.1:3430/?k=${managementKey}\n`);
   remoteState = "";
 
@@ -63,6 +65,7 @@ class FakeSessions {
     let kind;
     if (command === "sh -s" && input === probeScript) kind = "probe";
     else if (command === "sh -s" && input === backupInventoryScript) kind = "backups";
+    else if (command === "sh -s" && input?.includes("MIGPIE_LIBRARY_V1")) kind = "library";
     else if (command === "sh -s" && /cat "\$base\/operations\/[a-f0-9-]+\/state"/.test(input ?? "")) kind = "reconcile";
     else if (command === "sh -s" && input?.includes("MIGPIE_RECOVERED_V1")) kind = "recover";
     else if (/ daemon web$/.test(command)) kind = "web";
@@ -79,6 +82,7 @@ class FakeSessions {
     if (kind === "probe") return this.onProbe ? this.onProbe(call) : response(probe(this.fields));
     if (kind === "action") return this.onAction ? this.onAction(call) : success();
     if (kind === "backups") return response("MIGPIE_BACKUPS_V1\n" + this.backupRows.join("\n") + (this.backupRows.length ? "\n" : ""));
+    if (kind === "library") return this.onLibrary(call);
     if (kind === "reconcile") return this.onReconcile ? this.onReconcile(call) : response(this.remoteState + "\n");
     if (kind === "recover") return this.onRecover ? this.onRecover(call) : response(`MIGPIE_RECOVERED_V1\t${input.match(/printf 'MIGPIE_RECOVERED_V1[^\n]+ '([a-f0-9-]{36})'/)[1]}\n`);
     return this.webResponse;
@@ -97,6 +101,54 @@ class FakeSessions {
 
   actions() { return this.calls.filter((call) => call.kind === "action"); }
 }
+
+test("library revisions cover local snapshots and action history never stores MCP credentials", async (t) => {
+  const directory = await temporary(t), library = join(directory, "magpie"), libraryFile = join(library, "library.json");
+  await mkdir(library);
+  const local = { mcp: [{ name: "private", transport: "stdio", command: "cmd", env: { TOKEN: "LOCAL_TEST_SECRET" }, agents: ["opencode"] }] };
+  await writeFile(libraryFile, JSON.stringify(local));
+  const store = new ProfileStore(join(directory, "connections.json"));
+  await store.save({ id: "server", host: "fixture.invalid", username: "tester" });
+  const sessions = new FakeSessions();
+  sessions.fields = { capabilities: baseProbe.capabilities + " library_sync" };
+  const source = Buffer.from(JSON.stringify({ applied: { codex: ["old"] }, mcp: [{ name: "private", env: { TOKEN: "REMOTE_TEST_SECRET" } }] }));
+  sessions.onLibrary = () => response(`MIGPIE_LIBRARY_V1\nJ\t${source.length}\t${libraryHash(source)}\nG\tfalse\nC\t${source.toString("base64")}\n`);
+  sessions.onAction = ({ command, uploaded }) => {
+    assert.doesNotMatch(command, /TEST_SECRET/);
+    assert.ok(uploaded.includes("LOCAL_TEST_SECRET"));
+    const id = command.match(/job="\$base\/operations\/([a-f0-9-]{36})"/)[1];
+    return response(`MIGPIE_DONE\nMIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue\nMIGPIE_LIBRARY_RESULT_V1\t${id}\tapplied\tsynced\n`);
+  };
+  const manager = new RemoteManager({ store, sessions, directory: library });
+  t.after(() => manager.close());
+  const preview = await manager.preview("server", "library_sync", { categories: ["mcp"] });
+  assert.deepEqual(preview.library.counts.mcp, { added: 0, updated: 1, removed: 0, skipped: 0, preserved: 0 });
+  assert.equal(preview.library.warnings[0].code, "WINDOWS_STDIO_MCP");
+  assert.doesNotMatch(JSON.stringify(preview), /TEST_SECRET/);
+  await writeFile(libraryFile, JSON.stringify({ ...local, commands: [{ name: "changed" }] }));
+  await manager.apply("server", "library_sync", preview.revision);
+  await until(async () => (await manager.operation("server"))?.state === "failed");
+  assert.equal((await manager.operation("server")).error.code, "REMOTE_PREVIEW_STALE");
+  assert.equal(sessions.actions().length, 0);
+  const second = await manager.preview("server", "library_sync", { categories: ["mcp"], mode: "mirror" });
+  const queued = await manager.apply("server", "library_sync", second.revision);
+  await until(async () => (await manager.operation("server"))?.state === "succeeded");
+  const completed = await manager.apply("server", "library_sync", second.revision);
+  assert.equal(completed.id, queued.id);
+  assert.deepEqual(completed.library, { categories: ["mcp"], mode: "mirror", configState: "applied", syncState: "synced" });
+  assert.ok(completed.result.backupDirectory.endsWith(queued.id));
+  assert.equal((await manager.operation("server", undefined, { history: true })).operations.length, 2);
+  const third = await manager.preview("server", "library_sync", { categories: ["mcp"] });
+  sessions.onAction = () => { throw new OperationError("REMOTE_DISCONNECTED", "SSH 已断开"); };
+  const detached = await manager.apply("server", "library_sync", third.revision);
+  await until(async () => (await manager.operation("server"))?.state === "unknown");
+  sessions.onReconcile = () => response(`succeeded\nMIGPIE_RESULT_V1\t${detached.id}\tcompleted\t0\tnone\ttrue\nMIGPIE_LIBRARY_RESULT_V1\t${detached.id}\tapplied\tunchanged\n`);
+  const status = await manager.status("server", { refresh: true });
+  assert.equal(status.operation.state, "succeeded");
+  assert.equal(status.operation.library.syncState, "unchanged");
+  assert.doesNotMatch(JSON.stringify(sessions.logs) + await readFile(manager.file, "utf8"), /TEST_SECRET/);
+  await manager.close();
+});
 
 async function fixture(t, fields = {}) {
   const directory = await temporary(t);

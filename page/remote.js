@@ -1,13 +1,24 @@
 const actionLabels = {
   install: "安装 Magpie", update: "更新 Magpie", start: "启动服务", stop: "停止服务",
   restart: "重启服务", enable_web: "启用网页管理", uninstall: "卸载 Magpie",
-  backup: "创建备份", restore: "恢复配置", delete_backup: "删除备份",
+  backup: "创建备份", restore: "恢复配置", delete_backup: "删除备份", library_sync: "同步资源库",
 };
-const panelActions = ["install", "update", "start", "stop", "restart", "enable_web", "uninstall", "backup"];
+const panelActions = ["install", "update", "start", "stop", "restart", "enable_web", "uninstall", "backup", "library_sync"];
 const serviceActions = new Set(["start", "stop", "restart", "enable_web"]);
-const backupActions = new Set(["backup", "update", "restore", "delete_backup"]);
+const backupActions = new Set(["backup", "update", "restore", "delete_backup", "library_sync"]);
 const operationLabels = { running: "执行中", succeeded: "已完成", failed: "失败", unknown: "结果未知" };
 const stepLabels = { checking: "复核环境", executing: "执行变更", preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存旧程序", downloading: "本机下载程序", uploading: "上传程序到服务器", checking_upload: "检查上传程序", installing: "安装程序", updating: "执行官方更新", restoring: "恢复配置", deleting_backup: "删除备份", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", healthcheck: "检查服务健康状态", completed: "执行完成", failed: "执行失败", unknown: "等待核实" };
+Object.assign(stepLabels, { packing_library: "打包资源库", applying_library: "写入远端资源库", syncing_library: "应用到远端 Agent" });
+const libraryCategories = { instructions: "共享指令", skills: "技能", mcp: "MCP 服务器", commands: "自定义命令" };
+const libraryChanges = { added: "新增", updated: "更新", removed: "将移除", skipped: "跳过", preserved: "保留" };
+const libraryKinds = { entry: "条目", shared_instructions: "共享指令", instruction_set: "指令集", instruction_set_file: "指令集文件" };
+const libraryReasons = { local_symlink: "本机链接项", local_instruction_file: "本机指令文件引用", remote_instruction_file: "远端指令文件引用", local_mcp: "本机专属 MCP", remote_local_mcp: "远端本机专属 MCP", remote_here: "远端本机启动覆盖", remote_here_transport_conflict: "远端本机启动方式冲突", remote_off_here: "远端本机停用设置" };
+function libraryOutcome(library) {
+  if (!library) return "";
+  const config = { not_applied: "资源尚未落盘", applied: "资源已落盘", rolled_back: "资源变更已回滚", unknown: "资源落盘状态待核实" }[library.configState] || "资源状态待核实";
+  const sync = { not_started: "Agent 同步尚未开始", synced: "Agent 已同步", unchanged: "Agent 无需变更", unsupported: "当前版本不支持自动生效", no_agents: "没有需要同步的 Agent", gateway_mode: "处于 Gateway 模式，未自动生效", failed: "Agent 同步失败，可从备份恢复；部分 Agent 写入可能仍然保留", unknown: "Agent 同步状态待核实" }[library.syncState];
+  return config + (sync ? "；" + sync : "") + "。";
+}
 const serviceLabels = { running: "运行中", stopped: "已停止", unavailable: "不可用", unknown: "待核实" };
 const backupFormatLabels = { encrypted: "历史加密备份", archive: "配置归档", absent: "无配置目录快照", incomplete: "备份不完整" };
 
@@ -39,6 +50,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
       if (item.updatedAt || item.createdAt) date.dateTime = item.updatedAt ?? item.createdAt;
       const detail = element("div", "log-message history-detail");
       detail.append(element("strong", "", actionLabels[item.action] ?? "远程任务"), element("p", "", item.message));
+      if (item.library) detail.append(element("p", "", libraryOutcome(item.library)));
       if (item.result?.backupDirectory) detail.append(element("p", "", "远端备份目录：" + item.result.backupDirectory));
       detail.append(element("p", "history-id", "任务 " + item.id));
       if (item.id === restoredOperation?.id) detail.append(element("p", "", "上次查看的任务"));
@@ -284,6 +296,12 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
     $("remote-local-provider-sync").disabled = !sshReady() || !linked || autoLinkDisabled || providerSyncing || running() || uncertain() || submitting;
     $("remote-local-provider-overwrite").disabled = $("remote-local-provider-sync").disabled || providerConfirming;
     $("remote-local-provider-overwrite").title = "重新检测网络，并覆盖本插件自动对接供应商的地址与密钥";
+    const libraryReason = actionReason("library_sync");
+    const lastLibrary = [operation, restoredOperation, ...history].find((item) => item?.action === "library_sync");
+    text("remote-library-summary", !sshReady() ? "等待连接" : libraryReason ? "暂不可用" : "可同步");
+    text("remote-library-state", libraryReason || "可以预览并同步本机资源库。");
+    text("remote-library-last", lastLibrary ? "最近任务：" + (operationLabels[lastLibrary.state] ?? lastLibrary.state) + "。" + libraryOutcome(lastLibrary.library) : "");
+    $("remote-library-last").hidden = !lastLibrary;
     drawBackups(); drawTaskSummary(); drawHistory(); syncPreview();
     showError("history-error", readError);
   }
@@ -392,7 +410,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
 
   function downloadProgress() {
     const progress = operation?.progress;
-    if (!["install", "update"].includes(operation?.action) || !["downloading", "uploading", "updating"].includes(operation?.step) || !progress) return "";
+    if (!["install", "update", "library_sync"].includes(operation?.action) || !["downloading", "uploading", "updating"].includes(operation?.step) || !progress) return "";
     const { downloadedBytes, totalBytes, bytesPerSecond } = progress;
     if (!Number.isSafeInteger(downloadedBytes) || downloadedBytes < 0 || !Number.isSafeInteger(totalBytes) || totalBytes < 0 || !Number.isFinite(bytesPerSecond) || bytesPerSecond < 0) return "";
     let detail = (operation.step === "uploading" ? "已上传 " : "已下载 ") + size(downloadedBytes);
@@ -412,6 +430,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
         const progress = downloadProgress();
         if (progress) message += " · " + progress;
       }
+      if (operation.library) message += "。" + libraryOutcome(operation.library);
     }
     text("remote-task-state", message);
     $("remote-task-link").hidden = !message;
@@ -424,9 +443,13 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   function syncPreview() {
     if (!dialog.open) return;
     dialog.setAttribute("aria-busy", String(previewLoading || submitting));
+    $("remote-library-options").querySelectorAll("input").forEach((input) => { input.disabled = submitting; });
     $("remote-apply").disabled = !preview || previewLoading || submitting || Boolean(actionReason(previewAction, previewBackupId));
-    text("remote-apply", submitting ? "正在提交…" : previewAction ? "确认" + actionLabels[previewAction] : "确认执行");
-    $("remote-apply").className = "button " + (["uninstall", "delete_backup"].includes(previewAction) ? "danger" : "primary");
+    const mirror = previewAction === "library_sync" && preview?.library?.mode === "mirror";
+    const totalRemoved = mirror ? (preview.library.categories ?? []).reduce((total, category) => total + (preview.library.counts?.[category]?.removed ?? 0), 0) : 0;
+    const mirrorLabel = totalRemoved > 0 ? `确认镜像同步（移除 ${totalRemoved} 项）` : "确认镜像同步";
+    text("remote-apply", submitting ? "正在提交…" : mirror ? mirrorLabel : previewAction ? "确认" + actionLabels[previewAction] : "确认执行");
+    $("remote-apply").className = "button " + (["uninstall", "delete_backup"].includes(previewAction) || totalRemoved > 0 ? "danger" : "primary");
   }
 
   function syncPolling() {
@@ -517,25 +540,66 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
     $(id).closest("section").hidden = !nodes.length;
   }
 
-  async function openPreview(action, backupId) {
-    if (actionReason(action, backupId) || dialog.open) return;
-    const id = row.connection.id, epoch = generation, sequence = ++previewSequence;
-    preview = null; previewAction = action; previewBackupId = backupId ?? null; previewLoading = true;
-    actionError = "";
-    text("remote-preview-title", "预览" + actionLabels[action]);
-    text("remote-preview-connection", row.connection.name + " · " + row.connection.username + "@" + row.connection.host);
+  function renderLibrary(library) {
+    const result = $("remote-library-result");
+    result.hidden = !library;
+    $("remote-library-categories").replaceChildren();
+    if (!library) return;
+    text("remote-library-activation", { supported: "同步后将自动应用到远端 Agent。", unsupported: "远端版本不支持自动生效，资源仍会写入。", gateway_mode: "远端处于 Gateway 模式，资源写入后不会自动生效。" }[library.activation] || "Agent 生效状态待核实。");
+    for (const category of library.categories ?? []) {
+      const card = element("section", "remote-library-card"), heading = element("h3", "", libraryCategories[category] || category), badges = element("div", "remote-library-counts");
+      card.append(heading, badges);
+      let hasDetails = false;
+      for (const [key, label] of Object.entries(libraryChanges)) {
+        const count = library.counts?.[category]?.[key] ?? 0;
+        badges.append(element("span", "remote-library-count is-" + key + (count === 0 ? " is-zero" : ""), label + " " + count));
+        const entries = library.details?.[category]?.[key] ?? [];
+        if (!entries.length) continue;
+        hasDetails = true;
+        const collapsible = key !== "removed" && entries.length > 5;
+        const group = element(collapsible ? "details" : "div", "remote-library-detail is-" + key + (collapsible ? " is-collapsible" : "")), title = element("strong", "", label), items = element("ul");
+        for (const entry of entries) {
+          const extras = [libraryKinds[entry.kind] || entry.kind];
+          if (Number.isInteger(entry.envCount)) extras.push("环境变量 " + entry.envCount);
+          if (Number.isInteger(entry.headerCount)) extras.push("请求头 " + entry.headerCount);
+          if (entry.reason) extras.push(libraryReasons[entry.reason] || entry.reason);
+          items.append(element("li", "", entry.name + " · " + extras.filter(Boolean).join(" · ")));
+        }
+        if (collapsible) {
+          const summary = element("summary");
+          summary.append(title, document.createTextNode(`（共 ${entries.length} 项，点击展开）`));
+          group.append(summary, items);
+        } else group.append(title, items);
+        card.append(group);
+      }
+      if (!hasDetails) card.append(element("p", "remote-library-empty", "与远端一致，无变更。"));
+      $("remote-library-categories").append(card);
+    }
+  }
+  async function loadPreview() {
+    const action = previewAction, backupId = previewBackupId, id = row.connection.id, epoch = generation, sequence = ++previewSequence;
+    const categories = [...$("remote-library-options").querySelectorAll('input[name="library-category"]:checked')].map((input) => input.value);
+    const library = action === "library_sync";
+    preview = null; previewLoading = library && !categories.length ? false : true;
+    $("remote-library-selection-error").hidden = !library || Boolean(categories.length);
+    $("remote-library-mirror-warning").hidden = !library || !$("remote-library-mirror").checked;
+    renderLibrary(null);
     text("remote-preview-summary", "正在读取远端变更预览…");
     list("remote-preview-changes", []); list("remote-preview-warnings", []);
     showError("remote-preview-error", "");
-    $("remote-preview-background").hidden = true;
-    dialog.showModal(); draw();
+    if (!previewLoading) { text("remote-preview-summary", "请选择同步分类。"); draw(); return; }
+    draw();
     try {
-      const result = await call("remote_preview", { connectionId: id, action, ...(backupId && { backupId }) });
+      const result = await call("remote_preview", { connectionId: id, action, ...(backupId && { backupId }), ...(library && { categories, mode: $("remote-library-mirror").checked ? "mirror" : "merge" }) });
       if (!current(id, epoch) || sequence !== previewSequence || !dialog.open) return;
       if (result?.connectionId !== id || result.action !== action || (backupId && result.backupId !== backupId)) throw new Error("操作预览与当前连接或备份不匹配，请关闭后重试。");
       preview = result;
       text("remote-preview-summary", result.summary);
-      list("remote-preview-changes", result.changes); list("remote-preview-warnings", result.warnings);
+      list("remote-preview-changes", result.changes);
+      const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+      const libraryWarnings = library && Array.isArray(result.library?.warnings) ? result.library.warnings.map((warning) => [warning.name, warning.message].filter(Boolean).join("：")) : [];
+      list("remote-preview-warnings", [...warnings, ...libraryWarnings]);
+      if (library) renderLibrary(result.library);
     } catch (error) {
       if (current(id, epoch) && sequence === previewSequence && dialog.open) {
         text("remote-preview-summary", "未能读取变更预览，请关闭后重试。");
@@ -544,6 +608,19 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
     } finally {
       if (current(id, epoch) && sequence === previewSequence) { previewLoading = false; draw(); }
     }
+  }
+
+  async function openPreview(action, backupId) {
+    if (actionReason(action, backupId) || dialog.open) return;
+    previewAction = action; previewBackupId = backupId ?? null; actionError = "";
+    text("remote-preview-title", "预览" + actionLabels[action]);
+    text("remote-preview-connection", row.connection.name + " · " + row.connection.username + "@" + row.connection.host);
+    $("remote-library-options").hidden = action !== "library_sync";
+    $("remote-preview").classList.toggle("is-library", action === "library_sync");
+    $("remote-library-options").querySelectorAll('input[name="library-category"]').forEach((input) => { input.checked = true; });
+    $("remote-library-mirror").checked = false;
+    $("remote-preview-background").hidden = true;
+    dialog.showModal(); await loadPreview();
   }
 
   async function applyPreview(event) {
@@ -686,6 +763,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   dialog.querySelectorAll(".remote-close-preview").forEach((button) => button.addEventListener("click", () => { closePreview(); draw(); }));
   dialog.addEventListener("close", () => { if (!dialog.open) { closePreview(); draw(); } });
   $("remote-preview-form").addEventListener("submit", (event) => { void applyPreview(event); });
+  $("remote-library-options").addEventListener("change", () => { if (previewAction === "library_sync" && !submitting) void loadPreview(); });
   $("remote-apply").addEventListener("click", (event) => { void applyPreview(event); });
   function visibilityChanged() { syncPolling(); if (!document.hidden) void refresh(); }
   document.addEventListener("visibilitychange", visibilityChanged);

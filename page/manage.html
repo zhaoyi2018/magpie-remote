@@ -166,6 +166,17 @@
                   </div>
                 </div>
               </details>
+              <details class="panel-disclosure" id="remote-library-details">
+                <summary><span>同步本机资源库</span><span id="remote-library-summary" class="disclosure-caption">等待连接</span><span data-icon="chevron" aria-hidden="true"></span></summary>
+                <div class="disclosure-body remote-command-copy">
+                  <p id="remote-library-state" class="remote-secondary" role="status"></p>
+                  <p id="remote-library-last" class="remote-secondary" hidden></p>
+                  <div class="remote-actions"><button id="remote-action-library_sync" class="button" type="button" aria-haspopup="dialog" disabled>同步资源库…</button>
+                    <button class="icon-button panel-tip-trigger" type="button" popovertarget="remote-library-tip" aria-label="资源库同步说明"><span data-icon="info"></span></button>
+                    <div id="remote-library-tip" class="panel-tip" popover tabindex="-1" autofocus>默认合并，可在预览中选择分类或切换完全镜像。同步前自动备份，保留本机各条目的 Agent 配置，同步后自动执行 magpie library sync。</div>
+                  </div>
+                </div>
+              </details>
             </section>
             <section class="panel-group remote-maintenance" aria-labelledby="remote-maintenance-title">
               <div class="panel-group-heading"><h3 id="remote-maintenance-title">维护</h3></div>
@@ -382,6 +393,18 @@
     <div class="dialog-heading"><div><h2 id="remote-preview-title">操作预览</h2><p id="remote-preview-connection"></p></div><button class="icon-button remote-close-preview" type="button" aria-label="关闭操作预览"><span data-icon="close"></span></button></div>
     <form id="remote-preview-form"><div class="dialog-content">
       <p id="remote-preview-summary" class="remote-preview-summary"></p>
+      <section id="remote-library-options" class="remote-library-options" hidden>
+        <fieldset><legend>同步分类</legend><div class="remote-library-choices">
+          <label><input type="checkbox" name="library-category" value="instructions" checked>共享指令</label>
+          <label><input type="checkbox" name="library-category" value="skills" checked>技能</label>
+          <label><input type="checkbox" name="library-category" value="mcp" checked>MCP 服务器</label>
+          <label><input type="checkbox" name="library-category" value="commands" checked>自定义命令</label>
+        </div></fieldset>
+        <label class="remote-library-mirror"><input id="remote-library-mirror" type="checkbox">完全镜像（移除已选分类中的远端独有项）</label>
+        <p id="remote-library-mirror-warning" class="remote-library-warning" hidden>仅清理已勾选分类的远端独有项；未勾选分类和远端本机专属配置保持不变。</p>
+        <p id="remote-library-selection-error" class="field-error" role="status" hidden>请至少选择一个同步分类</p>
+      </section>
+      <section id="remote-library-result" class="remote-library-result" aria-label="资源库同步明细" hidden><p id="remote-library-activation"></p><div id="remote-library-categories"></div></section>
       <section class="remote-preview-list" hidden><h3>将进行的变更</h3><ul id="remote-preview-changes"></ul></section>
       <section class="remote-preview-list remote-preview-warnings" hidden><h3>执行前请确认</h3><ul id="remote-preview-warnings"></ul></section>
       <p id="remote-preview-background" class="remote-preview-background" role="status" hidden>正在提交任务。可关闭此窗口，提交后在运行日志查看进度与结果。</p>

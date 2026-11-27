@@ -1,4 +1,5 @@
 import { remoteActions } from "./remote-scripts.mjs";
+import { libraryAction, libraryOptions } from "./remote-library.mjs";
 
 export const operationHistoryLimit = 20;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -8,6 +9,36 @@ const restoreStates = {
   serviceState: ["unchanged", "running", "stopped", "unknown"],
   rollbackState: ["not_needed", "succeeded", "failed"],
 };
+const libraryConfigStates = ["not_applied", "applied", "rolled_back", "unknown"];
+const libraryCompletedStates = ["synced", "unchanged", "unsupported", "no_agents", "gateway_mode"];
+const librarySyncStates = ["not_started", ...libraryCompletedStates, "failed", "unknown"];
+
+export function parseLibraryResult(stdout, operationId, succeeded) {
+  const lines = stdout.split(/\r?\n/).filter((line) => line.startsWith("MIGPIE_LIBRARY_RESULT_V1\t"));
+  if (lines.length !== 1) return;
+  const [, id, configState, syncState, extra] = lines[0].split("\t");
+  if (id !== operationId || extra !== undefined || !libraryConfigStates.includes(configState) || !librarySyncStates.includes(syncState)
+    || (configState !== "applied" && syncState !== "not_started")
+    || (succeeded && (configState !== "applied" || !libraryCompletedStates.includes(syncState)))) return;
+  return { configState, syncState };
+}
+
+export function libraryResultMessage(library) {
+  if (!library) return "";
+  if (library.configState === "unknown") return "资源库落盘状态待核实";
+  if (library.configState === "rolled_back") return "已恢复写入前的资源库";
+  if (library.configState !== "applied") return "";
+  return "资源库已落盘；" + {
+    not_started: "尚未执行 Agent 同步",
+    synced: "已执行 magpie library sync",
+    unchanged: "Magpie 报告无需更新 Agent 配置，可能没有可应用的 Agent",
+    unsupported: "此 Magpie 版本未确认支持 library sync，资源暂未应用到 Agent",
+    no_agents: "Magpie 未检测到可应用的 Agent",
+    gateway_mode: "远端处于 Gateway 模式，资源暂未应用到 Agent",
+    failed: "Agent 同步失败，可能已有部分 Agent 配置发生变化",
+    unknown: "Agent 同步结果待核实",
+  }[library.syncState];
+}
 
 export function terminalOperation(operation) {
   return ["succeeded", "failed"].includes(operation?.state);
@@ -83,6 +114,11 @@ export function operationSummary(operation) {
     const restore = parseRestoreResult(`MIGPIE_RESTORE_V1\t${operation.id}\t${configState}\t${serviceState}\t${rollbackState}\t${encoded}`, operation.id);
     if (!restore || operation.action !== "restore") throw new Error("invalid restore result");
     summary.restore = restore;
+  }
+  if (operation.library) {
+    const { configState, syncState } = operation.library;
+    if (operation.action !== libraryAction || !libraryConfigStates.includes(configState) || !librarySyncStates.includes(syncState)) throw new Error("invalid library result");
+    summary.library = { ...libraryOptions(operation.library), configState, syncState };
   }
   return summary;
 }

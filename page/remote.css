@@ -80,6 +80,35 @@
 .remote-preview-background { margin-top: 16px; color: var(--accent); font-size: 12px; }
 .remote-preview .field-error { margin: 16px 0 0; }
 .remote-preview .dialog-actions { flex-wrap: wrap; }
+.remote-preview.is-library { width: min(760px, calc(100vw - 28px)); }
+.remote-preview.is-library .dialog-content { max-height: min(70vh, 680px); overflow-y: auto; }
+.remote-library-options { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-muted); }
+.remote-library-options fieldset { margin: 0; padding: 0; border: 0; }
+.remote-library-options legend, .remote-library-card h3 { font-size: 13px; font-weight: 600; }
+.remote-library-choices { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
+.remote-library-options label { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; margin: 0; font-size: 12px; cursor: pointer; }
+.remote-library-options input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; padding: 0; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
+.remote-library-mirror { border-top: 1px solid var(--line); width: 100%; padding-top: 8px; margin-top: 6px !important; }
+.remote-library-warning { color: var(--warn); font-size: 12px; line-height: 1.6; }
+.remote-library-result { margin-top: 18px; font-size: 12px; }
+#remote-library-activation { color: var(--muted); margin-bottom: 10px; }
+.remote-library-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 8px; background: var(--surface); overflow-wrap: anywhere; }
+.remote-library-counts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.remote-library-count { padding: 2px 7px; border-radius: 4px; color: var(--accent); background: var(--accent-soft); font-variant-numeric: tabular-nums; }
+.remote-library-count.is-removed:not(.is-zero) { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
+.remote-library-count.is-skipped:not(.is-zero) { color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, var(--surface)); }
+.remote-library-count.is-preserved:not(.is-zero) { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, var(--surface)); }
+.remote-library-count.is-zero { color: var(--muted); background: var(--surface-muted); }
+.remote-library-detail { margin-top: 10px; color: var(--muted); }
+.remote-library-detail strong { color: var(--accent); font-weight: 500; }
+.remote-library-detail.is-removed strong { color: var(--danger); }
+.remote-library-detail.is-skipped strong { color: var(--warn); }
+.remote-library-detail.is-preserved strong { color: var(--fg); }
+.remote-library-detail summary { cursor: pointer; border-radius: 3px; }
+.remote-library-detail summary:focus-visible { outline-offset: 2px; }
+.remote-library-detail ul { margin: 4px 0 0; padding-left: 18px; }
+.remote-library-detail li { margin-top: 3px; }
+.remote-library-empty { margin: 10px 0 0; color: var(--muted); }
 .remote-workbench button, .remote-workbench input, .remote-preview button { transition: none; }
 @container (min-width: 650px) {
   .remote-environment { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; }
@@ -95,4 +124,6 @@
 }
 @media (pointer: coarse) {
   .remote-workbench .button, .remote-web-port-details > summary, .remote-service-disclosure > summary, .remote-preview .button { min-height: 44px; }
+  .remote-library-options label { min-height: 44px; }
 }
+@media (max-width: 500px) { .remote-library-options label { min-height: 44px; } .remote-library-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } }

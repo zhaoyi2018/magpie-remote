@@ -8,7 +8,8 @@ import { startManagementServer, publishEndpoint, loadRecoveryKey } from "../src/
 import { createTools } from "../src/plugin.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
-import { echoServer, exchange, sshServer, temporary } from "./helpers.mjs";
+import { RemoteManager } from "../src/remote.mjs";
+import { echoServer, exchange, sshServer, temporary, until } from "./helpers.mjs";
 
 async function service(t) {
   const directory = await temporary(t);
@@ -84,6 +85,49 @@ test("opening remote Web requires authentication and uses a freshly verified ser
   unavailable = true;
   assert.equal((await invoke(`Bearer ${web.token}`)).status, 400);
   assert.deepEqual(opened, [link]);
+});
+
+test("management RPC exposes selected library categories and rejects changing scope at apply", async (t) => {
+  const directory = await temporary(t), store = new ProfileStore(join(directory, "connections.json"));
+  await store.save({ id: "remote-alpha", host: "fixture.invalid", username: "tester" });
+  await writeFile(join(directory, "library.json"), JSON.stringify({ commands: [{ name: "run", agents: ["opencode"] }] }));
+  const probe = { platform: "Linux", architecture: "x86_64", username: "tester", home: "/home/tester", binary: "/home/tester/.local/bin/magpie", configDirectory: "/home/tester/.config/magpie", installed: "true", tools: "sha256sum base64 mktemp tar readlink" };
+  const probeText = "MIGPIE_REMOTE_V1\n" + Object.entries(probe).map(([key, value]) => `${key}\t${Buffer.from(value).toString("base64")}\n`).join("");
+  const sessions = { status: () => ({ state: "connected" }), async execute(_id, command, { input }) {
+    if (command === "sh -s") return { code: 0, stdout: input.includes("MIGPIE_LIBRARY_V1") ? "MIGPIE_LIBRARY_V1\nJ\t0\t-\nG\tfalse\nC\t\n" : probeText };
+    const id = command.match(/job="\$base\/operations\/([a-f0-9-]{36})"/)[1];
+    for await (const _ of input) { /* Consume the staged upload before replying. */ }
+    return { code: 0, stdout: `MIGPIE_DONE\nMIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue\nMIGPIE_LIBRARY_RESULT_V1\t${id}\tapplied\tunsupported\n` };
+  } };
+  const remote = new RemoteManager({ store, sessions, directory });
+  const tools = createTools(store, sessions, remote), web = await startManagementServer({ tools });
+  t.after(async () => { await web.close(); await remote.close(); });
+  const request = (method, args) => fetch(new URL("api/call", web.url), { method: "POST", headers: { Authorization: `Bearer ${web.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ method, args }) });
+  const action = { connectionId: "remote-alpha", action: "library_sync" };
+  const missing = await request("remote_preview", action);
+  assert.equal(missing.status, 400);
+  assert.equal((await missing.json()).code, "REMOTE_LIBRARY_OPTIONS");
+  const preview = await request("remote_preview", { ...action, categories: ["commands"] });
+  assert.equal(preview.status, 200);
+  const { result } = await preview.json();
+  assert.deepEqual(result.library.details.commands.added, [{ name: "run", kind: "entry" }]);
+  assert.equal(result.library.activation, "unsupported");
+  const mismatch = await request("remote_apply", { ...action, revision: result.revision, mode: "mirror" });
+  assert.equal(mismatch.status, 400);
+  assert.equal((await mismatch.json()).code, "REMOTE_LIBRARY_OPTIONS");
+  const apply = await request("remote_apply", { ...action, revision: result.revision });
+  assert.equal(apply.status, 200);
+  const operation = (await apply.json()).result;
+  assert.equal(operation.state, "running");
+  assert.deepEqual(operation.library.categories, ["commands"]);
+  let completed;
+  await until(async () => {
+    const response = await request("remote_operation", { connectionId: action.connectionId, operationId: operation.id });
+    completed = (await response.json()).result;
+    return completed?.state === "succeeded";
+  });
+  assert.equal(completed.library.syncState, "unsupported");
+  await remote.close();
 });
 
 test("launcher parameters cannot authorize external scripts in the management page", async (t) => {
