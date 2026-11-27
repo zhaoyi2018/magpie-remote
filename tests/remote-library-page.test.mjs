@@ -41,14 +41,16 @@ test("library preview updates selections safely and submits the newest revision"
   await page.locator("#remote-library-details summary").click();
   await page.locator("#remote-action-library_sync").click();
   await page.waitForFunction(() => window.pending.length === 1);
-  await page.locator('#remote-library-options input[value="skills"]').uncheck();
-  await page.locator("#remote-library-mirror").check();
-  await page.waitForFunction(() => window.pending.length === 3);
+  await page.evaluate(() => {
+    document.querySelector('#remote-library-options input[value="skills"]').click();
+    document.querySelector("#remote-library-mirror").click();
+    if (window.pending.length !== 1 || !document.querySelector("#remote-apply").disabled) throw Error("Options must immediately invalidate the old preview and debounce the request");
+  });
+  await page.waitForFunction(() => window.pending.length === 2);
   await page.evaluate(() => {
     const result = (pending, revision) => ({ connectionId: "one", action: "library_sync", revision, summary: revision, changes: [], warnings: [], library: { mode: pending.args.mode, categories: pending.args.categories, activation: "supported", warnings: [{ name: "server", message: "Windows MCP" }], counts: { mcp: { added: 6, removed: 6 }, commands: { removed: 2 } }, details: { mcp: { added: Array.from({ length: 6 }, (_, i) => ({ name: i ? `item ${i}` : "<unsafe>", kind: "entry", envCount: 2 })), removed: Array.from({ length: 6 }, (_, i) => ({ name: `removed ${i}` })) } } } });
-    window.pending[2].resolve(result(window.pending[2], "new"));
+    window.pending[1].resolve(result(window.pending[1], "new"));
     window.pending[0].resolve(result(window.pending[0], "old"));
-    window.pending[1].resolve(result(window.pending[1], "older"));
   });
   await page.waitForFunction(() => document.querySelector("#remote-preview-summary").textContent === "new");
   assert.equal(await page.locator("#remote-library-categories").locator("text=<unsafe>").count(), 1);
@@ -67,16 +69,20 @@ test("library preview updates selections safely and submits the newest revision"
   assert.equal(await page.locator("#remote-apply").innerText(), "确认镜像同步（移除 8 项）");
   await page.locator("#remote-library-mirror").uncheck();
   assert.equal(await page.locator("#remote-apply").getAttribute("class"), "button primary");
+  await page.waitForFunction(() => window.pending.length === 3);
   await page.evaluate(() => { const p = window.pending.at(-1); p.resolve({ connectionId: "one", action: "library_sync", revision: "merge", summary: "merge", changes: [], warnings: [], library: { mode: "merge", categories: p.args.categories, counts: {}, details: {} } }); });
   await page.waitForFunction(() => document.querySelector("#remote-preview-summary").textContent === "merge");
   assert.equal(await page.locator("#remote-apply").innerText(), "确认同步资源库");
-  await page.locator("#remote-library-mirror").check();
-  for (const category of ["instructions", "mcp", "commands"]) await page.locator(`#remote-library-options input[value="${category}"]`).uncheck();
+  await page.evaluate(() => {
+    document.querySelector("#remote-library-mirror").click();
+    for (const input of document.querySelectorAll('#remote-library-options input[name="library-category"]:checked')) input.click();
+  });
   assert.equal(await page.locator("#remote-library-selection-error").isVisible(), true);
   assert.equal(await page.locator("#remote-apply").isDisabled(), true);
   const count = await page.evaluate(() => window.pending.length);
-  assert.equal(count, 7);
+  assert.equal(count, 3);
   await page.locator('#remote-library-options input[value="mcp"]').check();
+  await page.waitForFunction(() => window.pending.length === 4);
   await page.evaluate(() => { const p = window.pending.at(-1); p.resolve({ connectionId: "one", action: "library_sync", revision: "final", summary: "final", changes: [], warnings: [], library: { categories: p.args.categories, activation: "supported", counts: {}, details: {} } }); });
   await page.waitForFunction(() => !document.querySelector("#remote-apply").disabled);
   await page.locator("#remote-apply").click();

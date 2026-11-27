@@ -1,17 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, symlink, truncate, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { actionScript, probeScript, scriptCommand, shellQuote } from "../src/remote-scripts.mjs";
-import { libraryHash, libraryOptions, planLibrary, readLocalLibrary } from "../src/remote-library.mjs";
+import { libraryHash, libraryLimits, libraryOptions, planLibrary, readLocalLibrary } from "../src/remote-library.mjs";
 import { libraryBundle, librarySnapshotScript, parseLibrarySnapshot } from "../src/remote-library-transfer.mjs";
 import { parseProbe } from "../src/remote.mjs";
 import { temporary } from "./helpers.mjs";
 
 const git = process.platform === "win32" ? spawnSync("where.exe", ["git"], { encoding: "utf8" }).stdout?.trim().split(/\r?\n/)[0] : undefined;
 const shell = process.env.MIGPIE_BASH || (git ? join(dirname(dirname(git)), "bin", "sh.exe") : "sh");
+const withoutPython = (script) => script.replace("if command -v python3 >/dev/null 2>&1; then", "if false; then");
 
 async function fixture(t, syncOutput = "printf 'library written into OpenCode\n'") {
   const directory = await temporary(t), home = join(directory, "home"), tools = join(directory, "tools"), local = join(directory, "local");
@@ -29,7 +30,9 @@ async function fixture(t, syncOutput = "printf 'library written into OpenCode\n'
 esac`);
   const shPath = (path) => path.replaceAll("\\", "/");
   const toShell = (path) => process.platform === "win32" ? shPath(path).replace(/^([A-Z]):/i, (_, drive) => "/" + drive.toLowerCase()) : path;
-  const setup = `export HOME=${shellQuote(toShell(home))}\nexport XDG_CONFIG_HOME="$HOME/.config"\nexport PATH=${shellQuote(toShell(tools))}:"$PATH"\n`;
+  // Git's Windows shell can find a Windows Python alias, not a POSIX Python.
+  const path = process.platform === "win32" ? "/usr/bin:/bin" : '"$PATH"';
+  const setup = `export HOME=${shellQuote(toShell(home))}\nexport XDG_CONFIG_HOME="$HOME/.config"\nexport PATH=${shellQuote(toShell(tools))}:${path}\n`;
   async function run(script, input) {
     const file = join(directory, randomUUID() + ".sh");
     await writeFile(file, setup + (input === undefined ? script : "exec " + scriptCommand(script) + "\n"));
@@ -62,7 +65,7 @@ test("POSIX library action snapshots, checksums, mirrors selected directories, b
   const probe = parseProbe((await run(probeScript)).stdout);
   assert.ok(probe.capabilities.includes("library_sync"));
   const instance = { ...probe, binary: toShell(bin), configDirectory: toShell(config) };
-  const snapshot = await run(librarySnapshotScript(instance, options.categories));
+  const snapshot = await run(withoutPython(librarySnapshotScript(instance, options.categories)));
   assert.equal(snapshot.code, 0, snapshot.stderr);
   const remote = parseLibrarySnapshot(snapshot.stdout, options.categories);
   const localSnapshot = await readLocalLibrary(local, options.categories);
@@ -86,6 +89,80 @@ test("POSIX library action snapshots, checksums, mirrors selected directories, b
   assert.deepEqual(await readFile(join(config, "library", "skills", "fresh", "子目录", "file with spaces.txt")), Buffer.from([0, 9, 255]));
   await assert.rejects(readFile(join(config, "library", "skills", "old", "SKILL.md")), { code: "ENOENT" });
   assert.ok((await readFile(join(dirname(config), "magpie-remote", "backups", id, "config.tar.gz"))).length > 0);
+});
+
+test("snapshot dispatches to Python when available and preserves its exit code", async (t) => {
+  const { config, run, toShell, tool } = await fixture(t);
+  await tool("python3", "exit 81");
+  const script = librarySnapshotScript({ configDirectory: toShell(config) }, ["skills"]);
+  assert.equal((await run(script)).code, 81);
+  assert.equal((await run(withoutPython(script))).code, 0);
+});
+
+test("probe hashes the entire binary with OpenSSL and falls back to sha256sum", async (t) => {
+  const { bin, run, tool } = await fixture(t);
+  if ((await run("command -v openssl")).code !== 0) return t.skip("OpenSSL unavailable");
+  const digest = libraryHash(await readFile(bin));
+  await tool("sha256sum", "exit 1");
+  assert.equal(parseProbe((await run(probeScript)).stdout).binaryHash, digest);
+  await tool("openssl", "printf 'invalid output\\n'");
+  await unlink(join(dirname(bin), "sha256sum"));
+  assert.equal(parseProbe((await run(probeScript)).stdout).binaryHash, digest);
+});
+
+test("Python and shell snapshots agree on ordering, file kinds, links, gateway and scan errors", { skip: process.platform !== "linux" }, async (t) => {
+  const { config, run, toShell } = await fixture(t);
+  if ((await run("command -v python3")).code !== 0) return t.skip("python3 unavailable");
+  const categories = ["instructions", "skills"], skills = join(config, "library", "skills");
+  await mkdir(join(skills, "dir"), { recursive: true });
+  await mkdir(join(config, "library", "instruction-sets"));
+  await writeFile(join(config, "library.json"), '{}\n');
+  await writeFile(join(config, "settings.json"), '{"gatewayMode": \t "on"}');
+  await writeFile(join(config, "library", "instructions.md"), "instructions");
+  for (const name of [".hidden", "..also-hidden", "中文", "Z", "dir/.child"]) await writeFile(join(skills, name), name);
+  await writeFile(join(skills, "executable"), "run", { mode: 0o755 });
+  await symlink("missing\n", join(skills, "link"));
+  const script = librarySnapshotScript({ configDirectory: toShell(config) }, categories);
+  async function compare(code, suffix = "") {
+    const fast = await run(suffix + script), fallback = await run(suffix + withoutPython(script));
+    assert.equal(fast.code, code, fast.stderr);
+    assert.equal(fallback.code, code, fallback.stderr);
+    assert.equal(fast.stdout, fallback.stdout);
+    return fast.stdout;
+  }
+  const snapshot = parseLibrarySnapshot(await compare(0), categories);
+  assert.equal(snapshot.gateway, true);
+  assert.deepEqual(snapshot.entries.get("library/skills/link"), { kind: "L", digest: libraryHash("missing\n\n.") });
+  assert.equal(snapshot.entries.get("library/skills/executable").kind, "X");
+  if (process.getuid() !== 0) {
+    const library = dirname(skills);
+    try {
+      await chmod(library, 0o100);
+      assert.equal(parseLibrarySnapshot(await compare(0), categories).fingerprint, snapshot.fingerprint);
+      await chmod(library, 0o400);
+      await compare(78);
+    } finally {
+      await chmod(library, 0o700);
+    }
+  }
+  await writeFile(join(config, "settings.json"), '{"gatewayMode":\n"on"}');
+  assert.equal(parseLibrarySnapshot(await compare(0), categories).gateway, false);
+  assert.equal(parseLibrarySnapshot(await compare(0, "export MAGPIE_GATEWAY=1\n"), categories).gateway, true);
+  const tooLarge = join(skills, "Z");
+  await truncate(tooLarge, libraryLimits.file + 1);
+  await compare(81);
+  await truncate(tooLarge, 0);
+  const tooDeep = join(skills, ...Array(libraryLimits.depth + 1).fill("d"));
+  await mkdir(tooDeep, { recursive: true });
+  await compare(81);
+  await rename(join(skills, "d"), join(config, "d"));
+  await truncate(join(config, "library.json"), libraryLimits.json + 1);
+  await compare(81);
+  await writeFile(join(config, "library.json"), "{}");
+  await writeFile(join(skills, "bad:name"), "");
+  await compare(78);
+  await rename(join(skills, "bad:name"), join(skills, "bad\nname"));
+  await compare(78);
 });
 
 test("POSIX library action rejects stale content and refuses symlink roots", async (t) => {

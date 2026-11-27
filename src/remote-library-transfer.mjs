@@ -7,6 +7,150 @@ const digestPattern = /^[a-f0-9]{64}$/;
 const libraryMarker = "MIGPIE_LIBRARY_V1";
 export const librarySnapshotMaxBytes = 14 * 1024 * 1024;
 
+const pythonManifest = String.raw`import base64
+import hashlib
+import os
+import re
+import stat
+import sys
+from contextlib import contextmanager
+
+config = os.fsencode(sys.argv[1])
+instructions, skills = (arg == '1' for arg in sys.argv[2:])
+count = total = 0
+unsafe_rel = re.compile(rb'[\x00-\x1f\x7f\\:]')
+gateway_pattern = re.compile(rb'"gatewayMode"[\t\v\f\r ]*:[\t\v\f\r ]*"on"')
+
+def info(parent, name):
+    try:
+        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+@contextmanager
+def directory(parent, name, readable=True):
+    entry = info(parent, name)
+    if entry is None:
+        yield None
+        return
+    if not stat.S_ISDIR(entry.st_mode):
+        raise OSError()
+    flags = os.O_RDONLY if readable else os.O_PATH
+    fd = os.open(name, flags | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        mode = os.R_OK | os.X_OK if readable else os.X_OK
+        if not os.access(b'.', mode, dir_fd=fd, effective_ids=True):
+            raise OSError()
+        yield fd
+    finally:
+        os.close(fd)
+
+@contextmanager
+def regular(parent, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError()
+        yield fd
+    finally:
+        os.close(fd)
+
+def digest_file(parent, name, limit):
+    sha = hashlib.sha256()
+    size = 0
+    with regular(parent, name) as fd:
+        while True:
+            data = os.read(fd, min(131072, limit + 1 - size))
+            if not data:
+                return size, sha.hexdigest()
+            size += len(data)
+            if size > limit:
+                sys.exit(81)
+            sha.update(data)
+
+def child_order(name):
+    # The POSIX walker expands *, .[!.]* and ..?* separately in C locale.
+    return (2 if name.startswith(b'..') else 1 if name.startswith(b'.') else 0, name)
+
+def scan_children(parent, relative, depth):
+    for name in sorted(map(os.fsencode, os.listdir(parent)), key=child_order):
+        scan_entry(parent, name, relative + b'/' + name, depth)
+
+def scan_entry(parent, name, relative, depth):
+    global count, total
+    count += 1
+    if count > ${libraryLimits.entries} or depth > ${libraryLimits.depth} or len(relative) > ${libraryLimits.path}:
+        sys.exit(81)
+    if unsafe_rel.search(relative) or any(part in (b'', b'.', b'..') for part in relative.split(b'/')):
+        sys.exit(78)
+    entry = info(parent, name)
+    if entry is None:
+        raise OSError()
+    encoded = base64.b64encode(relative).decode('ascii')
+    if stat.S_ISLNK(entry.st_mode):
+        # readlink prints a newline before the shell appends its sentinel dot.
+        digest = hashlib.sha256(os.readlink(name, dir_fd=parent) + b'\n.').hexdigest()
+        print('L', encoded, digest, sep='\t')
+    elif stat.S_ISDIR(entry.st_mode):
+        if relative == b'library/instructions.md':
+            sys.exit(78)
+        with directory(parent, name) as child:
+            if child is None:
+                raise OSError()
+            print('D', encoded, '-', sep='\t')
+            scan_children(child, relative, depth + 1)
+    elif stat.S_ISREG(entry.st_mode):
+        size, digest = digest_file(parent, name, min(${libraryLimits.file}, ${libraryLimits.bytes} - total))
+        total += size
+        executable = os.access(name, os.X_OK, dir_fd=parent, effective_ids=True, follow_symlinks=False)
+        print('X' if executable else 'F', encoded, digest, sep='\t')
+    else:
+        sys.exit(78)
+
+def gateway_enabled(parent):
+    if os.environ.get('MAGPIE_GATEWAY') == '1':
+        return True
+    if parent is None:
+        return False
+    try:
+        entry = info(parent, b'settings.json')
+        if entry is not None and stat.S_ISREG(entry.st_mode):
+            with regular(parent, b'settings.json') as fd, os.fdopen(fd, 'rb', closefd=False) as settings:
+                return bool(gateway_pattern.search(settings.read(${libraryLimits.json})))
+    except OSError:
+        pass  # An unreadable settings file did not match the shell's grep.
+    return False
+
+def manifest():
+    with directory(None, config) as root:
+        json = None if root is None else info(root, b'library.json')
+        if json is None:
+            print('J', 0, '-', sep='\t')
+        else:
+            if not stat.S_ISREG(json.st_mode):
+                sys.exit(78)
+            size, digest = digest_file(root, b'library.json', ${libraryLimits.json})
+            print('J', size, digest, sep='\t')
+        print('G', 'true' if gateway_enabled(root) else 'false', sep='\t')
+        if root is None or not (instructions or skills):
+            return
+        with directory(root, b'library', readable=False) as library:
+            if library is None:
+                return
+            if instructions and info(library, b'instructions.md') is not None:
+                scan_entry(library, b'instructions.md', b'library/instructions.md', 1)
+            for selected, name in ((instructions, b'instruction-sets'), (skills, b'skills')):
+                if selected:
+                    with directory(library, name) as tree:
+                        if tree is not None:
+                            scan_children(tree, b'library/' + name, 1)
+
+try:
+    manifest()
+except OSError:
+    sys.exit(78)
+`;
+
 function scanFunctions(categories) {
   return `LC_ALL=C
 export LC_ALL
@@ -18,6 +162,9 @@ encode() { base64 | tr -d '\\r\\n'; }
 valid_rel() {
   case "$1" in ''|/*|*/|*//*|*\\\\*|*:*) return 1 ;; esac
   case "/$1/" in */../*|*/./*) return 1 ;; esac
+  # grep consumes line separators before testing for control bytes.
+  case "$1" in *'
+'*) return 1 ;; esac
   ! printf '%s' "$1" | grep -q '[[:cntrl:]]'
 }
 scan_entry() {
@@ -66,15 +213,23 @@ scan_json() {
     printf 'J\\t%s\\t%s\\n' "$json_size" "$digest"
   else printf 'J\\t0\\t-\\n'; fi
 }
-library_manifest() {
+library_manifest_sh() {
   count=0 total=0
   scan_json
   gateway=false
   if [ "\${MAGPIE_GATEWAY:-}" = 1 ] || { [ -f "$config/settings.json" ] && [ ! -L "$config/settings.json" ] && head -c ${libraryLimits.json} "$config/settings.json" | grep -Eq '"gatewayMode"[[:space:]]*:[[:space:]]*"on"'; }; then gateway=true; fi
   printf 'G\\t%s\\n' "$gateway"
-${categories.some((category) => ["instructions", "skills"].includes(category)) ? '  safe_dir "$config/library" || exit 78\n' : ""}${categories.includes("instructions") ? `  if present "$config/library/instructions.md"; then scan_entry "$config/library/instructions.md" 'library/instructions.md' 1; fi
+${categories.some((category) => ["instructions", "skills"].includes(category)) ? '  safe_dir "$config/library" || exit 78\n  if [ -d "$config/library" ]; then [ -x "$config/library" ] || exit 78; fi\n' : ""}${categories.includes("instructions") ? `  if present "$config/library/instructions.md"; then scan_entry "$config/library/instructions.md" 'library/instructions.md' 1; fi
   scan_tree library/instruction-sets
 ` : ""}${categories.includes("skills") ? "  scan_tree library/skills\n" : ""}}
+library_manifest() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -I -S -B - "$config" ${Number(categories.includes("instructions"))} ${Number(categories.includes("skills"))} <<'MIGPIE_LIBRARY_PYTHON'
+${pythonManifest}MIGPIE_LIBRARY_PYTHON
+  else
+    library_manifest_sh
+  fi
+}
 `;
 }
 

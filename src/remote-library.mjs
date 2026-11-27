@@ -84,9 +84,13 @@ async function readRegular(path, before, max) {
   } finally { await file.close(); }
 }
 
-export async function readLocalLibrary(directory, categories, { includeFiles = true } = {}) {
+export async function readLocalLibrary(directory, categories, { includeFiles = true, signal } = {}) {
   if (!directory) throw new OperationError("REMOTE_LIBRARY_LOCAL_UNAVAILABLE", "未配置本机 Magpie 数据目录");
+  function checkCancelled() {
+    if (signal?.aborted) throw new OperationError("REMOTE_CANCELLED", "资源库预览已取消");
+  }
   try {
+    checkCancelled();
     const rootDirectory = await realpath(directory).catch((error) => {
       if (error.code === "ENOENT") throw new OperationError("REMOTE_LIBRARY_LOCAL_UNAVAILABLE", "未找到本机 Magpie 数据目录");
       throw error;
@@ -102,6 +106,7 @@ export async function readLocalLibrary(directory, categories, { includeFiles = t
     if (libraryInfo && !libraryInfo.isDirectory()) throw libraryPathError();
 
     async function walk(path, relative, groupEntries, before = undefined) {
+      checkCancelled();
       if (++count > libraryLimits.entries) throw libraryLimitError();
       if (!resourcePath(relative)) throw libraryPathError();
       before ??= await lstat(path);
@@ -153,6 +158,7 @@ export async function readLocalLibrary(directory, categories, { includeFiles = t
       if (!after.isDirectory() || libraryInfo.dev !== after.dev || libraryInfo.ino !== after.ino || libraryInfo.mtimeMs !== after.mtimeMs || libraryInfo.ctimeMs !== after.ctimeMs) throw changed();
     }
     if (!sameFile(configInfo, await lstat(configPath))) throw changed();
+    checkCancelled();
     const fingerprint = libraryHash(JSON.stringify([libraryHash(bytes), [...entries].sort(byName).map(([path, { kind, digest }]) => [path, kind, digest]), [...skipped].sort(byName)]));
     return { config, entries, skipped, fingerprint };
   } catch (error) {

@@ -150,6 +150,28 @@ test("library revisions cover local snapshots and action history never stores MC
   await manager.close();
 });
 
+test("library preview cancels and settles an in-flight probe when the local library cannot be read", async (t) => {
+  const directory = await temporary(t), store = new ProfileStore(join(directory, "connections.json"));
+  await store.save({ id: "server", host: "fixture.invalid", username: "tester" });
+  const sessions = new FakeSessions();
+  const manager = new RemoteManager({ store, sessions, directory });
+  const releaseProbe = deferred();
+  t.after(() => { releaseProbe.resolve(); return manager.close(); });
+  sessions.onProbe = async ({ signal }) => {
+    await Promise.race([releaseProbe.promise, new Promise((resolve) => signal?.addEventListener("abort", resolve, { once: true }))]);
+    if (signal?.aborted) throw new OperationError("REMOTE_CANCELLED", "probe cancelled");
+    return response(probe());
+  };
+  const preview = manager.preview("server", "library_sync", { categories: ["skills"] });
+  const settled = await Promise.race([preview.then(() => false, (error) => error.code), new Promise((resolve) => {
+    const timer = setTimeout(resolve, 1500, "probe was not cancelled");
+    timer.unref();
+  })]);
+  assert.equal(settled, "REMOTE_LIBRARY_LOCAL_UNAVAILABLE");
+  assert.equal(sessions.calls.length, 1);
+  assert.equal(sessions.calls[0].signal.aborted, true);
+});
+
 async function fixture(t, fields = {}) {
   const directory = await temporary(t);
   const store = new ProfileStore(join(directory, "connections.json"));

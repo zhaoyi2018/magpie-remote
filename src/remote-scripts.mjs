@@ -19,11 +19,32 @@ export function scriptCommand(script) {
 
 export const probeScript = `set -eu
 command -v base64 >/dev/null || exit 70
-emit() { printf '%s\\t' "$1"; printf '%s' "$2" | base64 | tr -d '\\r\\n'; printf '\\n'; }
+if base64 -w 0 </dev/null >/dev/null 2>&1; then
+  encode_probe_field() { base64 -w 0; }
+else
+  encode_probe_field() { base64 | tr -d '\\r\\n'; }
+fi
+emit() { printf '%s\\t' "$1"; printf '%s' "$2" | encode_probe_field; printf '\\n'; }
+binary_hash() {
+  # Keep sha256sum's filename escaping for paths containing a backslash.
+  case "$1" in
+    *'\\'*) ;;
+    *)
+      if output=$(OPENSSL_CONF=/dev/null openssl dgst -sha256 -r 2>/dev/null < "$1"); then
+        digest=\${output%% *}
+        case "$digest" in
+          *[!0123456789abcdef]*) ;;
+          *) if [ "\${#digest}" -eq 64 ]; then printf '%s' "$digest"; return; fi ;;
+        esac
+      fi ;;
+  esac
+  sha256sum "$1" 2>/dev/null | cut -d ' ' -f 1
+}
 printf 'MIGPIE_REMOTE_V1\\n'
 emit platform "$(uname -s)"
 emit architecture "$(uname -m)"
-emit username "$(id -un)"
+username=$(id -un)
+emit username "$username"
 emit home "$HOME"
 emit container "$(if [ -e /.dockerenv ] || [ -e /run/.containerenv ]; then printf true; else printf false; fi)"
 config="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie"
@@ -38,7 +59,7 @@ emit unit "$unit"
 if [ -n "$bin" ] && [ -x "$bin" ]; then
   emit installed true
   emit version "$("$bin" --version 2>/dev/null | head -c 120)"
-  emit binaryHash "$(sha256sum "$bin" 2>/dev/null | cut -d ' ' -f 1 || true)"
+  emit binaryHash "$(binary_hash "$bin" || true)"
   help=$("$bin" --help 2>/dev/null) || help=''
   commands=$(printf '%s\\n' "$help" | sed -n 's/^[[:space:]]*magpie[[:space:]][[:space:]]*//p')
   daemon=$(printf '%s\\n' "$commands" | sed -n 's/^daemon[[:space:]][[:space:]]*//p')
@@ -75,7 +96,7 @@ emit serviceRebuildSafe "$(if [ "$systemd" = true ] && service_overrides_clear; 
 emit serviceScope "$(if [ "$systemd" = true ] && service_private_config; then
   if [ "$(systemctl --user show magpie.service --property=ActiveState --value 2>/dev/null)" != active ] || service_private_listeners; then printf loopback; else printf unknown; fi
 else printf unknown; fi)"
-emit linger "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)"
+emit linger "$(loginctl show-user "$username" -p Linger --value 2>/dev/null || true)"
 emit tools "$(for tool in curl sha256sum base64 mktemp install readlink tar; do command -v "$tool" >/dev/null && printf '%s ' "$tool"; done)"
 emit locked "$(if [ -d "\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote/operation.lock" ]; then printf true; else printf false; fi)"
 `;

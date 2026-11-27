@@ -29,6 +29,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   let generation = 0, dataRevision = 0, previewSequence = 0, webSequence = 0, backupSequence = 0;
   let status = null, operation = null, reading = null, polling = null;
   let preview = null, previewAction = null, previewBackupId = null, previewLoading = false, submitting = false, webLoading = false, recovering = false;
+  let cancelPreviewDelay;
   let readError = "", actionError = "", webError = "", submissionUncertain = false, uncertainSubmission = null;
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
@@ -99,6 +100,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
     showError("remote-web-error", "");
   }
   function closePreview() {
+    cancelPreviewDelay?.();
     previewSequence++; preview = null; previewAction = null; previewBackupId = null; previewLoading = false;
     if (dialog.open) dialog.close();
   }
@@ -576,7 +578,8 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
       $("remote-library-categories").append(card);
     }
   }
-  async function loadPreview() {
+  async function loadPreview(debounce = false) {
+    cancelPreviewDelay?.();
     const action = previewAction, backupId = previewBackupId, id = row.connection.id, epoch = generation, sequence = ++previewSequence;
     const categories = [...$("remote-library-options").querySelectorAll('input[name="library-category"]:checked')].map((input) => input.value);
     const library = action === "library_sync";
@@ -589,6 +592,14 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
     showError("remote-preview-error", "");
     if (!previewLoading) { text("remote-preview-summary", "请选择同步分类。"); draw(); return; }
     draw();
+    if (debounce) {
+      await new Promise((resolve) => {
+        const finish = () => { cancelPreviewDelay = undefined; resolve(); };
+        const timer = setTimeout(finish, 175);
+        cancelPreviewDelay = () => { clearTimeout(timer); finish(); };
+      });
+      if (sequence !== previewSequence || !dialog.open || !current(id, epoch)) return;
+    }
     try {
       const result = await call("remote_preview", { connectionId: id, action, ...(backupId && { backupId }), ...(library && { categories, mode: $("remote-library-mirror").checked ? "mirror" : "merge" }) });
       if (!current(id, epoch) || sequence !== previewSequence || !dialog.open) return;
@@ -763,7 +774,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   dialog.querySelectorAll(".remote-close-preview").forEach((button) => button.addEventListener("click", () => { closePreview(); draw(); }));
   dialog.addEventListener("close", () => { if (!dialog.open) { closePreview(); draw(); } });
   $("remote-preview-form").addEventListener("submit", (event) => { void applyPreview(event); });
-  $("remote-library-options").addEventListener("change", () => { if (previewAction === "library_sync" && !submitting) void loadPreview(); });
+  $("remote-library-options").addEventListener("change", () => { if (dialog.open && previewAction === "library_sync" && !submitting) void loadPreview(true); });
   $("remote-apply").addEventListener("click", (event) => { void applyPreview(event); });
   function visibilityChanged() { syncPolling(); if (!document.hidden) void refresh(); }
   document.addEventListener("visibilitychange", visibilityChanged);

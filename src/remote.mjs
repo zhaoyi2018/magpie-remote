@@ -373,6 +373,26 @@ export class RemoteManager {
     return parseLibrarySnapshot(response.stdout, categories);
   }
 
+  async #readLibraryPreview(id, options, backupId, signal) {
+    const controller = new AbortController();
+    const previewSignal = AbortSignal.any([controller.signal, this.#shutdown.signal, ...(signal ? [signal] : [])]);
+    const local = readLocalLibrary(this.directory, options.categories, { includeFiles: false, signal: previewSignal });
+    const remote = (async () => {
+      const instance = await this.#probe(id, previewSignal);
+      this.#validate(libraryAction, instance);
+      if (backupId !== undefined) throw new OperationError("REMOTE_BACKUP_INVALID", "此操作不接受备份条目标识");
+      return { instance, snapshot: await this.#readLibrary(id, instance, options.categories, previewSignal) };
+    })();
+    try {
+      const [source, { instance, snapshot }] = await Promise.all([local, remote]);
+      if (previewSignal.aborted) throw new OperationError("REMOTE_CANCELLED", "资源库预览已取消");
+      return { instance, local: source, remote: snapshot };
+    } finally {
+      controller.abort();
+      await Promise.allSettled([local, remote]);
+    }
+  }
+
   async backups(id, { signal } = {}) {
     const profile = await this.#profile(id), record = this.#record(id, profile);
     if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BUSY", "请先等待或检测当前远端任务，再刷新备份列表");
@@ -492,17 +512,18 @@ export class RemoteManager {
     if (!options && (categories !== undefined || mode !== undefined)) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "仅资源库同步接受分类和同步策略");
     const profile = await this.#profile(id), record = this.#record(id, profile);
     if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BUSY", "已有远端操作尚未完成核实，请先检测其结果");
-    const instance = await this.#probe(id, signal);
+    const libraryInputs = options && await this.#readLibraryPreview(id, options, backupId, signal);
+    const instance = libraryInputs?.instance ?? await this.#probe(id, signal);
     let release;
     const update = action === "update" ? await this.#checkUpdate(instance, release = await this.release(instance.architecture)) : record.update;
-    this.#validate(action, instance, update);
+    if (!options) this.#validate(action, instance, update);
     let selectedBackup;
     if (["restore", "delete_backup"].includes(action)) {
       if (!backupIdPattern.test(backupId ?? "")) throw new OperationError("REMOTE_BACKUP_INVALID", "请选择有效的备份条目");
       selectedBackup = (await this.#readBackups(id, instance, signal)).find((backup) => backup.id === backupId);
       if (!selectedBackup) throw new OperationError("REMOTE_BACKUP_MISSING", "此备份不存在或不可读，请刷新列表");
       if (action === "restore" && !["archive", "absent"].includes(selectedBackup.format)) throw new OperationError("REMOTE_BACKUP_FORMAT", selectedBackup.format === "encrypted" ? "历史加密备份请使用原工具和口令手动恢复；此处支持删除" : "此备份不完整，无法恢复配置");
-    } else if (backupId !== undefined) throw new OperationError("REMOTE_BACKUP_INVALID", "此操作不接受备份条目标识");
+    } else if (!options && backupId !== undefined) throw new OperationError("REMOTE_BACKUP_INVALID", "此操作不接受备份条目标识");
     if (action === "install") release = await this.release(instance.architecture);
     const warnings = [], changes = [];
     if (["install", "update"].includes(action)) changes.push(`在本机下载并校验官方 CLI ${release.version}，通过 SSH 上传后再次校验；服务器无需联网下载`);
@@ -518,8 +539,7 @@ export class RemoteManager {
     }
     let library;
     if (options) {
-      const local = await readLocalLibrary(this.directory, options.categories, { includeFiles: false });
-      const remote = await this.#readLibrary(id, instance, options.categories, signal);
+      const { local, remote } = libraryInputs;
       const plan = planLibrary(local, remote, options);
       library = { ...options, localFingerprint: local.fingerprint, remoteFingerprint: remote.fingerprint };
       const capable = instance.capabilities.includes("library_sync");
