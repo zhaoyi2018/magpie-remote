@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OperationError } from "../src/errors.mjs";
 import { RemoteManager, parseProbe } from "../src/remote.mjs";
-import { probeScript } from "../src/remote-scripts.mjs";
+import { probeEnd, probeScript } from "../src/remote-scripts.mjs";
 import { backupInventoryScript } from "../src/remote-backups.mjs";
 import { libraryHash } from "../src/remote-library.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
@@ -65,6 +65,7 @@ class FakeSessions {
     let kind;
     if (command === "sh -s" && input === probeScript) kind = "probe";
     else if (command === "sh -s" && input === backupInventoryScript) kind = "backups";
+    else if (command === "sh -s" && input?.startsWith(probeScript)) kind = "libraryPreview";
     else if (command === "sh -s" && input?.includes("MIGPIE_LIBRARY_V1")) kind = "library";
     else if (command === "sh -s" && /cat "\$base\/operations\/[a-f0-9-]+\/state"/.test(input ?? "")) kind = "reconcile";
     else if (command === "sh -s" && input?.includes("MIGPIE_RECOVERED_V1")) kind = "recover";
@@ -80,6 +81,12 @@ class FakeSessions {
       call.uploaded = Buffer.concat(chunks);
     }
     if (kind === "probe") return this.onProbe ? this.onProbe(call) : response(probe(this.fields));
+    if (kind === "libraryPreview") {
+      const detected = this.onProbe ? await this.onProbe(call) : response(probe(this.fields));
+      if (detected.code !== 0) return detected;
+      const snapshot = await this.onLibrary(call);
+      return { ...snapshot, stdout: detected.stdout + probeEnd + "\n" + snapshot.stdout };
+    }
     if (kind === "action") return this.onAction ? this.onAction(call) : success();
     if (kind === "backups") return response("MIGPIE_BACKUPS_V1\n" + this.backupRows.join("\n") + (this.backupRows.length ? "\n" : ""));
     if (kind === "library") return this.onLibrary(call);
@@ -170,6 +177,62 @@ test("library preview cancels and settles an in-flight probe when the local libr
   assert.equal(settled, "REMOTE_LIBRARY_LOCAL_UNAVAILABLE");
   assert.equal(sessions.calls.length, 1);
   assert.equal(sessions.calls[0].signal.aborted, true);
+});
+
+test("library dialog reuses a full snapshot, signs a fresh revision, and invalidates on profile, SSH, and operation changes", async (t) => {
+  const directory = await temporary(t), file = join(directory, "library.json");
+  await writeFile(file, '{ "mcp": [{"name":"local"}] }\n');
+  const store = new ProfileStore(join(directory, "connections.json"));
+  const profile = await store.save({ id: "server", host: "fixture.invalid", username: "tester" });
+  const sessions = new FakeSessions();
+  let connection = new AbortController();
+  sessions.connectionSignal = () => connection.signal;
+  const source = Buffer.from('{"mcp":[{"name":"remote"}]}');
+  sessions.onLibrary = () => response(`MIGPIE_LIBRARY_V1\nJ\t${source.length}\t${libraryHash(source)}\nG\tfalse\nC\t${source.toString("base64")}\n`);
+  sessions.onAction = ({ command }) => {
+    const id = command.match(/job="\$base\/operations\/([a-f0-9-]{36})"/)[1];
+    return response(`MIGPIE_DONE\nMIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue\nMIGPIE_LIBRARY_RESULT_V1\t${id}\tapplied\tunsupported\n`);
+  };
+  const manager = new RemoteManager({ store, sessions, directory });
+  t.after(() => manager.close());
+  const all = { categories: ["mcp", "instructions", "skills"] };
+  const preview = (options) => manager.preview("server", "library_sync", options);
+  const first = await preview(all);
+  assert.match(first.previewSession, /^[a-f0-9]{64}$/);
+  assert.equal(sessions.calls.length, 1);
+  const narrow = { categories: ["mcp"], mode: "mirror", previewSession: first.previewSession };
+  await rm(file);
+  const mirrored = await preview(narrow);
+  assert.notEqual(mirrored.revision, first.revision);
+  assert.equal(mirrored.library.counts.mcp.removed, 1);
+  assert.equal(sessions.calls.length, 1);
+  await writeFile(file, '{ "mcp": [{"name":"local"}] }\n');
+  const fullAgain = await preview({ ...all, previewSession: mirrored.previewSession });
+  assert.equal(fullAgain.previewSession, first.previewSession);
+  assert.equal(sessions.calls.length, 1);
+  const expanded = await preview({ ...narrow, categories: ["commands"] });
+  assert.notEqual(expanded.previewSession, first.previewSession);
+  assert.equal(sessions.calls.length, 2);
+  const next = await preview(all);
+  assert.notEqual(next.previewSession, expanded.previewSession);
+  await store.save({ ...profile, name: "changed" }, { expectedRevision: profileRevision(profile) });
+  const renamed = await preview({ ...narrow, previewSession: next.previewSession });
+  assert.notEqual(renamed.previewSession, next.previewSession);
+  connection.abort();
+  connection = new AbortController();
+  const reconnected = await preview({ ...narrow, previewSession: renamed.previewSession });
+  assert.notEqual(reconnected.previewSession, renamed.previewSession);
+  const revision = await preview({ ...narrow, previewSession: reconnected.previewSession });
+  await manager.apply("server", "library_sync", revision.revision);
+  await until(async () => (await manager.operation("server"))?.state === "succeeded");
+  const afterOperation = await preview({ ...narrow, previewSession: revision.previewSession });
+  assert.notEqual(afterOperation.previewSession, revision.previewSession);
+  assert.equal(sessions.calls.filter((call) => call.kind === "probe").length, 2);
+  assert.equal(sessions.calls.filter((call) => call.kind === "library").length, 1);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  t.mock.timers.setTime(Date.now() + 90_001);
+  const afterExpiry = await preview({ ...narrow, previewSession: afterOperation.previewSession });
+  assert.notEqual(afterExpiry.previewSession, afterOperation.previewSession);
 });
 
 async function fixture(t, fields = {}) {

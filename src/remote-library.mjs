@@ -8,6 +8,7 @@ import { OperationError } from "./errors.mjs";
 export const libraryAction = "library_sync";
 export const libraryCategories = ["instructions", "skills", "mcp", "commands"];
 export const libraryModes = ["merge", "mirror"];
+export const libraryTools = ["sha256sum", "base64", "mktemp", "tar", "readlink"];
 export const libraryLimits = { json: 4 * 1024 * 1024, file: 16 * 1024 * 1024, bytes: 64 * 1024 * 1024, entries: 4096, depth: 32, path: 1024 };
 const sharedInstructions = "library/instructions.md";
 const treeRoots = { instructions: "library/instruction-sets", skills: "library/skills" };
@@ -159,8 +160,7 @@ export async function readLocalLibrary(directory, categories, { includeFiles = t
     }
     if (!sameFile(configInfo, await lstat(configPath))) throw changed();
     checkCancelled();
-    const fingerprint = libraryHash(JSON.stringify([libraryHash(bytes), [...entries].sort(byName).map(([path, { kind, digest }]) => [path, kind, digest]), [...skipped].sort(byName)]));
-    return { config, entries, skipped, fingerprint };
+    return localSnapshot({ config, configDigest: libraryHash(bytes), entries, skipped });
   } catch (error) {
     if (error instanceof OperationError) throw error;
     if (["ENOENT", "ENOTDIR", "ELOOP"].includes(error.code)) throw changed();
@@ -169,6 +169,20 @@ export async function readLocalLibrary(directory, categories, { includeFiles = t
 }
 
 function byName([a], [b]) { return a < b ? -1 : a > b ? 1 : 0; }
+
+function localSnapshot(snapshot) {
+  const { configDigest, entries, skipped } = snapshot;
+  const files = [...entries].sort(byName).map(([path, { kind, digest }]) => [path, kind, digest]);
+  return { ...snapshot, fingerprint: libraryHash(JSON.stringify([configDigest, files, [...skipped].sort(byName)])) };
+}
+
+export function selectLibraryResources(resources, categories) {
+  return new Map([...resources].filter(([path]) => categories.includes(resourcePath(path)?.category)));
+}
+
+export function selectLocalLibrary(snapshot, categories) {
+  return localSnapshot({ ...snapshot, entries: selectLibraryResources(snapshot.entries, categories), skipped: selectLibraryResources(snapshot.skipped, categories) });
+}
 
 function namedItems(value, category, key = "name") {
   if (value == null) return new Map();

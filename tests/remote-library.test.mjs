@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, symlink, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { libraryOptions, planLibrary, readLocalLibrary } from "../src/remote-library.mjs";
+import { libraryOptions, planLibrary, readLocalLibrary, selectLocalLibrary } from "../src/remote-library.mjs";
 import { temporary } from "./helpers.mjs";
 
 const windowsServer = { name: "win", transport: "stdio", command: "C:\\work\\serve.cmd", args: ["secret-switch"], env: { KEY: "secret-local" }, agents: ["opencode"], here: { command: "secret-override" } };
@@ -51,6 +51,27 @@ test("local snapshot skips whole symlinked skills and bounds files before readin
   assert.equal(snapshot.skipped.get("library/skills/linked"), "local_symlink");
   await truncate(join(root, "real", "SKILL.md"), 20 * 1024 * 1024);
   await assert.rejects(readLocalLibrary(dir, ["skills"]), { code: "REMOTE_LIBRARY_LIMIT" });
+});
+
+test("local subset projections reproduce direct fingerprints, including skipped symlinks and raw JSON bytes", async (t) => {
+  const dir = await temporary(t), library = join(dir, "library"), skills = join(library, "skills"), sets = join(library, "instruction-sets");
+  await mkdir(join(skills, "real"), { recursive: true });
+  await mkdir(sets);
+  await writeFile(join(dir, "library.json"), '{\n  "instructions": {}, "skills": [], "mcp": [], "commands": []\n}\n');
+  await writeFile(join(library, "instructions.md"), "shared");
+  await writeFile(join(sets, "套.md"), "set");
+  await writeFile(join(skills, "real", "SKILL.md"), "test skill");
+  await symlink(join(skills, "real"), join(skills, "linked"), process.platform === "win32" ? "junction" : "dir");
+  const categories = ["instructions", "skills", "mcp", "commands"];
+  const full = await readLocalLibrary(dir, categories, { includeFiles: false });
+  for (let mask = 1; mask < 2 ** categories.length; mask++) {
+    const subset = categories.filter((_, index) => mask & (1 << index));
+    const projected = selectLocalLibrary(full, subset);
+    const direct = await readLocalLibrary(dir, subset);
+    assert.equal(projected.fingerprint, direct.fingerprint, subset.join("/"));
+    assert.deepEqual(projected.skipped, direct.skipped);
+    assert.deepEqual([...projected.entries.keys()].sort(), [...direct.entries.keys()].sort());
+  }
 });
 
 test("merge keeps remote-only files, while mirror removes only selected groups and protects skipped links", () => {

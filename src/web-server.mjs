@@ -253,8 +253,11 @@ export async function startManagementServer({ tools, port = 0, recovery, view, o
       }
       const controller = new AbortController();
       const cancel = () => { if (!response.writableEnded) controller.abort(); };
+      // The request can close as soon as its entire body is read. The response
+      // tracks disconnects while the tool is queued or still working.
       response.once("close", cancel);
       try {
+        if (response.destroyed) { cancel(); return; }
         const result = await tool.execute(body.args, { abort: controller.signal, credentials });
         if (!response.destroyed) json(response, 200, { result });
       } finally { response.removeListener("close", cancel); }

@@ -4,9 +4,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { chmod, mkdir, readFile, rename, symlink, truncate, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { actionScript, probeScript, scriptCommand, shellQuote } from "../src/remote-scripts.mjs";
+import { actionScript, libraryPreviewScript, probeEnd, probeScript, scriptCommand, shellQuote } from "../src/remote-scripts.mjs";
 import { libraryHash, libraryLimits, libraryOptions, planLibrary, readLocalLibrary } from "../src/remote-library.mjs";
-import { libraryBundle, librarySnapshotScript, parseLibrarySnapshot } from "../src/remote-library-transfer.mjs";
+import { libraryBundle, librarySnapshotScript, parseLibrarySnapshot, selectRemoteLibrary } from "../src/remote-library-transfer.mjs";
 import { parseProbe } from "../src/remote.mjs";
 import { temporary } from "./helpers.mjs";
 
@@ -99,6 +99,42 @@ test("snapshot dispatches to Python when available and preserves its exit code",
   assert.equal((await run(withoutPython(script))).code, 0);
 });
 
+test("combined preview matches standalone probe and snapshot and guards the scan", async (t) => {
+  const { config, run, toShell, tool } = await fixture(t);
+  const library = join(config, "library"), skills = join(library, "skills");
+  await mkdir(join(skills, "nested"), { recursive: true });
+  await mkdir(join(library, "instruction-sets"));
+  await writeFile(join(config, "library.json"), '{ "skills": [] }\n');
+  await writeFile(join(config, "settings.json"), '{"gatewayMode":"on"}');
+  await writeFile(join(library, "instructions.md"), "shared");
+  await writeFile(join(library, "instruction-sets", "套.md"), "set");
+  for (const name of [".hidden", "..also-hidden", "Z", "nested/.child"]) await writeFile(join(skills, name), name);
+  const standalone = parseProbe((await run(probeScript)).stdout);
+  const all = ["mcp", "instructions", "skills"], combined = libraryPreviewScript(all);
+  if (standalone.container) {
+    const refused = await run(combined);
+    assert.equal(refused.code, 83);
+    assert.doesNotMatch(refused.stdout, /MIGPIE_LIBRARY_V1/);
+    return;
+  }
+  const combinedResult = await run(withoutPython(combined));
+  assert.equal(combinedResult.code, 0, combinedResult.stderr);
+  const [probe, manifest] = combinedResult.stdout.split(new RegExp(`\\r?\\n${probeEnd}\\r?\\n`));
+  assert.deepEqual(parseProbe(probe), standalone);
+  const full = parseLibrarySnapshot(manifest, all);
+  for (const subset of [all, ["instructions", "skills"], ["mcp"], ["instructions"], ["skills"]]) {
+    const result = await run(withoutPython(librarySnapshotScript({ configDirectory: toShell(config) }, subset)));
+    assert.equal(result.code, 0, result.stderr);
+    const direct = parseLibrarySnapshot(result.stdout, subset);
+    assert.deepEqual(selectRemoteLibrary(full, subset), direct);
+  }
+  await tool("uname", "echo Darwin");
+  await tool("python3", "printf 'unexpected-scan\\n'; exit 1");
+  const refused = await run(combined);
+  assert.equal(refused.code, 83);
+  assert.doesNotMatch(refused.stdout, /unexpected-scan|MIGPIE_LIBRARY_V1/);
+});
+
 test("probe hashes the entire binary with OpenSSL and falls back to sha256sum", async (t) => {
   const { bin, run, tool } = await fixture(t);
   if ((await run("command -v openssl")).code !== 0) return t.skip("OpenSSL unavailable");
@@ -108,6 +144,37 @@ test("probe hashes the entire binary with OpenSSL and falls back to sha256sum", 
   await tool("openssl", "printf 'invalid output\\n'");
   await unlink(join(dirname(bin), "sha256sum"));
   assert.equal(parseProbe((await run(probeScript)).stdout).binaryHash, digest);
+});
+
+test("probe audits systemd properties once and fails closed on overrides or listeners", async (t) => {
+  const { home, bin, run, toShell, tool } = await fixture(t);
+  const unit = join(home, ".config", "systemd", "user", "magpie.service");
+  await mkdir(dirname(unit), { recursive: true });
+  await writeFile(unit, `[Service]\nEnvironment="MAGPIE_ADDR=127.0.0.1:3425"\nExecStart="${toShell(bin)}" serve "--web=127.0.0.1:3430"\n`);
+  await tool("systemctl", `printf '%s\\n' "$*" >> "$HOME/systemctl-calls"
+case "$*" in
+  *show-environment*) exit 0 ;;
+  *UnitPath*) printf '%s' "$HOME/.config/systemd/user" ;;
+  *LoadState*) printf loaded ;;
+  *FragmentPath*) printf '%s' "$HOME/.config/systemd/user/magpie.service" ;;
+  *DropInPaths*) [ -z "$OVERRIDE" ] || printf '%s' "$OVERRIDE" ;;
+  *EnvironmentFiles*) exit 0 ;;
+  *NeedDaemonReload*) printf no ;;
+  *ActiveState*) [ -z "$ACTIVE_FAIL" ] || exit 1; printf active ;;
+  *) exit 1 ;;
+esac`);
+  // Exercise the fixture listeners instead of the test runner's /proc sockets.
+  await tool("od", "exit 1");
+  await tool("ss", `printf 'LISTEN 0 128 %s:3425 0.0.0.0:*\\nLISTEN 0 128 %s:3430 0.0.0.0:*\\n' "\${LISTEN_HOST:-127.0.0.1}" "\${LISTEN_HOST:-127.0.0.1}"`);
+  const inspect = async (env = "") => parseProbe((await run(env + probeScript)).stdout).service;
+  assert.deepEqual(await inspect(), { installed: true, state: "running", scope: "loopback", rebuildSafe: true });
+  const calls = await readFile(join(home, "systemctl-calls"), "utf8");
+  for (const property of ["UnitPath", "LoadState", "FragmentPath", "DropInPaths", "EnvironmentFiles", "NeedDaemonReload", "ActiveState"]) {
+    assert.equal(calls.match(new RegExp(`--property=${property}`, "g"))?.length, 1, property);
+  }
+  assert.deepEqual(await inspect("export OVERRIDE=foreign\n"), { installed: true, state: "running", scope: "unknown", rebuildSafe: false });
+  assert.equal((await inspect("export LISTEN_HOST=0.0.0.0\n")).scope, "unknown");
+  assert.equal((await inspect("export ACTIVE_FAIL=1\n")).scope, "unknown");
 });
 
 test("Python and shell snapshots agree on ordering, file kinds, links, gateway and scan errors", { skip: process.platform !== "linux" }, async (t) => {

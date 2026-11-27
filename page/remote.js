@@ -29,7 +29,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   let generation = 0, dataRevision = 0, previewSequence = 0, webSequence = 0, backupSequence = 0;
   let status = null, operation = null, reading = null, polling = null;
   let preview = null, previewAction = null, previewBackupId = null, previewLoading = false, submitting = false, webLoading = false, recovering = false;
-  let cancelPreviewDelay;
+  let cancelPreviewDelay, previewRequest, previewSession;
   let readError = "", actionError = "", webError = "", submissionUncertain = false, uncertainSubmission = null;
   let backups = null, backupsLoading = null, backupError = "", backupsDirty = false, backupRefreshDue = false, completedBackupOperation = null;
   const pendingSubmissions = new Set(), uncertainSubmissions = new Map(), backupRows = new Map();
@@ -101,6 +101,8 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   }
   function closePreview() {
     cancelPreviewDelay?.();
+    previewRequest?.abort();
+    previewSession = undefined;
     previewSequence++; preview = null; previewAction = null; previewBackupId = null; previewLoading = false;
     if (dialog.open) dialog.close();
   }
@@ -580,6 +582,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   }
   async function loadPreview(debounce = false) {
     cancelPreviewDelay?.();
+    previewRequest?.abort();
     const action = previewAction, backupId = previewBackupId, id = row.connection.id, epoch = generation, sequence = ++previewSequence;
     const categories = [...$("remote-library-options").querySelectorAll('input[name="library-category"]:checked')].map((input) => input.value);
     const library = action === "library_sync";
@@ -592,7 +595,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
     showError("remote-preview-error", "");
     if (!previewLoading) { text("remote-preview-summary", "请选择同步分类。"); draw(); return; }
     draw();
-    if (debounce) {
+    if (debounce && !previewSession) {
       await new Promise((resolve) => {
         const finish = () => { cancelPreviewDelay = undefined; resolve(); };
         const timer = setTimeout(finish, 175);
@@ -600,11 +603,16 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
       });
       if (sequence !== previewSequence || !dialog.open || !current(id, epoch)) return;
     }
+    const request = new AbortController();
+    previewRequest = request;
     try {
-      const result = await call("remote_preview", { connectionId: id, action, ...(backupId && { backupId }), ...(library && { categories, mode: $("remote-library-mirror").checked ? "mirror" : "merge" }) });
+      const result = await call("remote_preview", { connectionId: id, action, ...(backupId && { backupId }), ...(library && {
+        categories, mode: $("remote-library-mirror").checked ? "mirror" : "merge", ...(previewSession && { previewSession }),
+      }) }, undefined, { signal: request.signal });
       if (!current(id, epoch) || sequence !== previewSequence || !dialog.open) return;
       if (result?.connectionId !== id || result.action !== action || (backupId && result.backupId !== backupId)) throw new Error("操作预览与当前连接或备份不匹配，请关闭后重试。");
       preview = result;
+      previewSession = result.previewSession;
       text("remote-preview-summary", result.summary);
       list("remote-preview-changes", result.changes);
       const warnings = Array.isArray(result.warnings) ? result.warnings : [];
@@ -612,11 +620,12 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
       list("remote-preview-warnings", [...warnings, ...libraryWarnings]);
       if (library) renderLibrary(result.library);
     } catch (error) {
-      if (current(id, epoch) && sequence === previewSequence && dialog.open) {
+      if (!request.signal.aborted && error?.name !== "AbortError" && current(id, epoch) && sequence === previewSequence && dialog.open) {
         text("remote-preview-summary", "未能读取变更预览，请关闭后重试。");
         showError("remote-preview-error", errorMessage(error));
       }
     } finally {
+      if (previewRequest === request) previewRequest = undefined;
       if (current(id, epoch) && sequence === previewSequence) { previewLoading = false; draw(); }
     }
   }
@@ -628,7 +637,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
     text("remote-preview-connection", row.connection.name + " · " + row.connection.username + "@" + row.connection.host);
     $("remote-library-options").hidden = action !== "library_sync";
     $("remote-preview").classList.toggle("is-library", action === "library_sync");
-    $("remote-library-options").querySelectorAll('input[name="library-category"]').forEach((input) => { input.checked = true; });
+    $("remote-library-options").querySelectorAll('input[name="library-category"]').forEach((input) => { input.checked = input.defaultChecked; });
     $("remote-library-mirror").checked = false;
     $("remote-preview-background").hidden = true;
     dialog.showModal(); await loadPreview();
@@ -773,6 +782,7 @@ export function createRemoteManager({ call, confirmAction, toast, onOperation })
   $("remote-hide-web").addEventListener("click", () => { clearWeb(); draw(); $("remote-open-web").focus(); });
   dialog.querySelectorAll(".remote-close-preview").forEach((button) => button.addEventListener("click", () => { closePreview(); draw(); }));
   dialog.addEventListener("close", () => { if (!dialog.open) { closePreview(); draw(); } });
+  dialog.addEventListener("cancel", (event) => { event.preventDefault(); closePreview(); draw(); });
   $("remote-preview-form").addEventListener("submit", (event) => { void applyPreview(event); });
   $("remote-library-options").addEventListener("change", () => { if (dialog.open && previewAction === "library_sync" && !submitting) void loadPreview(true); });
   $("remote-apply").addEventListener("click", (event) => { void applyPreview(event); });

@@ -67,6 +67,9 @@ service_config_ports() {
 }
 service_private_config() {
   service_overrides_clear || return 1
+  service_config_after_overrides
+}
+service_config_after_overrides() {
   [ "$fragment" = "$unit" ] || return 1
   reload=$(systemctl --user show magpie.service --property=NeedDaemonReload --value 2>/dev/null) || return 1
   [ "$reload" = no ] || return 1
@@ -77,6 +80,9 @@ service_private_config() {
 }
 service_private_listeners() {
   service_private_config || return 1
+  service_listeners_for_config
+}
+service_listeners_for_config() {
   set -- $service_ports
   [ "$(listener_scope "$1")" = loopback ] || return 1
   if [ "$2" != 0 ]; then [ "$(listener_scope "$2")" = loopback ] || return 1; fi

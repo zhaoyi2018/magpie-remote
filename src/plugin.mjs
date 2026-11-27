@@ -123,7 +123,11 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
         identifier(connectionId);
         assertMutable();
         if (!providerLink) throw new OperationError("PROVIDER_LINK_UNAVAILABLE", "本机 Magpie 自动对接尚未启用");
-        return providerLink.sync(connectionId, { signal: ctx.abort, overwrite, commit: (action) => serial(connectionId, action) });
+        remote.invalidateLibraryPreview?.(connectionId);
+        return providerLink.sync(connectionId, { signal: ctx.abort, overwrite, commit: (action) => serial(connectionId, () => {
+          remote.invalidateLibraryPreview?.(connectionId);
+          return action();
+        }) });
       },
     },
     remote_preview: {
@@ -131,14 +135,21 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, backupId: { type: "string", pattern: "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$" },
         categories: { type: "array", items: { type: "string", enum: libraryCategories }, minItems: 1, maxItems: libraryCategories.length, uniqueItems: true },
         mode: { type: "string", enum: libraryModes },
+        previewSession: { ...revisionSchema, description: "Optional snapshot session returned by the previous library_sync preview in the same dialog" },
       }, ["connectionId", "action"]),
-      execute({ connectionId, action, backupId, categories, mode }, ctx = {}) { return serial(connectionId, () => remote.preview(connectionId, action, { signal: ctx.abort, backupId, categories, mode })); },
+      execute({ connectionId, action, backupId, categories, mode, previewSession }, ctx = {}) {
+        return serial(connectionId, () => {
+          if (ctx.abort?.aborted) throw new OperationError("REMOTE_CANCELLED", "远端预览已取消");
+          return remote.preview(connectionId, action, { signal: ctx.abort, backupId, categories, mode, previewSession });
+        });
+      },
     },
     remote_apply: {
       description: "Start a previously previewed remote Magpie action using its revision and return a background operation immediately. Query remote_status for progress; never retry an unknown result. Backups are unencrypted remote config archives with a copy of the current binary; no backup passphrase is needed.",
       args: args({ connectionId: idSchema, action: { type: "string", enum: remoteActions }, revision: { ...revisionSchema, description: "The short-lived revision returned by remote_preview for this action" } }),
-      execute({ connectionId, action, revision, categories, mode }) {
-        if (action === libraryAction && (categories !== undefined || mode !== undefined)) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "确认同步仅接受预览返回的 revision，修改分类或策略需重新预览");
+      execute({ connectionId, action, revision, categories, mode, previewSession }) {
+        if (action === libraryAction && (categories !== undefined || mode !== undefined || previewSession !== undefined)) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "确认同步仅接受预览返回的 revision，修改分类或策略需重新预览");
+        remote.invalidateLibraryPreview?.(connectionId);
         return serial(connectionId, async () => {
           const submission = remote.apply(connectionId, action, revision);
           remoteSubmissions.add(submission);
@@ -159,6 +170,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
       description: "End an unknown remote task after the user explicitly confirms the task and its child processes have stopped and verifies the actual installation/configuration. Removes only its residual operation lock; refuses a live owner or another task's lock, retains failure history and never repeats the deployment.",
       args: args({ connectionId: idSchema, operationId: { type: "string", pattern: "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$" }, confirmed: { type: "boolean", enum: [true] } }),
       execute({ connectionId, operationId, confirmed }, ctx = {}) {
+        remote.invalidateLibraryPreview?.(connectionId);
         return serial(connectionId, () => remote.recover(connectionId, operationId, { confirmed, signal: ctx.abort }));
       },
     },
@@ -270,6 +282,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
           if (sessions.isActive(profile.id)) throw new Error("请先断开连接再修改配置");
           await remote.assertProfileChange(profile);
           const saved = await store.save(profile, { expectedRevision, password: ctx.credentials?.password });
+          remote.invalidateLibraryPreview?.(profile.id);
           return { connection: publicProfile(saved), revision: profileRevision(saved), hasSavedPassword: Boolean(saved.encryptedPassword) };
         });
       },
@@ -357,6 +370,7 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
           const forwards = profile.forwards.filter((item) => item.id !== spec.id);
           forwards.push(spec);
           const saved = await store.save({ ...profile, forwards }, { expectedRevision });
+          remote.invalidateLibraryPreview?.(connectionId);
           sessions.forgetForward(connectionId, spec.id);
           return { forward: spec, revision: profileRevision(saved) };
         });
@@ -376,7 +390,10 @@ export function createTools(store, sessions, remote = new RemoteManager({ store,
           const running = sessions.status(connectionId).forwards.some((item) => item.id === forwardId);
           const saved = profile.forwards.some((item) => item.id === forwardId);
           if (!running && !saved) throw new Error(`转发 ${forwardId} 不存在`);
-          if (saved) await store.save({ ...profile, forwards: profile.forwards.filter((item) => item.id !== forwardId) }, { expectedRevision });
+          if (saved) {
+            await store.save({ ...profile, forwards: profile.forwards.filter((item) => item.id !== forwardId) }, { expectedRevision });
+            remote.invalidateLibraryPreview?.(connectionId);
+          }
           sessions.forgetForward(connectionId, forwardId);
           if (running) {
             try { await sessions.removeForward(connectionId, forwardId); }

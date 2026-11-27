@@ -6,15 +6,19 @@ import { setTimeout as delay } from "node:timers/promises";
 import { identifier } from "./config.mjs";
 import { OperationError, errorDetails } from "./errors.mjs";
 import { profileRevision } from "./store.mjs";
-import { actionScript, backupActions, probeScript, recoveryScript, remoteActions, scriptCommand, webLinkCommand } from "./remote-scripts.mjs";
+import { actionScript, backupActions, libraryPreviewScript, probeEnd, probeScript, recoveryScript, remoteActions, scriptCommand, webLinkCommand } from "./remote-scripts.mjs";
 import { downloadRelease } from "./release-download.mjs";
 import { backupIdPattern, backupInventoryScript, parseBackups } from "./remote-backups.mjs";
 import { libraryResultMessage, operationHistoryLimit, operationSummary, parseLibraryResult, parseRestoreResult, restoreResultMessage, terminalOperation } from "./remote-results.mjs";
-import { libraryAction, libraryLimitError, libraryOptions, libraryPathError, planLibrary, readLocalLibrary } from "./remote-library.mjs";
-import { libraryBundle, librarySnapshotMaxBytes, librarySnapshotScript, parseLibrarySnapshot } from "./remote-library-transfer.mjs";
+import { libraryAction, libraryLimitError, libraryOptions, libraryPathError, libraryTools, planLibrary, readLocalLibrary, selectLocalLibrary } from "./remote-library.mjs";
+import { libraryBundle, librarySnapshotMaxBytes, librarySnapshotScript, parseLibrarySnapshot, selectRemoteLibrary } from "./remote-library-transfer.mjs";
 
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const copy = (value) => value === undefined ? undefined : structuredClone(value);
+const previewToken = () => randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "");
+const probeMaxBytes = 262144;
+const librarySnapshotTTL = 90_000;
+const probeBoundary = new RegExp(`\\r?\\n${probeEnd}\\r?\\n`);
 const labels = { install: "安装 Magpie", update: "更新 Magpie", start: "启动服务", stop: "停止服务", restart: "重启服务", enable_web: "启用管理页面", backup: "创建备份", restore: "恢复配置", delete_backup: "删除备份", uninstall: "卸载 Magpie", [libraryAction]: "同步资源库" };
 const uncertain = new Set(["REMOTE_TIMEOUT", "REMOTE_DISCONNECTED", "REMOTE_CANCELLED", "REMOTE_RESULT_UNKNOWN", "REMOTE_OUTPUT_LIMIT", "REMOTE_INPUT_FAILED"]);
 const steps = { preparing: "准备操作", verifying: "复核程序与服务文件", preparing_backup: "创建备份目录", backing_up: "备份配置", saving_binary: "保存当前程序副本", downloading: "本机下载程序", uploading: "上传到服务器", checking_upload: "检查上传内容", installing: "安装程序", updating: "执行官方更新", restarting: "重启用户服务", starting: "启动用户服务", stopping: "停止用户服务", enabling_web: "启用 Web 服务", uninstalling: "卸载程序与服务", checking_version: "检查更新后版本", restoring: "恢复配置", deleting_backup: "删除备份", healthcheck: "检查服务健康状态", packing_library: "复核并打包资源库", applying_library: "写入远端资源库", syncing_library: "应用资源库到 Agent", completed: "执行完成" };
@@ -58,6 +62,18 @@ function actionFailure(action, exitCode, result) {
   if (action === "update" && ["preparing", "verifying", "uploading", "checking_upload", "preparing_backup", "backing_up", "saving_binary"].includes(result?.step)) message += "本次尚未执行更新。";
   if (action === "update" && ["restarting", "checking_version", "healthcheck"].includes(result?.step)) message += "更新命令已完成，请检查当前程序版本和服务状态，避免重复更新。";
   return new OperationError("REMOTE_ACTION_FAILED", message);
+}
+
+function checkPreviewCancellation(signal) {
+  if (signal?.aborted) throw new OperationError("REMOTE_CANCELLED", "远端预览已取消");
+}
+
+function readLibraryResponse(response, categories) {
+  if (response.code === 78) throw libraryPathError();
+  if (response.code === 81) throw libraryLimitError();
+  if (response.code === 82) throw new OperationError("REMOTE_PREVIEW_STALE", "远端 Magpie 数据目录已变化，请重新检测");
+  if (response.code !== 0) throw new OperationError("REMOTE_LIBRARY_READ_FAILED", "无法读取远端资源库，请检查文件权限与所需命令");
+  return parseLibrarySnapshot(response.stdout, categories);
 }
 
 function backupDirectory(instance, operationId) {
@@ -134,6 +150,7 @@ export class RemoteManager {
   #records = new Map();
   #webForwards = new Map();
   #previews = new Map();
+  #librarySnapshots = new Map();
   #tasks = new Set();
   #queue = Promise.resolve();
   #ready;
@@ -275,7 +292,7 @@ export class RemoteManager {
 
   async #probe(id, signal) {
     this.#connected(id);
-    const response = await this.sessions.execute(id, "sh -s", { input: probeScript, signal, timeoutMs: 20000 });
+    const response = await this.sessions.execute(id, "sh -s", { input: probeScript, signal, timeoutMs: 20000, maxBytes: probeMaxBytes });
     if (response.code !== 0) throw new OperationError("REMOTE_PROBE_FAILED", "环境检测失败，需要 POSIX shell、base64 与可读的用户目录");
     return parseProbe(response.stdout);
   }
@@ -366,30 +383,70 @@ export class RemoteManager {
   async #readLibrary(id, instance, categories, signal) {
     this.#connected(id);
     const response = await this.sessions.execute(id, "sh -s", { input: librarySnapshotScript(instance, categories), signal, timeoutMs: 120000, maxBytes: librarySnapshotMaxBytes });
-    if (response.code === 78) throw libraryPathError();
-    if (response.code === 81) throw libraryLimitError();
-    if (response.code === 82) throw new OperationError("REMOTE_PREVIEW_STALE", "远端 Magpie 数据目录已变化，请重新检测");
-    if (response.code !== 0) throw new OperationError("REMOTE_LIBRARY_READ_FAILED", "无法读取远端资源库，请检查文件权限与所需命令");
-    return parseLibrarySnapshot(response.stdout, categories);
+    return readLibraryResponse(response, categories);
   }
 
-  async #readLibraryPreview(id, options, backupId, signal) {
+  async #readLibraryPreview(id, categories, signal) {
     const controller = new AbortController();
     const previewSignal = AbortSignal.any([controller.signal, this.#shutdown.signal, ...(signal ? [signal] : [])]);
-    const local = readLocalLibrary(this.directory, options.categories, { includeFiles: false, signal: previewSignal });
+    const local = readLocalLibrary(this.directory, categories, { includeFiles: false, signal: previewSignal });
     const remote = (async () => {
-      const instance = await this.#probe(id, previewSignal);
+      const response = await this.sessions.execute(id, "sh -s", { input: libraryPreviewScript(categories), signal: previewSignal, timeoutMs: 120000, maxBytes: librarySnapshotMaxBytes });
+      const boundary = probeBoundary.exec(response.stdout);
+      if (!boundary) throw new OperationError("REMOTE_PROBE_FAILED", "环境检测失败，需要 POSIX shell、base64 与可读的用户目录");
+      const probe = response.stdout.slice(0, boundary.index);
+      if (Buffer.byteLength(probe) > probeMaxBytes) throw new OperationError("REMOTE_OUTPUT_LIMIT", "远端环境响应超过大小限制，请重新检测");
+      const instance = parseProbe(probe);
       this.#validate(libraryAction, instance);
-      if (backupId !== undefined) throw new OperationError("REMOTE_BACKUP_INVALID", "此操作不接受备份条目标识");
-      return { instance, snapshot: await this.#readLibrary(id, instance, options.categories, previewSignal) };
+      const stdout = response.stdout.slice(boundary.index + boundary[0].length);
+      return { instance, snapshot: readLibraryResponse({ ...response, stdout }, categories) };
     })();
     try {
       const [source, { instance, snapshot }] = await Promise.all([local, remote]);
-      if (previewSignal.aborted) throw new OperationError("REMOTE_CANCELLED", "资源库预览已取消");
+      checkPreviewCancellation(previewSignal);
       return { instance, local: source, remote: snapshot };
     } finally {
       controller.abort();
       await Promise.allSettled([local, remote]);
+    }
+  }
+
+  invalidateLibraryPreview(id) {
+    const snapshot = this.#librarySnapshots.get(id);
+    if (!snapshot) return;
+    this.#librarySnapshots.delete(id);
+    clearTimeout(snapshot.timer);
+    snapshot.connection.removeEventListener("abort", snapshot.invalidate);
+  }
+
+  async #libraryPreview(id, categories, profile, token, signal) {
+    this.#connected(id);
+    const connection = this.sessions.connectionSignal?.(id);
+    const cached = this.#librarySnapshots.get(id);
+    if (cached?.inputs && cached.token === token && cached.profile === profile && cached.connection === connection
+      && !connection.aborted && cached.expires > Date.now() && categories.every((category) => cached.categories.includes(category))) {
+      const { instance, local, remote } = cached.inputs;
+      return { instance, local: selectLocalLibrary(local, categories), remote: selectRemoteLibrary(remote, categories), token, reused: true };
+    }
+    this.invalidateLibraryPreview(id);
+    if (!connection || connection.aborted) return this.#readLibraryPreview(id, categories, signal);
+
+    const invalidate = () => this.invalidateLibraryPreview(id);
+    const snapshot = { categories, profile, connection, invalidate };
+    this.#librarySnapshots.set(id, snapshot);
+    connection.addEventListener("abort", invalidate, { once: true });
+    try {
+      const inputs = await this.#readLibraryPreview(id, categories, signal);
+      if (this.sessions.connectionSignal(id) !== connection || connection.aborted) throw new OperationError("REMOTE_DISCONNECTED", "预览期间 SSH 连接已变化，请重新预览");
+      if (this.#librarySnapshots.get(id) !== snapshot) return inputs;
+      snapshot.inputs = inputs;
+      snapshot.token = previewToken();
+      snapshot.expires = Date.now() + librarySnapshotTTL;
+      snapshot.timer = setTimeout(invalidate, librarySnapshotTTL).unref();
+      return { ...inputs, token: snapshot.token };
+    } catch (error) {
+      if (this.#librarySnapshots.get(id) === snapshot) invalidate();
+      throw error;
     }
   }
 
@@ -465,7 +522,7 @@ export class RemoteManager {
       if (!this.directory) throw new OperationError("REMOTE_LIBRARY_LOCAL_UNAVAILABLE", "未配置本机 Magpie 数据目录");
       const path = instance.configDirectory;
       if (!path?.startsWith("/") || !path.endsWith("/magpie") || posix.normalize(path) !== path) throw libraryPathError();
-      for (const tool of ["sha256sum", "base64", "mktemp", "tar", "readlink"]) if (!instance.tools.includes(tool)) throw new OperationError("REMOTE_PREREQUISITE", "资源库同步需要远端命令：" + tool);
+      for (const tool of libraryTools) if (!instance.tools.includes(tool)) throw new OperationError("REMOTE_PREREQUISITE", "资源库同步需要远端命令：" + tool);
       return;
     }
     if (action === "install") {
@@ -507,12 +564,16 @@ export class RemoteManager {
     if (action === "uninstall" && !instance.tools.includes("readlink")) throw new OperationError("REMOTE_PREREQUISITE", "卸载需要远端 readlink 核实默认安装路径");
   }
 
-  async preview(id, action, { signal, backupId, categories, mode } = {}) {
+  async preview(id, action, { signal, backupId, categories, mode, previewSession } = {}) {
     const options = action === libraryAction ? libraryOptions({ categories, mode }) : undefined;
-    if (!options && (categories !== undefined || mode !== undefined)) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "仅资源库同步接受分类和同步策略");
+    if (!options && (categories !== undefined || mode !== undefined || previewSession !== undefined)) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "仅资源库同步接受分类、同步策略和预览会话");
+    if (options && backupId !== undefined) throw new OperationError("REMOTE_BACKUP_INVALID", "此操作不接受备份条目标识");
+    if (previewSession !== undefined && (typeof previewSession !== "string" || !/^[a-f0-9]{64}$/.test(previewSession))) throw new OperationError("REMOTE_LIBRARY_OPTIONS", "资源库预览会话标识无效");
     const profile = await this.#profile(id), record = this.#record(id, profile);
+    const profileVersion = profileRevision(profile);
+    checkPreviewCancellation(signal);
     if (["running", "unknown"].includes(record.operation?.state)) throw new OperationError("REMOTE_BUSY", "已有远端操作尚未完成核实，请先检测其结果");
-    const libraryInputs = options && await this.#readLibraryPreview(id, options, backupId, signal);
+    const libraryInputs = options && await this.#libraryPreview(id, options.categories, profileVersion, previewSession, signal);
     const instance = libraryInputs?.instance ?? await this.#probe(id, signal);
     let release;
     const update = action === "update" ? await this.#checkUpdate(instance, release = await this.release(instance.architecture)) : record.update;
@@ -568,14 +629,19 @@ export class RemoteManager {
       warnings.push("请先在官方页面恢复仍接入此网关的 Agent 配置；本次不会自动改写各 Agent", "仅处理当前用户的默认安装，不清理其他实例、容器或系统服务");
     }
     if (!instance.linger && ["start", "enable_web"].includes(action)) warnings.push("未确认启用 linger，退出 SSH 后用户服务可能停止；需要时在服务器配置 loginctl enable-linger");
-    const revision = randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "");
-    this.#previews.set(id, { action, revision, baseline: hash(instance), profile: profileRevision(profile), instance, update, release, backupMode, selectedBackup,
+    checkPreviewCancellation(signal);
+    if (!libraryInputs?.reused) {
+      record.instance = instance; record.update = update; record.observedAt = new Date().toISOString(); await this.#save();
+      checkPreviewCancellation(signal);
+    }
+    const revision = previewToken();
+    this.#previews.set(id, { action, revision, baseline: hash(instance), profile: profileVersion, instance, update, release, backupMode, selectedBackup,
       ...(library && { library: { options, localFingerprint: library.localFingerprint, remoteFingerprint: library.remoteFingerprint } }), expires: Date.now() + 300000 });
-    record.instance = instance; record.update = update; record.observedAt = new Date().toISOString(); await this.#save();
-    return { connectionId: id, action, revision, summary: labels[action], changes, warnings, ...(backupMode && { backupMode }), ...(selectedBackup && { backupId: selectedBackup.id }), ...(library && { library: library.preview }) };
+    return { connectionId: id, action, revision, summary: labels[action], changes, warnings, ...(backupMode && { backupMode }), ...(selectedBackup && { backupId: selectedBackup.id }), ...(library && { library: library.preview }), ...(libraryInputs?.token && { previewSession: libraryInputs.token }) };
   }
 
   async apply(id, action, revision) {
+    this.invalidateLibraryPreview(id);
     const profile = await this.#profile(id), record = this.#record(id, profile), preview = this.#previews.get(id);
     if (record.operation?.state === "running") {
       if (record.operation.action === action && record.operation.revision === revision) return copy(record.operation);
@@ -705,6 +771,7 @@ export class RemoteManager {
   }
 
   async recover(id, operationId, { confirmed = false, signal } = {}) {
+    this.invalidateLibraryPreview(id);
     const profile = await this.#profile(id), record = this.#record(id, profile);
     const operation = record.operation;
     if (!operation || operation.id !== operationId) throw new OperationError("REMOTE_OPERATION_MISSING", "当前任务已变化，请重新读取后再解除待核实状态");
@@ -801,8 +868,16 @@ export class RemoteManager {
 
   async forget(id) {
     await this.assertIdle(id);
+    this.invalidateLibraryPreview(id);
     this.#records.delete(id); this.#previews.delete(id); this.#webForwards.delete(id); await this.#save();
   }
 
-  async close() { this.#closed = true; this.#shutdown.abort(); await this.#retrying?.catch(() => {}); await Promise.allSettled([...this.#tasks]); await this.#queue.catch(() => {}); }
+  async close() {
+    this.#closed = true;
+    this.#shutdown.abort();
+    for (const id of this.#librarySnapshots.keys()) this.invalidateLibraryPreview(id);
+    await this.#retrying?.catch(() => {});
+    await Promise.allSettled([...this.#tasks]);
+    await this.#queue.catch(() => {});
+  }
 }

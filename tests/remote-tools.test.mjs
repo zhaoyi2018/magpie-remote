@@ -34,6 +34,24 @@ test("remote_recover forwards task identity, explicit confirmation, and cancella
   assert.deepEqual(calls, [["server", operationId, { confirmed: true, signal: controller.signal }]]);
 });
 
+test("cancelled queued previews never enter the remote manager", async () => {
+  const entered = deferred(), release = deferred(), calls = [];
+  const tools = createTools({}, {}, { async preview(_id, action) {
+    calls.push(action);
+    if (action === "backup") { entered.resolve(); await release.promise; }
+    return action;
+  } });
+  const run = (action, abort) => tools.remote_preview.execute({ connectionId: "server", action }, { abort });
+  const first = run("backup"), controller = new AbortController();
+  await entered.promise;
+  const cancelled = assert.rejects(run("restart", controller.signal), { code: "REMOTE_CANCELLED" });
+  const latest = run("stop");
+  controller.abort();
+  release.resolve();
+  await Promise.all([first, cancelled, latest]);
+  assert.deepEqual(calls, ["backup", "stop"]);
+});
+
 test("provider overwrite requires a boolean and stays local to the explicitly requested invocation", async () => {
   const calls = [], providerLink = { sync(...args) { calls.push(args); return { state: "ready" }; } };
   const tools = createTools({}, {}, {}, providerLink), controller = new AbortController();

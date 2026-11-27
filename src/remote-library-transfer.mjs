@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { OperationError } from "./errors.mjs";
-import { libraryHash, libraryLimitError, libraryLimits, parseLibraryJSON, resourcePath } from "./remote-library.mjs";
+import { libraryHash, libraryLimitError, libraryLimits, parseLibraryJSON, resourcePath, selectLibraryResources } from "./remote-library.mjs";
 
 const digestPattern = /^[a-f0-9]{64}$/;
 const libraryMarker = "MIGPIE_LIBRARY_V1";
@@ -235,9 +235,15 @@ ${pythonManifest}MIGPIE_LIBRARY_PYTHON
 
 export function librarySnapshotScript(instance, categories) {
   return `set -eu
-exec 2>/dev/null
 config="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie"
 [ "$config" = ${quote(instance.configDirectory)} ] || exit 82
+${librarySnapshotBody(categories)}`;
+}
+
+// The standalone script checks the path from the earlier SSH probe. The
+// combined script uses the same shell variable that it just reported.
+export function librarySnapshotBody(categories) {
+  return `exec 2>/dev/null
 ${scanFunctions(categories)}manifest=$(library_manifest)
 printf '${libraryMarker}\\n%s\\n' "$manifest"
 printf 'C\\t'
@@ -267,7 +273,7 @@ export function parseLibrarySnapshot(stdout, categories) {
   if (Number(size) !== bytes.length || (digest === "-" ? bytes.length !== 0 : digest !== libraryHash(bytes))) {
     throw new OperationError("REMOTE_PREVIEW_STALE", "读取时远端资源库发生变化，请重新预览");
   }
-  const entries = new Map();
+  const entries = new Map(), manifestRows = new Map();
   for (const line of rows) {
     const [kind, encoded, digest, extra] = line.split("\t");
     if (!encoded || extra !== undefined || (kind === "D" ? digest !== "-" : !["F", "X", "L"].includes(kind) || !digestPattern.test(digest ?? ""))) throw protocol();
@@ -278,8 +284,17 @@ export function parseLibrarySnapshot(stdout, categories) {
     if (!resource || !categories.includes(resource.category) || entries.has(path)) throw protocol();
     if (path !== resource.group && entries.get(path.slice(0, path.lastIndexOf("/")))?.kind !== "D") throw protocol();
     entries.set(path, { kind, ...(kind !== "D" && { digest }) });
+    manifestRows.set(path, line);
   }
-  return { config: digest === "-" ? {} : parseLibraryJSON(bytes), entries, fingerprint: libraryHash(lines.join("\n")), gateway: gateway === "G\ttrue" };
+  return remoteLibrarySnapshot({ config: digest === "-" ? {} : parseLibraryJSON(bytes), entries, manifestHeader: [json, gateway], manifestRows, gateway: gateway === "G\ttrue" });
+}
+
+function remoteLibrarySnapshot(snapshot) {
+  return { ...snapshot, fingerprint: libraryHash([...snapshot.manifestHeader, ...snapshot.manifestRows.values()].join("\n")) };
+}
+
+export function selectRemoteLibrary(snapshot, categories) {
+  return remoteLibrarySnapshot({ ...snapshot, entries: selectLibraryResources(snapshot.entries, categories), manifestRows: selectLibraryResources(snapshot.manifestRows, categories) });
 }
 
 // The archive contains only fixed or numbered regular files. User paths are

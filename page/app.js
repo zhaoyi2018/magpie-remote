@@ -139,20 +139,22 @@ import { createRemoteManager } from "./remote.js";
 
   async function request(path, options = {}, timeout = 50000) {
     const controller = new AbortController();
+    const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const response = await fetch(new URL(path, base), { ...options, credentials: "omit", signal: controller.signal, headers: { Authorization: "Bearer " + token, ...options.headers } });
+      const response = await fetch(new URL(path, base), { ...options, credentials: "omit", signal, headers: { Authorization: "Bearer " + token, ...options.headers } });
       return await readResponse(response);
     } catch (error) {
+      if (options.signal?.aborted) throw options.signal.reason;
       if (error.name === "AbortError") throw Object.assign(new Error("请求超时，请检查连接状态后重试"), { code: "REQUEST_TIMEOUT" });
       if (error instanceof TypeError) throw Object.assign(new Error("无法连接管理服务"), { code: "SERVICE_UNREACHABLE" });
       throw error;
     } finally { clearTimeout(timer); }
   }
-  async function call(method, args = {}, credentials) {
+  async function call(method, args = {}, credentials, { signal } = {}) {
     pendingCalls++;
     try {
-      return (await request("api/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method, args, ...(credentials && { credentials }) }) })).result;
+      return (await request("api/call", { method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ method, args, ...(credentials && { credentials }) }) })).result;
     } finally { pendingCalls--; }
   }
   function saveView() {

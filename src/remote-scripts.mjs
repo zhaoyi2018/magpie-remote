@@ -1,6 +1,6 @@
 import { backupIdPattern, backupInspection } from "./remote-backups.mjs";
-import { libraryAction } from "./remote-library.mjs";
-import { libraryCommitScript, libraryReceiveScript, libraryScriptCleanup, libraryScriptResult, libraryScriptVariables } from "./remote-library-transfer.mjs";
+import { libraryAction, libraryTools } from "./remote-library.mjs";
+import { libraryCommitScript, libraryReceiveScript, libraryScriptCleanup, libraryScriptResult, libraryScriptVariables, librarySnapshotBody } from "./remote-library-transfer.mjs";
 import { servicePolicyFunctions } from "./remote-service.mjs";
 
 export const remoteActions = ["install", "update", "start", "stop", "restart", "enable_web", "backup", "restore", "delete_backup", "uninstall", libraryAction];
@@ -41,12 +41,16 @@ binary_hash() {
   sha256sum "$1" 2>/dev/null | cut -d ' ' -f 1
 }
 printf 'MIGPIE_REMOTE_V1\\n'
-emit platform "$(uname -s)"
-emit architecture "$(uname -m)"
+platform=$(uname -s)
+architecture=$(uname -m)
+emit platform "$platform"
+emit architecture "$architecture"
 username=$(id -un)
 emit username "$username"
 emit home "$HOME"
-emit container "$(if [ -e /.dockerenv ] || [ -e /run/.containerenv ]; then printf true; else printf false; fi)"
+container=false
+if [ -e /.dockerenv ] || [ -e /run/.containerenv ]; then container=true; fi
+emit container "$container"
 config="\${XDG_CONFIG_HOME:-$HOME/.config}/magpie"
 unit="\${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/magpie.service"
 emit configDirectory "$config"
@@ -56,10 +60,12 @@ case "$bin" in /*) ;; *) bin='' ;; esac
 emit binary "$bin"
 emit managedBinary "$HOME/.local/bin/magpie"
 emit unit "$unit"
-if [ -n "$bin" ] && [ -x "$bin" ]; then
-  emit installed true
+installed=false
+if [ -n "$bin" ] && [ -x "$bin" ]; then installed=true; fi
+emit installed "$installed"
+probe_details() {
+if [ "$installed" = true ]; then
   emit version "$("$bin" --version 2>/dev/null | head -c 120)"
-  emit binaryHash "$(binary_hash "$bin" || true)"
   help=$("$bin" --help 2>/dev/null) || help=''
   commands=$(printf '%s\\n' "$help" | sed -n 's/^[[:space:]]*magpie[[:space:]][[:space:]]*//p')
   daemon=$(printf '%s\\n' "$commands" | sed -n 's/^daemon[[:space:]][[:space:]]*//p')
@@ -77,7 +83,7 @@ if [ -n "$bin" ] && [ -x "$bin" ]; then
   library_help=$("$bin" library help 2>/dev/null) || library_help=''
   if printf '%s\\n' "$library_help" | grep -Eq '^[[:space:]]*magpie[[:space:]]+library[[:space:]]+sync([[:space:]]|$)'; then capabilities="$capabilities library_sync"; fi
   emit capabilities "$capabilities"
-else emit installed false; fi
+fi
 systemd=false
 if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then systemd=true; fi
 emit systemd "$systemd"
@@ -88,18 +94,65 @@ if [ -f "$unit" ]; then
   emit webPort "$(sed -n 's/.*--web=[^ :"]*:\\([0-9]*\\).*/\\1/p' "$unit" | head -n 1)"
   emit webTLS "$(if grep -q 'MAGPIE_TLS_CERT=' "$unit"; then printf true; else printf false; fi)"
 else emit serviceInstalled false; emit webEnabled false; fi
-if [ "$systemd" = true ]; then
-  emit serviceActive "$(systemctl --user show magpie.service --property=ActiveState --value 2>/dev/null || true)"
-fi
 ${servicePolicyFunctions}
-emit serviceRebuildSafe "$(if [ "$systemd" = true ] && service_overrides_clear; then printf true; else printf false; fi)"
-emit serviceScope "$(if [ "$systemd" = true ] && service_private_config; then
-  if [ "$(systemctl --user show magpie.service --property=ActiveState --value 2>/dev/null)" != active ] || service_private_listeners; then printf loopback; else printf unknown; fi
-else printf unknown; fi)"
+rebuild_safe=false
+scope=unknown
+if [ "$systemd" = true ]; then
+  active_state=$(systemctl --user show magpie.service --property=ActiveState --value 2>/dev/null) || active_state=unknown
+  emit serviceActive "$active_state"
+  if service_overrides_clear; then
+    rebuild_safe=true
+    if service_config_after_overrides; then
+      case "$active_state" in
+        active) if service_listeners_for_config; then scope=loopback; fi ;;
+        inactive|failed|'') scope=loopback ;;
+      esac
+    fi
+  fi
+fi
+emit serviceRebuildSafe "$rebuild_safe"
+emit serviceScope "$scope"
 emit linger "$(loginctl show-user "$username" -p Linger --value 2>/dev/null || true)"
-emit tools "$(for tool in curl sha256sum base64 mktemp install readlink tar; do command -v "$tool" >/dev/null && printf '%s ' "$tool"; done)"
-emit locked "$(if [ -d "\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote/operation.lock" ]; then printf true; else printf false; fi)"
+}
+if [ "$installed" = true ]; then
+  # Keep hash output on its own pipe so the probe fields never interleave.
+  printf '%s\\n' "$(binary_hash "$bin" || true)" | {
+    probe_details </dev/null
+    IFS= read -r digest
+    emit binaryHash "$digest"
+  }
+else
+  probe_details
+fi
+probe_tools=''
+for tool in curl sha256sum base64 mktemp install readlink tar; do
+  if command -v "$tool" >/dev/null; then probe_tools="$probe_tools$tool "; fi
+done
+emit tools "$probe_tools"
+locked=false
+if [ -d "\${XDG_CONFIG_HOME:-$HOME/.config}/magpie-remote/operation.lock" ]; then locked=true; fi
+emit locked "$locked"
 `;
+
+export const probeEnd = "MIGPIE_PROBE_END_V1";
+
+export function libraryPreviewScript(categories) {
+  return `${probeScript}
+printf '${probeEnd}\\n'
+# Emit the complete probe even when preconditions fail so the client can
+# report the same validation error as it would after a standalone probe.
+[ "$platform" = Linux ] && [ "$container" = false ] && [ "$installed" = true ] && [ "$locked" = false ] || exit 83
+[ -n "$architecture" ] && [ -n "$username" ] || exit 83
+case "$HOME" in /*) ;; *) exit 83 ;; esac
+case "$config" in /*/magpie|/magpie) ;; *) exit 83 ;; esac
+case "$config" in *//*|*/./*|*/../*) exit 83 ;; esac
+paths="$HOME$bin$unit$config"
+[ "$(printf '%s' "$paths" | LC_ALL=C tr -d '[:cntrl:]')" = "$paths" ] || exit 83
+for tool in ${libraryTools.join(" ")}; do
+  case " $probe_tools" in *" $tool "*) ;; *) exit 83 ;; esac
+done
+${librarySnapshotBody(categories)}`;
+}
 
 const common = `set -eu
 umask 077

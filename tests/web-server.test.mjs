@@ -9,6 +9,7 @@ import { createTools } from "../src/plugin.mjs";
 import { ProfileStore, profileRevision } from "../src/store.mjs";
 import { SessionManager } from "../src/sessions.mjs";
 import { RemoteManager } from "../src/remote.mjs";
+import { probeEnd, probeScript } from "../src/remote-scripts.mjs";
 import { echoServer, exchange, sshServer, temporary, until } from "./helpers.mjs";
 
 async function service(t) {
@@ -87,6 +88,42 @@ test("opening remote Web requires authentication and uses a freshly verified ser
   assert.deepEqual(opened, [link]);
 });
 
+test("closing the HTTP response cancels queued previews after their request bodies were read", async (t) => {
+  const signals = [], calls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const remote = { async preview(_id, action, { signal }) {
+    calls.push(action);
+    if (action === "backup") {
+      await gate;
+      assert.equal(signal.aborted, false);
+    }
+    return action;
+  } };
+  const { remote_preview } = createTools({}, {}, remote);
+  const web = await startManagementServer({ tools: { remote_preview: { ...remote_preview, execute(args, ctx) {
+    signals.push(ctx.abort);
+    return remote_preview.execute(args, ctx);
+  } } } });
+  t.after(() => { release(); return web.close(); });
+  const request = (action, signal) => fetch(new URL("api/call", web.url), {
+    method: "POST", signal, headers: { Authorization: `Bearer ${web.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ method: "remote_preview", args: { connectionId: "remote-alpha", action } }),
+  });
+  const first = request("backup"), controller = new AbortController();
+  await until(() => calls.length === 1);
+  const cancelled = assert.rejects(request("restart", controller.signal), { name: "AbortError" });
+  await until(() => signals.length === 2);
+  controller.abort();
+  await cancelled;
+  await until(() => signals[1].aborted);
+  const latest = request("stop");
+  release();
+  assert.deepEqual(await (await first).json(), { result: "backup" });
+  assert.deepEqual(await (await latest).json(), { result: "stop" });
+  assert.deepEqual(calls, ["backup", "stop"]);
+});
+
 test("management RPC exposes selected library categories and rejects changing scope at apply", async (t) => {
   const directory = await temporary(t), store = new ProfileStore(join(directory, "connections.json"));
   await store.save({ id: "remote-alpha", host: "fixture.invalid", username: "tester" });
@@ -94,7 +131,8 @@ test("management RPC exposes selected library categories and rejects changing sc
   const probe = { platform: "Linux", architecture: "x86_64", username: "tester", home: "/home/tester", binary: "/home/tester/.local/bin/magpie", configDirectory: "/home/tester/.config/magpie", installed: "true", tools: "sha256sum base64 mktemp tar readlink" };
   const probeText = "MIGPIE_REMOTE_V1\n" + Object.entries(probe).map(([key, value]) => `${key}\t${Buffer.from(value).toString("base64")}\n`).join("");
   const sessions = { status: () => ({ state: "connected" }), async execute(_id, command, { input }) {
-    if (command === "sh -s") return { code: 0, stdout: input.includes("MIGPIE_LIBRARY_V1") ? "MIGPIE_LIBRARY_V1\nJ\t0\t-\nG\tfalse\nC\t\n" : probeText };
+    const snapshot = "MIGPIE_LIBRARY_V1\nJ\t0\t-\nG\tfalse\nC\t\n";
+    if (command === "sh -s") return { code: 0, stdout: input === probeScript ? probeText : input.startsWith(probeScript) ? probeText + probeEnd + "\n" + snapshot : snapshot };
     const id = command.match(/job="\$base\/operations\/([a-f0-9-]{36})"/)[1];
     for await (const _ of input) { /* Consume the staged upload before replying. */ }
     return { code: 0, stdout: `MIGPIE_DONE\nMIGPIE_RESULT_V1\t${id}\tcompleted\t0\tnone\ttrue\nMIGPIE_LIBRARY_RESULT_V1\t${id}\tapplied\tunsupported\n` };
